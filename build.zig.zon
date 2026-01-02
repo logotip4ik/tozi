@@ -1,7 +1,7 @@
 .{
-    .name = .torrentilla,
+    .name = .tozi,
     .version = "0.0.0",
-    .fingerprint = 0x268c06118e85d22b,
+    .fingerprint = 0x672c2c4ab745ba85,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{},
     .paths = .{

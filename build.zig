@@ -3,19 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const mod = b.addModule("torrentilla", .{
+    const mod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
 
     const exe = b.addExecutable(.{
-        .name = "torrentilla",
+        .name = "tozi",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "torrentilla", .module = mod },
+                .{ .name = "tozi", .module = mod },
             },
         }),
     });
