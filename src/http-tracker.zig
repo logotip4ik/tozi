@@ -16,10 +16,6 @@ const DiscoverPeersOpts = struct {
 
 /// caller owns memory
 pub fn announce(alloc: std.mem.Allocator, opts: DiscoverPeersOpts) ![]const u8 {
-    if (builtin.is_test) {
-        return @embedFile("./test_files/http-announcement.bencode");
-    }
-
     var http: std.http.Client = .{ .allocator = alloc };
     defer http.deinit();
 
@@ -61,6 +57,11 @@ pub fn announce(alloc: std.mem.Allocator, opts: DiscoverPeersOpts) ![]const u8 {
 
     var stream: std.Io.Writer.Allocating = .init(alloc);
     errdefer stream.deinit();
+
+    if (builtin.is_test) {
+        std.debug.print("skipping actually announcing http tracker for tests\n", .{});
+        return @embedFile("./test_files/http-announcement.bencode");
+    }
 
     const res = try http.fetch(.{
         .keep_alive = false,

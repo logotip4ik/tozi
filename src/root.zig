@@ -96,5 +96,5 @@ test "parseTorrent - info hash" {
 }
 
 test {
-    _ = @import("./peers.zig");
+    _ = @import("./http-tracker.zig");
 }
