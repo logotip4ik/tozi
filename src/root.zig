@@ -71,7 +71,7 @@ pub fn parseTorrent(alloc: std.mem.Allocator, reader: *std.Io.Reader) !Torrent {
 }
 
 test "parseTorrent - simple" {
-    const file = @embedFile("./testing.torrent");
+    const file = @embedFile("./test_files/testing.torrent");
     var reader: std.Io.Reader = .fixed(file);
 
     var torrent = try parseTorrent(std.testing.allocator, &reader);
@@ -79,7 +79,7 @@ test "parseTorrent - simple" {
 }
 
 test "parseTorrent - info hash" {
-    const file = @embedFile("./testing.torrent");
+    const file = @embedFile("./test_files/testing.torrent");
     var reader: std.Io.Reader = .fixed(file);
 
     var torrent = try parseTorrent(std.testing.allocator, &reader);
