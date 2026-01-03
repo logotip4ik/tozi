@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const bencode = @import("bencode.zig");
-const torrent = @import("torrent.zig");
+const Torrent = @import("torrent.zig");
 
 const DEFAULT_LISTENING_PORT = 6881;
 
@@ -56,6 +56,11 @@ fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
 
     uri.query = .{ .raw = newQuery };
 
+    if (builtin.is_test) {
+        std.debug.print("skipping sending announce request to {f}\n", .{uri});
+        return try alloc.dupe(u8, @embedFile("./test_files/announce.bencode"));
+    }
+
     std.debug.print("sending request to {f}\n", .{uri});
 
     var stream: std.Io.Writer.Allocating = .init(alloc);
@@ -82,16 +87,16 @@ fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
 test "getAnnounce" {
     const torrentString = @embedFile("./test_files/custom.torrent");
 
-    var t = try torrent.parseTorrentFromSlice(std.testing.allocator, torrentString);
-    defer t.deinit(std.testing.allocator);
+    var torrent: Torrent = try .fromtSlice(std.testing.allocator, torrentString);
+    defer torrent.deinit(std.testing.allocator);
 
     const announcement = try getAnnounce(std.testing.allocator, .{
-        .announce = t.announce,
-        .infoHash = &t.infoHash,
-        .left = t.totalLen,
+        .announce = torrent.announce,
+        .infoHash = &torrent.infoHash,
+        .left = torrent.totalLen,
         .downloaded = 0,
         .uploaded = 0,
-        .peerId = &getPeerId(),
+        .peerId = &generatePeerId(),
     });
     defer std.testing.allocator.free(announcement);
 }
@@ -117,18 +122,16 @@ const Peer = struct {
         try self.address.format(w);
     }
 };
-const Peers = std.array_list.Aligned(std.net.Ip4Address, null);
+const Peers = std.array_list.Aligned(std.net.Address, null);
 
-pub fn getPeers(alloc: std.mem.Allocator, t: torrent.Torrent) !Peers {
-    const peerId = getPeerId();
-
+pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Peers {
     const announcement = try getAnnounce(alloc, .{
         .peerId = &peerId,
         .uploaded = 0,
         .downloaded = 0,
-        .left = t.totalLen,
-        .infoHash = &t.infoHash,
-        .announce = t.announce,
+        .left = torrent.totalLen,
+        .infoHash = &torrent.infoHash,
+        .announce = torrent.announce,
     });
     defer alloc.free(announcement);
 
@@ -153,7 +156,7 @@ pub fn getPeers(alloc: std.mem.Allocator, t: torrent.Torrent) !Peers {
         const port = std.mem.readInt(u16, peerString[4..6], .big);
 
         const peer = peersArray.addOneAssumeCapacity();
-        peer.* = .init(peerString[0..4].*, port);
+        peer.* = .initIp4(peerString[0..4].*, port);
     }
 
     return peersArray;
@@ -162,10 +165,10 @@ pub fn getPeers(alloc: std.mem.Allocator, t: torrent.Torrent) !Peers {
 test "getPeers" {
     const file = @embedFile("./test_files/custom.torrent");
 
-    var t = try torrent.parseTorrentFromSlice(std.testing.allocator, file);
-    defer t.deinit(std.testing.allocator);
+    var torrent:Torrent = try .fromSlice(std.testing.allocator, file);
+    defer torrent.deinit(std.testing.allocator);
 
-    var peers = try getPeers(std.testing.allocator, t);
+    var peers = try getPeers(std.testing.allocator, torrent);
     defer peers.deinit(std.testing.allocator);
 
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -182,7 +185,7 @@ test "getPeers" {
     , writer.writer.buffered());
 }
 
-fn getPeerId() [20]u8 {
+pub fn generatePeerId() [20]u8 {
     var id: [20]u8 = undefined;
 
     @memcpy(id[0..8], "-TZ0001-");

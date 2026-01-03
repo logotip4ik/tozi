@@ -7,32 +7,32 @@ pub const File = struct {
 };
 const Files = std.array_list.Aligned(File, null);
 
-pub const Torrent = struct {
-    value: bencode.Value,
+const Torrent = @This();
 
-    announce: []const u8,
-    files: Files,
-    dirname: ?[]const u8 = null,
-    pieces: []const u8,
-    pienceLen: usize,
-    infoHash: [std.crypto.hash.Sha1.digest_length]u8,
-    totalLen: usize,
+value: bencode.Value,
 
-    announceList: ?[]const []const u8,
-    creation_date: ?usize,
-    created_by: ?[]const u8,
+announce: []const u8,
+files: Files,
+dirname: ?[]const u8 = null,
+pieces: []const u8,
+pienceLen: usize,
+infoHash: [std.crypto.hash.Sha1.digest_length]u8,
+totalLen: usize,
 
-    pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
-        for (self.files.items) |file| {
-            alloc.free(file.path);
-        }
-        self.files.deinit(alloc);
+announceList: ?[]const []const u8,
+creation_date: ?usize,
+created_by: ?[]const u8,
 
-        if (self.announceList) |list| alloc.free(list);
-
-        self.value.deinit(alloc);
+pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
+    for (self.files.items) |file| {
+        alloc.free(file.path);
     }
-};
+    self.files.deinit(alloc);
+
+    if (self.announceList) |list| alloc.free(list);
+
+    self.value.deinit(alloc);
+}
 
 pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {
     _ = try reader.discardShort(info.start);
@@ -55,7 +55,7 @@ pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto
     return hash.finalResult();
 }
 
-pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
+pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     var reader: std.Io.Reader = .fixed(slice);
 
     var value = try bencode.parseValue(alloc, &reader, 0);
@@ -151,7 +151,7 @@ pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8
 test "parseTorrent - simple" {
     const file = @embedFile("./test_files/custom-folder.torrent");
 
-    var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
+    var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("src", torrent.dirname.?);
@@ -161,7 +161,7 @@ test "parseTorrent - simple" {
 test "parseTorrent - single file" {
     const file = @embedFile("./test_files/custom.torrent");
 
-    var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
+    var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expect(torrent.dirname == null);
@@ -172,7 +172,7 @@ test "parseTorrent - single file" {
 test "parseTorrent - info hash for simple torrent" {
     const file = @embedFile("./test_files/custom.torrent");
 
-    var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
+    var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(
@@ -184,7 +184,7 @@ test "parseTorrent - info hash for simple torrent" {
 test "parseTorrent - info hash" {
     const file = @embedFile("./test_files/custom-folder.torrent");
 
-    var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
+    var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(
