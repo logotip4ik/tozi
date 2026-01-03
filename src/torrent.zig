@@ -2,22 +2,17 @@ const std = @import("std");
 const bencode = @import("bencode.zig");
 
 pub const File = struct {
-    name: []const u8,
+    path: []const []const u8,
     len: usize,
 };
 const Files = std.array_list.Aligned(File, null);
-
-pub const Dir = struct {
-    name: []const u8,
-};
-const Dirs = std.array_list.Aligned(Dir, null);
 
 pub const Torrent = struct {
     value: bencode.Value,
 
     announce: []const u8,
     files: Files,
-    dirs: Dirs,
+    dirname: ?[]const u8 = null,
     pieces: []const u8,
     pienceLen: usize,
     infoHash: [std.crypto.hash.Sha1.digest_length]u8,
@@ -27,12 +22,15 @@ pub const Torrent = struct {
     creation_date: ?usize,
     created_by: ?[]const u8,
 
-    /// reader must be recreated to seek from start of the file
     pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
-        self.value.deinit(alloc);
-        self.dirs.deinit(alloc);
+        for (self.files.items) |file| {
+            alloc.free(file.path);
+        }
         self.files.deinit(alloc);
+
         if (self.announceList) |list| alloc.free(list);
+
+        self.value.deinit(alloc);
     }
 };
 
@@ -84,28 +82,30 @@ pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8
     var files: Files = .empty;
     errdefer files.deinit(alloc);
 
-    var dirs: Dirs = .empty;
-    errdefer files.deinit(alloc);
-
     var totalLen: usize = 0;
+    var dirname: ?[]const u8 = null;
 
     if (info.inner.dict.get("files")) |infoFiles| {
-        const dirname = info.inner.dict.get("name") orelse return error.NoDirName;
+        const dirnameValue = info.inner.dict.get("name") orelse return error.NoDirName;
 
-        try dirs.append(alloc, .{ .name = dirname.inner.string });
+        dirname = dirnameValue.inner.string;
 
         for (infoFiles.inner.list.items) |file| {
-            const filenames = file.inner.dict.get("path") orelse return error.NoFilePath;
+            const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
             const len = file.inner.dict.get("length") orelse return error.NoFileLength;
 
             totalLen += len.inner.int;
 
-            for (filenames.inner.list.items) |filename| {
-                try files.append(alloc, .{
-                    .name = filename.inner.string,
-                    .len = len.inner.int,
-                });
+            const path = try alloc.alloc([]const u8, chunks.inner.list.items.len);
+
+            for (chunks.inner.list.items, 0..) |filename, i| {
+                path[i] = filename.inner.string;
             }
+
+            try files.append(alloc, .{
+                .path = path,
+                .len = len.inner.int,
+            });
         }
     } else {
         const filename = info.inner.dict.get("name") orelse return error.NoFileName;
@@ -113,8 +113,11 @@ pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8
 
         totalLen += len.inner.int;
 
+        const path = try alloc.alloc([]const u8, 1);
+        path[0] = filename.inner.string;
+
         try files.append(alloc, .{
-            .name = filename.inner.string,
+            .path = path,
             .len = len.inner.int,
         });
     }
@@ -137,7 +140,7 @@ pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8
         .created_by = null,
         .creation_date = null,
         .files = files,
-        .dirs = dirs,
+        .dirname = dirname,
         .pieces = pieces.inner.string,
         .pienceLen = pienceLen.inner.int,
         .infoHash = infoHash,
@@ -146,13 +149,13 @@ pub fn parseTorrentFromSlice(alloc: std.mem.Allocator, noalias slice: []const u8
 }
 
 test "parseTorrent - simple" {
-    const file = @embedFile("./test_files/testing.torrent");
+    const file = @embedFile("./test_files/custom-folder.torrent");
 
     var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(1, torrent.dirs.items.len);
-    try std.testing.expectEqual(2, torrent.files.items.len);
+    try std.testing.expectEqualStrings("src", torrent.dirname.?);
+    try std.testing.expectEqual(7, torrent.files.items.len);
 }
 
 test "parseTorrent - single file" {
@@ -161,7 +164,7 @@ test "parseTorrent - single file" {
     var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(0, torrent.dirs.items.len);
+    try std.testing.expect(torrent.dirname == null);
     try std.testing.expectEqual(1, torrent.files.items.len);
     try std.testing.expectEqualStrings("http://localhost:6881/announce", torrent.announce);
 }
@@ -173,19 +176,19 @@ test "parseTorrent - info hash for simple torrent" {
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(
-        "0d236f8a8da1f617140e926bdc7ed69184669816",
+        "9e947546139508901953291490941744bf9395bc",
         &std.fmt.bytesToHex(&torrent.infoHash, .lower),
     );
 }
 
 test "parseTorrent - info hash" {
-    const file = @embedFile("./test_files/testing.torrent");
+    const file = @embedFile("./test_files/custom-folder.torrent");
 
     var torrent = try parseTorrentFromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(
-        "dd08c5e0f873f31687ea4b8a6ecfd0153d6d524c",
+        "f0c4cb2d359b74a5f418344749c7441ae2639d33",
         &std.fmt.bytesToHex(&torrent.infoHash, .lower),
     );
 }
