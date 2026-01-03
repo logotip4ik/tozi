@@ -18,7 +18,7 @@ const GetAnnounceOpts = struct {
 };
 
 /// caller owns memory
-pub fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
+fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
     var http: std.http.Client = .{ .allocator = alloc };
     defer http.deinit();
 
@@ -61,11 +61,6 @@ pub fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 
     var stream: std.Io.Writer.Allocating = .init(alloc);
     errdefer stream.deinit();
 
-    if (builtin.is_test) {
-        std.debug.print("skipping actually announcing http tracker for tests\n", .{});
-        return try alloc.dupe(u8, @embedFile("./test_files/http-announcement.bencode"));
-    }
-
     const res = try http.fetch(.{
         .keep_alive = false,
         .method = .GET,
@@ -85,27 +80,15 @@ pub fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 
 }
 
 test "getAnnounce" {
-    const torrentString = @embedFile("./test_files/testing.torrent");
+    const torrentString = @embedFile("./test_files/custom.torrent");
 
     var t = try torrent.parseTorrentFromSlice(std.testing.allocator, torrentString);
     defer t.deinit(std.testing.allocator);
 
-    const files = t.info.get("files") orelse unreachable;
-    const totalLen = blk: {
-        var sum: usize = 0;
-
-        for (files.inner.list.items) |file| {
-            const lenVal = file.inner.dict.get("length") orelse unreachable;
-            sum += lenVal.inner.int;
-        }
-
-        break :blk sum;
-    };
-
     const announcement = try getAnnounce(std.testing.allocator, .{
         .announce = t.announce,
         .infoHash = &t.infoHash,
-        .left = totalLen,
+        .left = t.totalLen,
         .downloaded = 0,
         .uploaded = 0,
         .peerId = &getPeerId(),
@@ -167,20 +150,17 @@ pub fn getPeers(alloc: std.mem.Allocator, t: torrent.Torrent) !Peers {
     while (window.next()) |peerString| : (i += 1) {
         std.debug.assert(peerString.len == 6);
 
-        const addr = std.mem.readInt(u32, peerString[0..4], .big);
         const port = std.mem.readInt(u16, peerString[4..6], .big);
 
         const peer = peersArray.addOneAssumeCapacity();
-        peer.* = std.net.Ip4Address{
-            .sa = .{ .addr = addr, .port = port },
-        };
+        peer.* = .init(peerString[0..4].*, port);
     }
 
     return peersArray;
 }
 
 test "getPeers" {
-    const file = @embedFile("./test_files/testing.torrent");
+    const file = @embedFile("./test_files/custom.torrent");
 
     var t = try torrent.parseTorrentFromSlice(std.testing.allocator, file);
     defer t.deinit(std.testing.allocator);
@@ -196,11 +176,8 @@ test "getPeers" {
     }
 
     try std.testing.expectEqualStrings(
-        \\225.79.231.94:57626
-        \\125.209.214.91:1246
-        \\10.194.105.176:46584
-        \\217.32.163.188:13460
-        \\138.80.169.193:54984
+        \\192.168.97.1:6881
+        \\127.0.0.1:9000
         \\
     , writer.writer.buffered());
 }
