@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const exe = b.addExecutable(.{
+    const opts = std.Build.ExecutableOptions{
         .name = "tozi",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -18,9 +18,14 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tozi", .module = mod },
             },
         }),
-    });
+    };
 
+    const exe = b.addExecutable(opts);
     b.installArtifact(exe);
+
+    const checkExe = b.addExecutable(opts);
+    const checkStep = b.step("check", "Run check on exe");
+    checkStep.dependOn(&checkExe.step);
 
     const run_step = b.step("run", "Run the app");
 
