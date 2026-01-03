@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig");
 
-const DEFAULT_LISTENING_PORT = 6881;
+const DEFAULT_LISTENING_PORT = 6882;
 
 const QueryParam = struct { []const u8, []const u8 };
 const GetAnnounceOpts = struct {
@@ -87,7 +87,7 @@ fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
 test "getAnnounce" {
     const torrentString = @embedFile("./test_files/custom.torrent");
 
-    var torrent: Torrent = try .fromtSlice(std.testing.allocator, torrentString);
+    var torrent: Torrent = try .fromSlice(std.testing.allocator, torrentString);
     defer torrent.deinit(std.testing.allocator);
 
     const announcement = try getAnnounce(std.testing.allocator, .{
@@ -155,8 +155,7 @@ pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Pee
 
         const port = std.mem.readInt(u16, peerString[4..6], .big);
 
-        const peer = peersArray.addOneAssumeCapacity();
-        peer.* = .initIp4(peerString[0..4].*, port);
+        peersArray.appendAssumeCapacity(.initIp4(peerString[0..4].*, port));
     }
 
     return peersArray;
@@ -165,10 +164,12 @@ pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Pee
 test "getPeers" {
     const file = @embedFile("./test_files/custom.torrent");
 
-    var torrent:Torrent = try .fromSlice(std.testing.allocator, file);
+    var torrent: Torrent = try .fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
-    var peers = try getPeers(std.testing.allocator, torrent);
+    const peerId = generatePeerId();
+
+    var peers = try getPeers(std.testing.allocator, peerId, torrent);
     defer peers.deinit(std.testing.allocator);
 
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
