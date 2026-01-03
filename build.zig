@@ -3,9 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
     const mod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .single_threaded = true,
     });
 
     const opts = std.Build.ExecutableOptions{
@@ -24,8 +27,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const checkExe = b.addExecutable(opts);
+    const checkMod = b.addLibrary(.{
+        .name = "libtozi",
+        .root_module = mod,
+    });
     const checkStep = b.step("check", "Run check on exe");
     checkStep.dependOn(&checkExe.step);
+    checkStep.dependOn(&checkMod.step);
 
     const run_step = b.step("run", "Run the app");
 
