@@ -17,6 +17,7 @@ dirname: ?[]const u8 = null,
 pieces: []const u8,
 pienceLen: usize,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
+bitfield: std.DynamicBitSetUnmanaged,
 totalLen: usize,
 
 announceList: ?[]const []const u8,
@@ -31,6 +32,7 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
 
     if (self.announceList) |list| alloc.free(list);
 
+    self.bitfield.deinit(alloc);
     self.value.deinit(alloc);
 }
 
@@ -128,6 +130,8 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     const pieces = info.inner.dict.get("pieces") orelse return error.NoPiencesField;
     const pienceLen = info.inner.dict.get("piece length") orelse return error.NoPieceLenField;
 
+    const numberOfPieces = pieces.len / 20;
+
     return Torrent{
         .value = value,
         .announce = if (dict.get("announce")) |v|
@@ -145,6 +149,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         .pienceLen = pienceLen.inner.int,
         .infoHash = infoHash,
         .totalLen = totalLen,
+        .bitfield = try .initEmpty(alloc, numberOfPieces)
     };
 }
 
