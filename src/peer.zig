@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Torrent = @import("torrent.zig");
+const PieceManager = @import("piece-manager.zig");
 const KQ = @import("kq.zig");
 
 const TCP_HANDSHAKE_LEN = 68;
@@ -91,6 +92,7 @@ const Peer = struct {
 
     choked: bool = true,
     interested: bool = false,
+    workingPiece: ?usize,
 
     buf: std.array_list.Aligned(u8, null) = .empty,
 
@@ -259,6 +261,7 @@ pub fn loop(
     alloc: std.mem.Allocator,
     peerId: [20]u8,
     torrent: *Torrent,
+    pieceManager: *PieceManager,
     addrs: []const std.net.Address,
 ) !void {
     var kq: KQ = try .init(alloc);
@@ -359,7 +362,10 @@ pub fn loop(
                 },
                 .messageStart => {
                     const len = try peer.readInt(u32, .big);
-                    if (len == 0) continue;
+                    if (len == 0) {
+                        // keep alive, send requests ?
+                        continue;
+                    }
 
                     const id = try peer.readInt(u8, .big);
                     const idEnum = std.enums.fromInt(Peer.MessageId, id) orelse {
@@ -386,9 +392,24 @@ pub fn loop(
                         },
                         .unchoke => {
                             defer peer.state = .messageStart;
-
                             peer.choked = false;
+
                             // TODO: Logic: If peer_has_what_I_need, sendRequests()
+                            // This sendRequest should send multiple requests for chunks from single
+                            // piece at once. I think we can send all chunk requests from single
+                            // piece. And then wait for receive them all.
+
+                            // peer.buf.clearRetainingCapacity();
+                            // try peer.buf.ensureUnusedCapacity(alloc, 17);
+                            // peer.buf.items.len = 17;
+                            //
+                            // const buf = peer.buf.items;
+                            // std.mem.writeInt(u32, buf[0..4], 13, .big);
+                            // buf[4] = 6; // ID for Request
+                            //
+                            // std.mem.writeInt(u32, buf[5..9], index, .big);
+                            // std.mem.writeInt(u32, buf[9..13], begin, .big);
+                            // std.mem.writeInt(u32, buf[13..17], len, .big);
                         },
                         .have => {
                             defer peer.state = .messageStart;
@@ -400,20 +421,19 @@ pub fn loop(
                             std.log.debug("received bitfield {b}", .{bytes[0]});
                             try peer.setBitfield(alloc, bytes);
 
-                            if (peer.findMissing(torrent.bitfield)) |_| {
+                            if (pieceManager.getWorkingPiece(peer.bitfield)) |index| {
                                 std.log.debug("peer {d} has interesting pieces", .{peer.socket.fd});
 
+                                peer.workingPiece = index;
+
                                 peer.buf.clearRetainingCapacity();
-                                try peer.buf.ensureUnusedCapacity(alloc, 5);
-                                peer.buf.items.len = 5;
+                                try peer.buf.resize(alloc, 5);
 
-                                const len = 1;
-                                const id: Peer.MessageId = .interested;
-                                std.mem.writeInt(u32, peer.buf.items[0..4], len, .big);
-                                peer.buf.items[4] = @intFromEnum(id);
-
-                                peer.state = .{ .message = .{ .id = id, .len = len } };
+                                peer.state = .{ .message = .{ .id = .interested, .len = 1 } };
                                 peer.socket.state = .write;
+
+                                std.mem.writeInt(u32, peer.buf.items[0..4], peer.state.message.len, .big);
+                                peer.buf.items[4] = @intFromEnum(peer.state.message.id);
 
                                 try kq.subscribe(peer.socket.fd, .write, event.kevent.udata);
                             } else {

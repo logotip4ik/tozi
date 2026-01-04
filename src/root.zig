@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Torrent = @import("torrent.zig");
+const PieceManager = @import("piece-manager.zig");
 const httpTracker = @import("http-tracker.zig");
 const peer = @import("peer.zig");
 
@@ -24,7 +25,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void 
 
     comptime std.debug.assert(builtin.os.tag == .macos);
 
-    try peer.loop(alloc, peerId, &torrent, peers.items);
+    const numberOfPieces = torrent.pieces.len / 20;
+
+    var pieces: PieceManager = try .init(alloc, numberOfPieces);
+    defer pieces.deinit(alloc);
+
+    try peer.loop(alloc, peerId, &torrent, &pieces, peers.items);
 }
 
 test {
