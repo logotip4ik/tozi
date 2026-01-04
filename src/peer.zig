@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Torrent = @import("torrent.zig");
-const KQueue = @import("kqueue.zig");
+const KQ = @import("kq.zig");
 
 const TCP_HANDSHAKE_LEN = 68;
 const TcpHandshake = extern struct {
@@ -37,10 +37,9 @@ comptime {
 const Socket = struct {
     fd: std.posix.fd_t,
 
-    state: State = .init,
+    state: State = .write,
 
     pub const State = enum {
-        init,
         write,
         read,
         dead,
@@ -67,22 +66,6 @@ const Socket = struct {
     }
 
     pub fn getNewState(self: *Socket, e: std.posix.Kevent) error{ ConnectionRefused, FFlags, Unknown }!State {
-        if (e.flags & std.c.EV.EOF != 0) {
-            const fallback = std.c.E.CONNREFUSED;
-            const err = std.meta.intToEnum(std.c.E, e.fflags) catch blk: {
-                std.debug.print("unknown error flag: {d}, fallbacking to {s}", .{
-                    e.fflags,
-                    @tagName(fallback),
-                });
-                break :blk fallback;
-            };
-
-            return switch (err) {
-                .CONNREFUSED => return error.ConnectionRefused,
-                else => return error.FFlags,
-            };
-        }
-
         if (e.filter == std.c.EVFILT.WRITE and self.state == .init) {
             return .write;
         } else if (e.filter == std.c.EVFILT.READ) {
@@ -104,7 +87,7 @@ const Socket = struct {
 const Peer = struct {
     socket: Socket,
 
-    state: State = .init,
+    state: State = .handshake,
 
     choked: bool = true,
     interested: bool = false,
@@ -114,7 +97,6 @@ const Peer = struct {
     bitfield: std.DynamicBitSetUnmanaged,
 
     pub const State = union(enum) {
-        init,
         handshake,
         messageStart,
         message: struct { id: MessageId, len: u32 },
@@ -135,12 +117,29 @@ const Peer = struct {
         port = 9,
     };
 
-    pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Peer, alloc: std.mem.Allocator, k: KQ) void {
         if (self.state == .dead) {
             return;
         }
 
         self.state = .dead;
+
+        k.unsubscribe(self.socket.fd, .read) catch |err| {
+            std.log.debug("received err while unsubscribing from read for socket {d} with {s}\n", .{
+                self.socket.fd,
+                @errorName(err),
+            });
+        };
+        k.unsubscribe(self.socket.fd, .write) catch |err| switch (err) {
+            error.EventNotFound => {}, // already unsubscribed
+            else => {
+                std.log.debug("received err while unsubscribing from write for socket {d} with {s}\n", .{
+                    self.socket.fd,
+                    @errorName(err),
+                });
+            },
+        };
+
         self.socket.close();
         self.buf.deinit(alloc);
         self.bitfield.deinit(alloc);
@@ -206,6 +205,43 @@ const Peer = struct {
         return null;
     }
 
+    pub fn writeTotalBuf(self: *Peer, alloc: std.mem.Allocator, slice: []const u8) !?usize {
+        if (self.buf.items.len == slice.len) {
+            return slice.len;
+        }
+
+        try self.buf.ensureTotalCapacity(alloc, slice.len);
+
+        const len = self.buf.items.len;
+        const wrote = try std.posix.write(self.socket.fd, slice[len..]);
+        try self.buf.appendSlice(alloc, slice[len .. len + wrote]);
+
+        if (wrote == slice.len) {
+            return wrote;
+        }
+
+        return null;
+    }
+
+    /// returns null when there is still data pending to be written
+    pub fn writeBuf(self: *Peer) !?void {
+        if (self.buf.items.len == 0) {
+            return;
+        }
+
+        const wrote = try std.posix.write(self.socket.fd, self.buf.items);
+
+        const left = self.buf.items.len - wrote;
+        if (left == 0) {
+            return;
+        }
+
+        @memmove(self.buf.items[0..left], self.buf.items[wrote .. wrote + left]);
+        self.buf.items.len = left;
+
+        return null;
+    }
+
     pub fn findMissing(self: Peer, other: std.DynamicBitSetUnmanaged) ?usize {
         var i: usize = 0;
 
@@ -225,12 +261,12 @@ pub fn loop(
     torrent: *Torrent,
     addrs: []const std.net.Address,
 ) !void {
-    var kqueue: KQueue = try .init();
-    defer kqueue.deinit();
+    var kq: KQ = try .init(alloc);
+    defer kq.deinit();
 
     var peers = try alloc.alloc(Peer, addrs.len);
     defer {
-        for (peers) |*peer| peer.deinit(alloc);
+        for (peers) |*peer| peer.deinit(alloc, kq);
         alloc.free(peers);
     }
 
@@ -242,8 +278,8 @@ pub fn loop(
             .bitfield = .{},
         };
 
-        try kqueue.subscribe(socket.fd, .read, @intFromPtr(&peers[i]));
-        try kqueue.subscribe(socket.fd, .write, @intFromPtr(&peers[i]));
+        try kq.subscribe(socket.fd, .read, @intFromPtr(&peers[i]));
+        try kq.subscribe(socket.fd, .write, @intFromPtr(&peers[i]));
     }
 
     var deadCount: usize = 0;
@@ -251,62 +287,47 @@ pub fn loop(
     const handshake = TcpHandshake{ .infoHash = torrent.infoHash, .peerId = peerId };
     const handshakeBytes = std.mem.asBytes(&handshake);
 
-    while (try kqueue.next()) |e| {
-        std.debug.assert(e.udata != 0);
+    while (try kq.next()) |event| {
+        const peer: *Peer = @ptrFromInt(event.kevent.udata);
 
-        const peer: *Peer = @ptrFromInt(e.udata);
-
-        peer.socket.state = peer.socket.getNewState(e) catch |err| switch (err) {
-            error.ConnectionRefused => blk: {
-                std.debug.print("Connection refused for {any}\n", .{e});
-                break :blk .dead;
-            },
-            else => return err,
+        if (event.err) |err| if (peer.state != .dead) {
+            std.log.err("enountered {s} for {any}", .{ @tagName(err), peer });
+            peer.deinit(alloc, kq);
+            deadCount += 1;
         };
 
-        if (peer.socket.state != .dead) {
-            std.debug.print("received peer: {any}\n", .{peer});
+        if (deadCount == peers.len) {
+            return error.AllStreamsDead;
         }
 
-        sw: switch (peer.socket.state) {
-            .init => unreachable,
-            .dead => {
-                deadCount += 1;
+        switch (event.op) {
+            .write => if (peer.socket.state == .write) switch (peer.state) {
+                .dead => {},
+                .handshake => {
+                    std.log.debug("sent handshake to socket {d}", .{peer.socket.fd});
+                    _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
 
-                try kqueue.unsubscribe(peer.socket.fd, .read, 0);
-                kqueue.unsubscribe(peer.socket.fd, .write, 0) catch |err| switch (err) {
-                    error.EventNotFound => {}, // already unsubscribed
-                    else => return err,
-                };
-
-                peer.deinit(alloc);
-
-                if (deadCount == peers.len) {
-                    return error.AllStreamsDead;
-                }
-            },
-            .write => if (peer.state == .init) {
-                if (peer.buf.items.len == 0) {
-                    try peer.buf.appendSlice(alloc, handshakeBytes);
-                }
-
-                const sent = try std.posix.write(peer.socket.fd, peer.buf.items);
-                const left = peer.buf.items.len - sent;
-                std.log.debug("sent handshake to socket {d}", .{peer.socket.fd});
-
-                if (left == 0) {
                     peer.state = .handshake;
+                    peer.socket.state = .read;
                     peer.buf.clearRetainingCapacity();
-                    try peer.buf.ensureTotalCapacity(alloc, TCP_HANDSHAKE_LEN);
 
-                    try kqueue.unsubscribe(peer.socket.fd, .write, e.udata);
-                } else {
-                    try peer.buf.replaceRangeBounded(0, left, peer.buf.items[sent .. sent + left]);
-                }
+                    try kq.unsubscribe(peer.socket.fd, .write);
+                },
+                .message => |message| {
+                    if (peer.buf.items.len == 0) continue;
+                    try peer.writeBuf() orelse continue;
+
+                    std.log.debug("sent message {s} to socket {d}", .{ @tagName(message.id), peer.socket.fd });
+
+                    peer.state = .messageStart;
+                    peer.socket.state = .read;
+
+                    try kq.unsubscribe(peer.socket.fd, .write);
+                },
+                else => unreachable,
             },
-            .read => switch (peer.state) {
-                .init => unreachable,
-                .dead => continue,
+            .read => if (peer.socket.state == .read) switch (peer.state) {
+                .dead => {},
                 .handshake => {
                     const bytes = try peer.readTotalBuf(alloc, TCP_HANDSHAKE_LEN) orelse continue;
 
@@ -332,7 +353,8 @@ pub fn loop(
                         peer.state = .messageStart;
                         std.log.debug("received valid TcpHandshake for socket {d}", .{peer.socket.fd});
                     } else {
-                        continue :sw .dead;
+                        deadCount += 1;
+                        peer.deinit(alloc, kq);
                     }
                 },
                 .messageStart => {
@@ -347,39 +369,60 @@ pub fn loop(
 
                     std.log.debug("read message start ({s}, len: {d})", .{
                         @tagName(idEnum),
-                        len - 1,
+                        len,
                     });
+
                     peer.state = .{ .message = .{ .id = idEnum, .len = len - 1 } };
                 },
                 .message => |message| {
                     const bytes = try peer.readTotalBuf(alloc, message.len) orelse continue;
 
-                    // this is safe because we wouldn't get here if we didn't read all `message.len`
-                    // bytes from kernel
-                    defer peer.buf.clearRetainingCapacity();
-                    defer peer.state = .messageStart;
-
                     std.log.debug("received {s} message", .{@tagName(message.id)});
 
                     switch (message.id) {
-                        .choke => peer.choked = true,
+                        .choke => {
+                            defer peer.state = .messageStart;
+                            peer.choked = true;
+                        },
                         .unchoke => {
+                            defer peer.state = .messageStart;
+
                             peer.choked = false;
-                            break;
                             // TODO: Logic: If peer_has_what_I_need, sendRequests()
                         },
                         .have => {
+                            defer peer.state = .messageStart;
+
                             const index = std.mem.readInt(u32, bytes[0..4], .big);
                             peer.bitfield.set(index);
                         },
                         .bitfield => {
-                            std.debug.print("received bitfield {b}\n", .{bytes[0]});
+                            std.log.debug("received bitfield {b}", .{bytes[0]});
                             try peer.setBitfield(alloc, bytes);
 
                             if (peer.findMissing(torrent.bitfield)) |_| {
-                                // peer has pieces that i don't have
-                                std.log.debug("has interesting piece", .{});
-                                break;
+                                std.log.debug("peer {d} has interesting pieces", .{peer.socket.fd});
+
+                                peer.buf.clearRetainingCapacity();
+                                try peer.buf.ensureUnusedCapacity(alloc, 5);
+                                peer.buf.items.len = 5;
+
+                                const len = 1;
+                                const id: Peer.MessageId = .interested;
+                                std.mem.writeInt(u32, peer.buf.items[0..4], len, .big);
+                                peer.buf.items[4] = @intFromEnum(id);
+
+                                peer.state = .{ .message = .{ .id = id, .len = len } };
+                                peer.socket.state = .write;
+
+                                try kq.subscribe(peer.socket.fd, .write, event.kevent.udata);
+                            } else {
+                                std.log.debug("peer {d} doesn't have interesting pieces\n", .{
+                                    peer.socket.fd,
+                                });
+
+                                deadCount += 1;
+                                peer.deinit(alloc, kq);
                             }
                         },
                         .piece => { // PIECE (The Data)
@@ -387,18 +430,19 @@ pub fn loop(
                             // const begin = std.mem.readInt(u32, bytes[4..8], .big);
                             // const block = bytes[8..];
                             // try storeBlock(index, begin, block);
+                            defer peer.state = .messageStart;
                         },
                         .request, // Peer requested block from you (Ignore if leaching)
                         .interested, // Peer is interested in you (Ignore if leaching)
                         .not_interested, // Peer not interested (Ignore)
                         .cancel,
                         .port,
-                        => {},
+                        => {
+                            defer peer.state = .messageStart;
+                        },
                     }
                 },
-                .ready => {
-                    // const len =
-                },
+                else => unreachable,
             },
         }
     }

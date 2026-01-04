@@ -171,7 +171,7 @@ test "parseTorrent - single file" {
 
     try std.testing.expect(torrent.dirname == null);
     try std.testing.expectEqual(1, torrent.files.items.len);
-    try std.testing.expectEqualStrings("http://localhost:6881/announce", torrent.announce);
+    try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.announce);
 }
 
 test "parseTorrent - info hash for simple torrent" {
