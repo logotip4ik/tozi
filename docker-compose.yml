@@ -13,6 +13,7 @@ services:
       - ./testing-torrent/downloads:/downloads
     ports:
       - 8080:8080
+      - 9000:9000
       - 6881:6881
       - 6881:6881/udp
     restart: unless-stopped
