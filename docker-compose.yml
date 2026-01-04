@@ -7,7 +7,7 @@ services:
       - PGID=1000
       - TZ=Etc/UTC
       - WEBUI_PORT=8080
-      - TORRENTING_PORT=9000
+      - TORRENTING_PORT=6881
     volumes:
       - ./testing-torrent/config:/config
       - ./testing-torrent/downloads:/downloads
