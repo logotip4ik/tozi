@@ -41,7 +41,7 @@ pub fn getPieceSize(self: Torrent, index: usize) u32 {
 
     if (index < numberOfPieces - 1) {
         @branchHint(.likely);
-        return self.pienceLen;
+        return @intCast(self.pienceLen);
     }
 
     return @intCast(self.totalLen - (index * self.pienceLen));

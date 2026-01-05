@@ -144,7 +144,7 @@ pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Pee
         return error.NoPeersField;
     };
 
-    const peersNum = @divExact(peers.inner.string.len, 6);
+    const peersNum = try std.math.divExact(usize, peers.inner.string.len, 6);
     var peersArray: Peers = try .initCapacity(alloc, peersNum);
     errdefer peersArray.deinit(alloc);
 

@@ -20,18 +20,18 @@ pub fn init(alloc: std.mem.Allocator, numberOfPieces: usize) !Self {
     return .{ .pieces = pieces };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) !Self {
+pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.pieces.deinit(alloc);
 }
 
 pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?usize {
     for (self.pieces.items, 0..) |state, index| {
-        if (state != .Missing) {
+        if (state != .missing) {
             continue;
         }
 
         if (peerBitfield.isSet(index)) {
-            self.pieces.items[index] = .Downloading;
+            self.pieces.items[index] = .downloading;
             return index;
         }
     }

@@ -58,11 +58,22 @@ pub fn subscribe(self: Self, socketId: std.posix.fd_t, op: Op, udata: usize) !vo
     }, &.{}, null);
 }
 
-pub fn unsubscribe(self: Self, socketId: std.posix.fd_t, op: Op) !void {
+pub fn unsubscribe(self: *Self, socketId: std.posix.fd_t, op: Op) !void {
     const filter: isize = switch (op) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
     };
+
+    var iter = self.evs.iterator();
+    while (iter.next()) |item| {
+        if (item.filter == filter) {
+            if (iter.count == self.evs.items.len) {
+                _ = self.evs.remove();
+            } else {
+                _ = self.evs.removeIndex(iter.count);
+            }
+        }
+    }
 
     _ = try std.posix.kevent(self.fd, &[_]KEvent{
         KEvent{
