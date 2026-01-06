@@ -419,33 +419,32 @@ pub fn loop(
                             std.log.debug("received bitfield {b}", .{bytes[0]});
                             try peer.setBitfield(alloc, bytes);
 
-                            if (pieceManager.getWorkingPiece(peer.bitfield.?)) |index| {
-                                std.log.debug("peer {d} has interesting pieces", .{peer.socket});
-
-                                peer.workingPiece = @intCast(index);
-
-                                peer.buf.clearRetainingCapacity();
-
-                                const m: proto.Message = .interested;
-                                try peer.buf.resize(alloc, m.wireLen());
-
-                                const slice = peer.buf.items[0..m.wireLen()];
-                                var writer: std.Io.Writer = .fixed(slice);
-
-                                try m.writeMessage(&writer);
-
-                                peer.state = .{ .message = .{ .id = .interested, .len = 1 } };
-                                peer.direction = .write;
-
-                                try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                            } else {
+                            peer.workingPiece = pieceManager.getWorkingPiece(peer.bitfield.?) orelse {
                                 std.log.debug("peer {d} doesn't have interesting pieces\n", .{
                                     peer.socket,
                                 });
 
                                 deadCount += 1;
                                 peer.deinit(alloc, &kq);
-                            }
+                                continue;
+                            };
+
+                            std.log.debug("peer {d} has interesting pieces", .{peer.socket});
+
+                            peer.buf.clearRetainingCapacity();
+
+                            const m: proto.Message = .interested;
+                            try peer.buf.resize(alloc, m.wireLen());
+
+                            const slice = peer.buf.items[0..m.wireLen()];
+                            var writer: std.Io.Writer = .fixed(slice);
+
+                            try m.writeMessage(&writer);
+
+                            peer.state = .{ .message = .{ .id = .interested, .len = 1 } };
+                            peer.direction = .write;
+
+                            try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
                         .piece => { // PIECE (The Data)
                             // const index = std.mem.readInt(u32, bytes[0..4], .big);

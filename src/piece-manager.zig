@@ -24,7 +24,7 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.pieces.deinit(alloc);
 }
 
-pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?usize {
+pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u32 {
     for (self.pieces.items, 0..) |state, index| {
         if (state != .missing) {
             continue;
@@ -32,7 +32,7 @@ pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u
 
         if (peerBitfield.isSet(index)) {
             self.pieces.items[index] = .downloading;
-            return index;
+            return @intCast(index);
         }
     }
     return null;
