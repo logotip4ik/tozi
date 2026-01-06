@@ -4,6 +4,7 @@ const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
 const KQ = @import("kq.zig");
 const proto = @import("proto.zig");
+const utils = @import("utils.zig");
 
 const TCP_HANDSHAKE_LEN = 68;
 const TcpHandshake = extern struct {
@@ -15,7 +16,7 @@ const TcpHandshake = extern struct {
 
     const ValidateError = error{ InvalidPstrLen, InvalidPstr, InvalidInfoHash };
 
-    pub fn validate(self: TcpHandshake, other: TcpHandshake) ValidateError!bool {
+    pub fn validate(self: TcpHandshake, other: TcpHandshake) ValidateError!void {
         if (self.pstrlen != other.pstrlen) {
             return error.InvalidPstrLen;
         }
@@ -27,8 +28,6 @@ const TcpHandshake = extern struct {
         if (!std.mem.eql(u8, &self.infoHash, &other.infoHash)) {
             return error.InvalidInfoHash;
         }
-
-        return true;
     }
 };
 
@@ -304,42 +303,38 @@ pub fn loop(
                     return error.Unknown;
                 },
             },
-            .read => if (peer.direction == .read) switch (peer.state) {
-                .dead => {},
+            .read => if (peer.direction == .read) sw: switch (peer.state) {
+                .dead => if (peer.state != .dead) {
+                    peer.deinit(alloc, &kq);
+                    deadCount += 1;
+                },
                 .handshake => {
                     const bytes = try peer.readTotalBuf(alloc, TCP_HANDSHAKE_LEN) orelse continue;
 
                     defer peer.buf.clearRetainingCapacity();
                     const received: *TcpHandshake = @ptrCast(bytes);
 
-                    const valid = handshake.validate(received.*) catch |err| switch (err) {
-                        error.InvalidInfoHash => blk: {
-                            std.debug.print("received handshake with invalid info hash\n", .{});
-                            break :blk false;
-                        },
-                        error.InvalidPstr => blk: {
-                            std.debug.print("received handshake with invalid pstr\n", .{});
-                            break :blk false;
-                        },
-                        error.InvalidPstrLen => blk: {
-                            std.debug.print("received handshake with invalid pstr len\n", .{});
-                            break :blk false;
-                        },
+                    handshake.validate(received.*) catch |err| {
+                        std.log.err("received invalid handshake err {s}", .{@errorName(err)});
+                        continue :sw .dead;
                     };
 
-                    if (valid) {
-                        peer.state = .messageStart;
-                        std.log.debug("received valid TcpHandshake for socket {d}", .{peer.socket});
-                    } else {
-                        deadCount += 1;
-                        peer.deinit(alloc, &kq);
-                    }
+                    peer.state = .messageStart;
+                    std.log.debug("received valid TcpHandshake for socket {d}", .{peer.socket});
                 },
                 .messageStart => {
                     const len = try peer.readInt(u32, .big);
                     if (len == 0) {
                         // keep alive, send requests ?
                         continue;
+                    }
+
+                    if (len > 16 * 1024 * 1024) {
+                        std.log.err("received too large message {d}, dropping peer {d}", .{
+                            len,
+                            peer.socket,
+                        });
+                        continue :sw .dead;
                     }
 
                     const id = try peer.readInt(u8, .big);
@@ -356,9 +351,11 @@ pub fn loop(
                     peer.state = .{ .message = .{ .id = idEnum, .len = len - 1 } };
                 },
                 .message => |message| {
+                    utils.assert(message.len < 16 * 1024 * 1024);
+
                     const bytes = try peer.readTotalBuf(alloc, message.len) orelse continue;
 
-                    std.log.debug("received {s} message", .{@tagName(message.id)});
+                    std.log.debug("received message: {s}", .{@tagName(message.id)});
 
                     switch (message.id) {
                         .choke => {
@@ -424,9 +421,7 @@ pub fn loop(
                                     peer.socket,
                                 });
 
-                                deadCount += 1;
-                                peer.deinit(alloc, &kq);
-                                continue;
+                                continue :sw .dead;
                             };
 
                             std.log.debug("peer {d} has interesting pieces", .{peer.socket});
