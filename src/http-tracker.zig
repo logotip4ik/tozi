@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig");
+const utils = @import("utils.zig");
 
 const DEFAULT_LISTENING_PORT = 6882;
 
@@ -151,7 +152,7 @@ pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Pee
     var window = std.mem.window(u8, peers.inner.string, 6, 6);
     var i: u32 = 0;
     while (window.next()) |peerString| : (i += 1) {
-        std.debug.assert(peerString.len == 6);
+        utils.assert(peerString.len == 6);
 
         const port = std.mem.readInt(u16, peerString[4..6], .big);
 

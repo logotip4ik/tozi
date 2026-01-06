@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const utils = @import("utils.zig");
+
 fd: std.posix.fd_t,
 
 evs: std.PriorityQueue(KEvent, CompareContext, compareKEvents),
@@ -15,7 +17,7 @@ const logger = std.log.scoped(.kqueue);
 const MAX_EVENTS = 8;
 
 pub fn init(alloc: std.mem.Allocator) !Self {
-    comptime std.debug.assert(builtin.os.tag == .macos);
+    comptime utils.assert(builtin.os.tag == .macos);
 
     const kqueue = try std.posix.kqueue();
     errdefer std.posix.close(kqueue);
@@ -39,7 +41,7 @@ fn compareKEvents(_: CompareContext, _: KEvent, _: KEvent) std.math.Order {
 }
 
 pub fn subscribe(self: Self, socketId: std.posix.fd_t, op: Op, udata: usize) !void {
-    std.debug.assert(udata != 0);
+    utils.assert(udata != 0);
 
     const filter: isize = switch (op) {
         .read => std.c.EVFILT.READ,
@@ -119,7 +121,7 @@ pub fn next(self: *Self) NextError!?CustomEvent {
         break :blk buf[0];
     };
 
-    if (ev.udata == 0) unreachable;
+    utils.assert(ev.udata != 0);
 
     var err: ?std.posix.E = null;
 

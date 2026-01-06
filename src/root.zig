@@ -5,6 +5,7 @@ const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
 const httpTracker = @import("http-tracker.zig");
 const peer = @import("peer.zig");
+const utils = @import("utils.zig");
 
 pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void {
     const torrentFile = try std.fs.cwd().openFile(torrentPath, .{});
@@ -16,14 +17,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void 
     var torrent: Torrent = try .fromSlice(alloc, torrentSlice);
     defer torrent.deinit(alloc);
 
-    std.debug.assert(std.mem.startsWith(u8, torrent.announce, "http"));
+    utils.assert(std.mem.startsWith(u8, torrent.announce, "http"));
 
     const peerId = httpTracker.generatePeerId();
 
     var peers = try httpTracker.getPeers(alloc, peerId, torrent);
     defer peers.deinit(alloc);
 
-    comptime std.debug.assert(builtin.os.tag == .macos);
+    comptime utils.assert(builtin.os.tag == .macos);
 
     const numberOfPieces = torrent.pieces.len / 20;
 
