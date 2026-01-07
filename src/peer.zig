@@ -268,6 +268,7 @@ pub fn loop(
                 .bufFlush => {
                     if (peer.buf.items.len == 0) continue;
                     try peer.writeBuf() orelse continue;
+                    std.log.debug("wrote whole buffer", .{});
 
                     peer.state = .messageStart;
                     peer.direction = .read;
@@ -398,6 +399,8 @@ pub fn loop(
                                 try request.writeMessage(&writer);
                             }
 
+                            std.log.debug("trying to send {s}", .{@tagName(request)});
+
                             peer.state = .bufFlush;
                             peer.direction = .write;
 
@@ -442,6 +445,8 @@ pub fn loop(
                             peer.state = .bufFlush;
                             peer.direction = .write;
 
+                            std.log.debug("trying to send {s}", .{@tagName(m)});
+
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
                         .piece => |piece| {
@@ -450,14 +455,16 @@ pub fn loop(
 
                             if (peer.workingPiece) |index| {
                                 if (index != piece.index) {
-                                    std.log.warn("received piece index {d}, while expected {d}", .{
+                                    std.log.warn("received piece {d}, while expected {d}", .{
                                         piece.index,
                                         index,
                                     });
                                     continue;
                                 }
                             } else {
-                                std.log.warn("received piece, while not expecting anything", .{});
+                                std.log.warn("received piece {d}, while not expecting anything", .{
+                                    piece.index,
+                                });
                                 continue;
                             }
 
