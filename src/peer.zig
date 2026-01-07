@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
+const Files = @import("files.zig");
 const KQ = @import("kq.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
@@ -171,6 +172,7 @@ pub fn loop(
     alloc: std.mem.Allocator,
     peerId: [20]u8,
     torrent: *Torrent,
+    files: *Files,
     pieceManager: *PieceManager,
     addrs: []const std.net.Address,
 ) !void {
@@ -419,6 +421,8 @@ pub fn loop(
                                 peer.state = .messageStart;
                                 continue;
                             };
+
+                            try files.writePiece(piece.index, bytes);
 
                             std.log.info("fetched {d} piece", .{pieceLen});
 

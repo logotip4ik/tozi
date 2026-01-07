@@ -15,7 +15,7 @@ announce: []const u8,
 files: Files,
 dirname: ?[]const u8 = null,
 pieces: []const u8,
-pienceLen: usize,
+pieceLen: u32,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
 totalLen: usize,
 
@@ -37,14 +37,14 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
 }
 
 pub fn getPieceSize(self: Torrent, index: usize) u32 {
-    const numberOfPieces = (self.totalLen + self.pienceLen - 1) / self.pienceLen;
+    const numberOfPieces = (self.totalLen + self.pieceLen - 1) / self.pieceLen;
 
     if (index < numberOfPieces - 1) {
         @branchHint(.likely);
-        return @intCast(self.pienceLen);
+        return @intCast(self.pieceLen);
     }
 
-    return @intCast(self.totalLen - (index * self.pienceLen));
+    return @intCast(self.totalLen - (index * self.pieceLen));
 }
 
 pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {
@@ -139,7 +139,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     const infoHash = try computeInfoHash(info, &reader);
 
     const pieces = info.inner.dict.get("pieces") orelse return error.NoPiencesField;
-    const pienceLen = info.inner.dict.get("piece length") orelse return error.NoPieceLenField;
+    const pieceLen = info.inner.dict.get("piece length") orelse return error.NoPieceLenField;
 
     return Torrent{
         .value = value,
@@ -155,7 +155,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         .files = files,
         .dirname = dirname,
         .pieces = pieces.inner.string,
-        .pienceLen = pienceLen.inner.int,
+        .pieceLen = @intCast(pieceLen.inner.int),
         .infoHash = infoHash,
         .totalLen = totalLen,
     };
