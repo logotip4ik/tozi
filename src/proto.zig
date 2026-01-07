@@ -26,7 +26,7 @@ pub const Message = union(MessageId) {
     port: u16,
 
     /// Length of the message defined by torrent protocol
-    fn len(self: Message) u32 {
+    inline fn len(self: Message) u32 {
         const id_size = 1;
         const u32_size = @sizeOf(u32);
 
@@ -49,11 +49,11 @@ pub const Message = union(MessageId) {
 
     /// length required to write message to buf. It requires 4 bytes more for actual `len` prefix of
     /// the message
-    pub fn wireLen(self: Message) u32 {
+    pub inline fn wireLen(self: Message) u32 {
         return 4 + self.len();
     }
 
-    pub fn writeMessage(m: Message, w: *std.Io.Writer) !void {
+    pub inline fn writeMessage(m: Message, w: *std.Io.Writer) !void {
         try w.writeInt(u32, m.len(), .big);
 
         switch (m) {

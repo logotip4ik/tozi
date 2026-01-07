@@ -74,6 +74,10 @@ pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u
     return null;
 }
 
+pub fn isDownloadComplete(self: Self) bool {
+
+}
+
 pub fn reset(self: *Self, index: usize) void {
     if (self.pieces.items[index] != .have) {
         self.pieces.items[index] = .missing;

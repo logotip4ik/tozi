@@ -205,6 +205,33 @@ const Peer = struct {
 
         return null;
     }
+
+    pub fn writeRequestsBatch(self: *Peer, alloc: std.mem.Allocator, index: u32, pieceLen: u32) !void {
+        const numberOfRequests = try std.math.divCeil(u32, pieceLen, Torrent.BLOCK_SIZE);
+
+        const r: proto.Message = .{ .request = .{ .index = 0, .begin = 0, .len = 0 } };
+
+        try self.buf.resize(alloc, r.wireLen() * numberOfRequests);
+
+        for (0..numberOfRequests) |i| {
+            const begin: u32 = @intCast(i * Torrent.BLOCK_SIZE);
+
+            const message: proto.Message = .{ .request = .{
+                .index = index,
+                .begin = begin,
+                .len = if (begin + Torrent.BLOCK_SIZE <= pieceLen)
+                    Torrent.BLOCK_SIZE
+                else
+                    pieceLen - begin,
+            } };
+
+            const bufStart = i * message.wireLen();
+            const buf = self.buf.items[bufStart .. bufStart + message.wireLen()];
+            var writer: std.Io.Writer = .fixed(buf);
+
+            try message.writeMessage(&writer);
+        }
+    }
 };
 
 pub fn loop(
@@ -376,30 +403,9 @@ pub fn loop(
                             };
 
                             const pieceLen = torrent.getPieceSize(workingPiece);
-                            const numberOfRequests = try std.math.divCeil(u32, pieceLen, Torrent.BLOCK_SIZE);
-                            var request: proto.Message = .{ .request = .{ .index = workingPiece, .begin = 0, .len = 0 } };
+                            try peer.writeRequestsBatch(alloc, workingPiece, pieceLen);
 
-                            try peer.buf.resize(alloc, request.wireLen() * numberOfRequests);
-
-                            for (0..numberOfRequests) |i| {
-                                const begin: u32 = @intCast(i * Torrent.BLOCK_SIZE);
-
-                                request.request.begin = begin;
-                                if (begin + Torrent.BLOCK_SIZE <= pieceLen) {
-                                    @branchHint(.likely);
-                                    request.request.len = Torrent.BLOCK_SIZE;
-                                } else {
-                                    request.request.len = pieceLen - begin;
-                                }
-
-                                const bufStart = i * request.wireLen();
-                                const buf = peer.buf.items[bufStart .. bufStart + request.wireLen()];
-                                var writer: std.Io.Writer = .fixed(buf);
-
-                                try request.writeMessage(&writer);
-                            }
-
-                            std.log.debug("trying to send {s}", .{@tagName(request)});
+                            std.log.debug("trying to send requests", .{});
 
                             peer.state = .bufFlush;
                             peer.direction = .write;
@@ -451,10 +457,10 @@ pub fn loop(
                         },
                         .piece => |piece| {
                             const bytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
-                            defer peer.state = .messageStart;
 
                             if (peer.workingPiece) |index| {
                                 if (index != piece.index) {
+                                    peer.state = .messageStart;
                                     std.log.warn("received piece {d}, while expected {d}", .{
                                         piece.index,
                                         index,
@@ -462,6 +468,7 @@ pub fn loop(
                                     continue;
                                 }
                             } else {
+                                peer.state = .messageStart;
                                 std.log.warn("received piece {d}, while not expecting anything", .{
                                     piece.index,
                                 });
@@ -476,14 +483,29 @@ pub fn loop(
                             @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
                             buf.fetched += @intCast(bytes.len);
 
-                            if (buf.fetched == pieceLen) {
-                                const completed = pieceManager.complete(piece.index) catch unreachable;
-                                defer completed.deinit(alloc);
-
-                                std.debug.print("{s}", .{completed.bytes});
-
-                                return error.DownloadComplete;
+                            if (buf.fetched != pieceLen) {
+                                peer.state = .messageStart;
+                                continue;
                             }
+
+                            const completed = pieceManager.complete(piece.index) catch unreachable;
+                            defer completed.deinit(alloc);
+
+                            std.log.info("fetched {d} piece", .{pieceLen});
+
+                            const nextWorkingPiece = pieceManager.getWorkingPiece(peer.bitfield.?) orelse {
+                                std.log.info("no work for peer {d}", .{peer.socket});
+                                continue;
+                            };
+
+                            const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
+                            try peer.writeRequestsBatch(alloc, nextWorkingPiece, nextPieceLen);
+
+                            peer.state = .bufFlush;
+                            peer.direction = .write;
+                            peer.workingPiece = nextWorkingPiece;
+
+                            try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
                         .request, // Peer requested block from you (Ignore if leaching)
                         .interested, // Peer is interested in you (Ignore if leaching)
