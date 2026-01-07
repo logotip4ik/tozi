@@ -14,7 +14,6 @@ const Peer = struct {
 
     choked: bool = true,
     interested: bool = false,
-    workingPiece: ?u32 = null,
 
     buf: std.array_list.Aligned(u8, null) = .empty,
 
@@ -205,7 +204,6 @@ pub fn loop(
 
         if (event.err) |err| {
             std.log.err("enountered {s} for dead {any}", .{ @tagName(err), peer });
-            if (peer.workingPiece) |x| pieceManager.reset(x);
             peer.deinit(alloc, &kq);
             deadCount += 1;
 
@@ -244,7 +242,6 @@ pub fn loop(
             },
             .read => if (peer.direction == .read) sw: switch (peer.state) {
                 .dead => if (peer.state != .dead) {
-                    if (peer.workingPiece) |x| pieceManager.reset(x);
                     peer.deinit(alloc, &kq);
                     deadCount += 1;
 
@@ -449,7 +446,6 @@ pub fn loop(
 
                                 peer.state = .bufFlush;
                                 peer.direction = .write;
-                                peer.workingPiece = nextWorkingPiece;
 
                                 std.log.info("writing requests batch for {d}, len {d}", .{
                                     nextWorkingPiece,
