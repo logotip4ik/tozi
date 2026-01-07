@@ -42,6 +42,22 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.buffers.deinit(alloc);
 }
 
+pub fn verifyPiece(
+    self: *Self,
+    index: u32,
+    noalias bytes: []const u8,
+    noalias expectedHash: []const u8,
+) !void {
+    var computedHash: [20]u8 = undefined;
+
+    std.crypto.hash.Sha1.hash(bytes, computedHash[0..20], .{});
+
+    if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
+        self.reset(index);
+        return error.CorruptPiece;
+    }
+}
+
 pub fn writePiece(
     self: *Self,
     alloc: std.mem.Allocator,
@@ -105,10 +121,7 @@ pub fn isDownloadComplete(self: Self) bool {
 }
 
 pub fn reset(self: *Self, index: u32) void {
-    if (self.pieces[index] != .have) {
-        self.pieces[index] = .missing;
-    }
-
+    self.pieces[index] = .missing;
     const buf = self.buffers.getPtr(index) orelse return;
     buf.fetched = 0;
 }
