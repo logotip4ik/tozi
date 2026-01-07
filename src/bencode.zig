@@ -21,7 +21,7 @@ pub const Value = struct {
 
                 if (string.len == 0) {
                     writer.print("<empty string>\n", .{}) catch unreachable;
-                } else if (std.ascii.isAlphanumeric(string[0]) or std.unicode.utf8ValidateSlice(string)) {
+                } else if (std.unicode.utf8ValidateSlice(string)) {
                     writer.print("{s}\n", .{string}) catch unreachable;
                 } else {
                     writer.print("<{d} bytes>\n", .{string.len}) catch unreachable;

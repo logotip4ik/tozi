@@ -416,7 +416,7 @@ pub fn loop(
                             defer completed.deinit(alloc);
 
                             const expectedHash = torrent.pieces[piece.index * 20 ..];
-                            pieceManager.verifyPiece(piece.index, bytes, expectedHash[0..20]) catch {
+                            pieceManager.verifyPiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
                                 std.log.warn("received corrupt piece from peer: {d}", .{peer.socket});
                                 peer.state = .messageStart;
                                 continue;
