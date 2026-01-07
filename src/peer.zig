@@ -271,6 +271,7 @@ pub fn loop(
 
         if (event.err) |err| {
             std.log.err("enountered {s} for dead {any}", .{ @tagName(err), peer });
+            if (peer.workingPiece) |x| pieceManager.reset(x);
             peer.deinit(alloc, &kq);
             deadCount += 1;
 
@@ -309,6 +310,7 @@ pub fn loop(
             },
             .read => if (peer.direction == .read) sw: switch (peer.state) {
                 .dead => if (peer.state != .dead) {
+                    if (peer.workingPiece) |x| pieceManager.reset(x);
                     peer.deinit(alloc, &kq);
                     deadCount += 1;
 
@@ -389,8 +391,8 @@ pub fn loop(
 
                     switch (message) {
                         .choke => {
-                            defer peer.state = .messageStart;
                             peer.choked = true;
+                            peer.state = .messageStart;
                         },
                         .unchoke => {
                             peer.choked = false;
@@ -425,7 +427,9 @@ pub fn loop(
                         .bitfield => |len| {
                             const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
 
-                            std.log.debug("received bitfield {b}", .{bytes[0]});
+                            for (bytes) |byte| {
+                                std.log.debug("received bitfield {b}", .{byte});
+                            }
                             try peer.setBitfield(alloc, bytes);
 
                             peer.workingPiece = pieceManager.getWorkingPiece(peer.bitfield.?) orelse {
@@ -493,19 +497,34 @@ pub fn loop(
 
                             std.log.info("fetched {d} piece", .{pieceLen});
 
-                            const nextWorkingPiece = pieceManager.getWorkingPiece(peer.bitfield.?) orelse {
+                            if (pieceManager.getWorkingPiece(peer.bitfield.?)) |nextWorkingPiece| {
+                                if (peer.choked) {
+                                    peer.state = .messageStart;
+                                    continue;
+                                }
+
+                                const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
+                                try peer.writeRequestsBatch(alloc, nextWorkingPiece, nextPieceLen);
+
+                                peer.state = .bufFlush;
+                                peer.direction = .write;
+                                peer.workingPiece = nextWorkingPiece;
+
+                                std.log.info("writing requests batch for {d}, len {d}", .{
+                                    nextWorkingPiece,
+                                    nextPieceLen,
+                                });
+
+                                try kq.subscribe(peer.socket, .write, event.kevent.udata);
+                            } else if (pieceManager.isDownloadComplete()) {
+                                std.log.info("download complete.", .{});
+                                return;
+                            } else {
                                 std.log.info("no work for peer {d}", .{peer.socket});
+                                peer.state = .messageStart;
                                 continue;
-                            };
+                            }
 
-                            const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
-                            try peer.writeRequestsBatch(alloc, nextWorkingPiece, nextPieceLen);
-
-                            peer.state = .bufFlush;
-                            peer.direction = .write;
-                            peer.workingPiece = nextWorkingPiece;
-
-                            try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
                         .request, // Peer requested block from you (Ignore if leaching)
                         .interested, // Peer is interested in you (Ignore if leaching)
