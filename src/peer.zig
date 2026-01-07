@@ -49,7 +49,7 @@ const Peer = struct {
     socket: std.posix.fd_t,
 
     state: State = .handshake,
-    direction: Direction = .write,
+    direction: KQ.Op = .write,
 
     choked: bool = true,
     interested: bool = false,
@@ -62,14 +62,9 @@ const Peer = struct {
     pub const State = union(enum) {
         handshake,
         messageStart,
-        message: struct { id: proto.MessageId, len: u32 },
-        ready,
+        message: proto.Message,
+        bufFlush,
         dead,
-    };
-
-    pub const Direction = enum {
-        read,
-        write,
     };
 
     pub fn init(addr: std.net.Address) !Peer {
@@ -135,11 +130,6 @@ const Peer = struct {
                 }
             }
         }
-    }
-
-    pub fn read(self: *Peer, slice: []u8) !usize {
-        const count = try std.posix.read(self.socket, slice);
-        return count;
     }
 
     pub fn readInt(self: *Peer, comptime T: type, endian: std.builtin.Endian) !T {
@@ -215,18 +205,6 @@ const Peer = struct {
 
         return null;
     }
-
-    pub fn findMissing(self: Peer, other: std.DynamicBitSetUnmanaged) ?usize {
-        var i: usize = 0;
-
-        while (i < self.bitfield.capacity()) : (i += 1) {
-            if (self.bitfield.isSet(i) and !other.isSet(i)) {
-                return i;
-            }
-        }
-
-        return null;
-    }
 };
 
 pub fn loop(
@@ -265,13 +243,13 @@ pub fn loop(
         const peer: *Peer = @ptrFromInt(event.kevent.udata);
 
         if (event.err) |err| {
-            std.log.err("enountered {s} for {any}", .{ @tagName(err), peer });
+            std.log.err("enountered {s} for dead {any}", .{ @tagName(err), peer });
             peer.deinit(alloc, &kq);
             deadCount += 1;
-        }
 
-        if (deadCount == peers.len) {
-            return error.AllStreamsDead;
+            if (deadCount == peers.len) {
+                return error.AllStreamsDead;
+            }
         }
 
         switch (event.op) {
@@ -287,11 +265,9 @@ pub fn loop(
 
                     try kq.unsubscribe(peer.socket, .write);
                 },
-                .message => |message| {
+                .bufFlush => {
                     if (peer.buf.items.len == 0) continue;
                     try peer.writeBuf() orelse continue;
-
-                    std.log.debug("sent message {s} to socket {d}", .{ @tagName(message.id), peer.socket });
 
                     peer.state = .messageStart;
                     peer.direction = .read;
@@ -307,6 +283,10 @@ pub fn loop(
                 .dead => if (peer.state != .dead) {
                     peer.deinit(alloc, &kq);
                     deadCount += 1;
+
+                    if (deadCount == peers.len) {
+                        return error.AllStreamsDead;
+                    }
                 },
                 .handshake => {
                     const bytes = try peer.readTotalBuf(alloc, TCP_HANDSHAKE_LEN) orelse continue;
@@ -337,27 +317,49 @@ pub fn loop(
                         continue :sw .dead;
                     }
 
-                    const id = try peer.readInt(u8, .big);
-                    const idEnum = std.enums.fromInt(proto.MessageId, id) orelse {
-                        std.log.debug("enountered unknown message id: {d}\n", .{id});
+                    const idInt = try peer.readInt(u8, .big);
+                    const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
+                        std.log.debug("enountered unknown message id: {d}\n", .{idInt});
                         continue;
                     };
 
                     std.log.debug("read message start ({s}, len: {d})", .{
-                        @tagName(idEnum),
+                        @tagName(id),
                         len,
                     });
 
-                    peer.state = .{ .message = .{ .id = idEnum, .len = len - 1 } };
+                    const message: proto.Message = switch (id) {
+                        .choke => .choke,
+                        .unchoke => .unchoke,
+                        .interested => .interested,
+                        .not_interested => .not_interested,
+                        .have => .{ .have = try peer.readInt(u32, .big) },
+                        .bitfield => .{ .bitfield = len - 1 },
+                        .request => .{ .request = .{
+                            .index = try peer.readInt(u32, .big),
+                            .begin = try peer.readInt(u32, .big),
+                            .len = len - 9,
+                        } },
+                        .piece => .{ .piece = .{
+                            .index = try peer.readInt(u32, .big),
+                            .begin = try peer.readInt(u32, .big),
+                            .len = len - 9,
+                        } },
+                        .cancel => .{ .cancel = .{
+                            .index = try peer.readInt(u32, .big),
+                            .begin = try peer.readInt(u32, .big),
+                            .len = len - 9,
+                        } },
+                        .port => .{ .port = try peer.readInt(u16, .big) },
+                    };
+
+                    peer.state = .{ .message = message };
+                    peer.buf.clearRetainingCapacity();
                 },
                 .message => |message| {
-                    utils.assert(message.len < 16 * 1024 * 1024);
+                    std.log.debug("received message: {s}", .{@tagName(message)});
 
-                    const bytes = try peer.readTotalBuf(alloc, message.len) orelse continue;
-
-                    std.log.debug("received message: {s}", .{@tagName(message.id)});
-
-                    switch (message.id) {
+                    switch (message) {
                         .choke => {
                             defer peer.state = .messageStart;
                             peer.choked = true;
@@ -396,12 +398,12 @@ pub fn loop(
                                 try request.writeMessage(&writer);
                             }
 
-                            peer.state = .{ .message = .{ .id = .request, .len = 0 } };
+                            peer.state = .bufFlush;
                             peer.direction = .write;
 
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
-                        .have => {
+                        .have => |piece| {
                             defer peer.state = .messageStart;
 
                             var bitfield = peer.bitfield orelse {
@@ -409,10 +411,11 @@ pub fn loop(
                                 continue;
                             };
 
-                            const index = std.mem.readInt(u32, bytes[0..4], .big);
-                            bitfield.set(index);
+                            bitfield.set(piece);
                         },
-                        .bitfield => {
+                        .bitfield => |len| {
+                            const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
+
                             std.log.debug("received bitfield {b}", .{bytes[0]});
                             try peer.setBitfield(alloc, bytes);
 
@@ -436,17 +439,44 @@ pub fn loop(
 
                             try m.writeMessage(&writer);
 
-                            peer.state = .{ .message = .{ .id = .interested, .len = 1 } };
+                            peer.state = .bufFlush;
                             peer.direction = .write;
 
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
-                        .piece => { // PIECE (The Data)
-                            // const index = std.mem.readInt(u32, bytes[0..4], .big);
-                            // const begin = std.mem.readInt(u32, bytes[4..8], .big);
-                            // const block = bytes[8..];
-                            // try storeBlock(index, begin, block);
+                        .piece => |piece| {
+                            const bytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
+                            defer peer.state = .messageStart;
 
+                            if (peer.workingPiece) |index| {
+                                if (index != piece.index) {
+                                    std.log.warn("received piece index {d}, while expected {d}", .{
+                                        piece.index,
+                                        index,
+                                    });
+                                    continue;
+                                }
+                            } else {
+                                std.log.warn("received piece, while not expecting anything", .{});
+                                continue;
+                            }
+
+                            std.log.debug("received piece {any}", .{piece});
+
+                            const pieceLen = torrent.getPieceSize(piece.index);
+                            const buf = try pieceManager.getPieceBuf(alloc, piece.index, pieceLen);
+
+                            @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
+                            buf.fetched += @intCast(bytes.len);
+
+                            if (buf.fetched == pieceLen) {
+                                const completed = pieceManager.complete(piece.index) catch unreachable;
+                                defer completed.deinit(alloc);
+
+                                std.debug.print("{s}", .{completed.bytes});
+
+                                return error.DownloadComplete;
+                            }
                         },
                         .request, // Peer requested block from you (Ignore if leaching)
                         .interested, // Peer is interested in you (Ignore if leaching)

@@ -11,7 +11,7 @@ const Self = @This();
 
 const KEvent = std.posix.Kevent;
 
-const Op = enum { write, read };
+pub const Op = enum { write, read };
 
 const logger = std.log.scoped(.kqueue);
 const MAX_EVENTS = 8;

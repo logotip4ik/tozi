@@ -19,11 +19,11 @@ pub const Message = union(MessageId) {
     interested: void,
     not_interested: void,
     have: u32,
-    bitfield: []const u8,
+    bitfield: u32,
     request: struct { index: u32, begin: u32, len: u32 },
-    piece: struct { index: u32, begin: u32, block: []const u8 },
+    piece: struct { index: u32, begin: u32, len: u32 },
     cancel: struct { index: u32, begin: u32, len: u32 },
-    port: void,
+    port: u16,
 
     /// Length of the message defined by torrent protocol
     fn len(self: Message) u32 {
@@ -37,13 +37,13 @@ pub const Message = union(MessageId) {
             .have => id_size + u32_size,
 
             // ID (1) + Raw bytes
-            .bitfield => |bf| id_size + @as(u32, @intCast(bf.len)),
+            .bitfield => |l| id_size + l,
 
             // ID (1) + Index (4) + Begin (4) + Length (4)
             .request, .cancel => id_size + (u32_size * 3),
 
             // ID (1) + Index (4) + Begin (4) + Raw block data
-            .piece => |p| id_size + (u32_size * 2) + @as(u32, @intCast(p.block.len)),
+            .piece => |p| id_size + (u32_size * 2) + p.len,
         };
     }
 
