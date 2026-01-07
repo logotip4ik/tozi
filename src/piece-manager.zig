@@ -8,8 +8,6 @@ const State = enum {
     have,
 };
 
-const Pieces = std.array_list.Aligned(State, null);
-
 const PieceBuf = struct {
     fetched: u32,
     bytes: []u8,
@@ -19,20 +17,19 @@ const PieceBuf = struct {
     }
 };
 
-pieces: Pieces,
+pieces: []State,
 
 buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
 
 pub fn init(alloc: std.mem.Allocator, numberOfPieces: usize) !Self {
-    var pieces: Pieces = try .initCapacity(alloc, numberOfPieces);
-
-    pieces.appendNTimesAssumeCapacity(.missing, numberOfPieces);
+    const pieces = try alloc.alloc(State, numberOfPieces);
+    for (pieces) |*piece| piece.* = .missing;
 
     return .{ .pieces = pieces };
 }
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-    self.pieces.deinit(alloc);
+    alloc.free(self.pieces);
 
     var iter = self.buffers.valueIterator();
     while (iter.next()) |buf| {
@@ -61,13 +58,13 @@ pub fn getPieceBuf(
 }
 
 pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u32 {
-    for (self.pieces.items, 0..) |state, index| {
-        if (state != .missing) {
+    for (self.pieces, 0..) |*piece, index| {
+        if (piece.* != .missing) {
             continue;
         }
 
         if (peerBitfield.isSet(index)) {
-            self.pieces.items[index] = .downloading;
+            piece.* = .downloading;
             return @intCast(index);
         }
     }
@@ -75,20 +72,20 @@ pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u
 }
 
 pub fn isDownloadComplete(self: Self) bool {
-
+    return std.mem.allEqual(State, self.pieces, .have);
 }
 
-pub fn reset(self: *Self, index: usize) void {
-    if (self.pieces.items[index] != .have) {
-        self.pieces.items[index] = .missing;
+pub fn reset(self: *Self, index: u32) void {
+    if (self.pieces[index] != .have) {
+        self.pieces[index] = .missing;
     }
 
-    const buf = self.buffers.get(index) orelse return;
+    const buf = self.buffers.getPtr(index) orelse return;
     buf.fetched = 0;
 }
 
 pub fn complete(self: *Self, index: u32) !PieceBuf {
-    self.pieces.items[index] = .have;
+    self.pieces[index] = .have;
 
     const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
     return kv.value;
