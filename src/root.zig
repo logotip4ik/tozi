@@ -20,7 +20,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void 
 
     utils.assert(std.mem.startsWith(u8, torrent.announce, "http"));
 
-    var files: Files = try .init(alloc, torrent.files.items, torrent.pieceLen);
+    var files: Files = try .init(alloc, torrent);
     defer files.deinit();
 
     const peerId = httpTracker.generatePeerId();

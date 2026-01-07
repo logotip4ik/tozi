@@ -14,13 +14,17 @@ alloc: std.mem.Allocator,
 files: []FileRef,
 pieceLen: u32,
 
-pub fn init(alloc: std.mem.Allocator, files: []const Torrent.File, pieceLen: u32) !Self {
-    var refs = try alloc.alloc(FileRef, files.len);
+pub fn init(alloc: std.mem.Allocator, torrent: Torrent) !Self {
+    var refs = try alloc.alloc(FileRef, torrent.files.items.len);
     var currentPos: usize = 0;
 
-    const cwd = std.fs.cwd();
+    var cwd = if (torrent.dirname) |name|
+        try std.fs.cwd().makeOpenPath(name, .{})
+    else
+        std.fs.cwd();
+    defer if (torrent.dirname) |_| cwd.close();
 
-    for (files, 0..) |file, i| {
+    for (torrent.files.items, 0..) |file, i| {
         const path = try std.fs.path.join(alloc, file.path);
         defer alloc.free(path);
 
@@ -45,7 +49,7 @@ pub fn init(alloc: std.mem.Allocator, files: []const Torrent.File, pieceLen: u32
     return .{
         .alloc = alloc,
         .files = refs,
-        .pieceLen = pieceLen,
+        .pieceLen = torrent.pieceLen,
     };
 }
 
