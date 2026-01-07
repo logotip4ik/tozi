@@ -1,5 +1,36 @@
 const std = @import("std");
 
+pub const TCP_HANDSHAKE_LEN = 68;
+pub const TcpHandshake = extern struct {
+    pstrlen: u8 = 19,
+    pstr: [19]u8 = "BitTorrent protocol".*,
+    reserved: [8]u8 = [_]u8{0} ** 8,
+    infoHash: [20]u8,
+    peerId: [20]u8,
+
+    const ValidateError = error{ InvalidPstrLen, InvalidPstr, InvalidInfoHash };
+
+    pub fn validate(self: TcpHandshake, other: TcpHandshake) ValidateError!void {
+        if (self.pstrlen != other.pstrlen) {
+            return error.InvalidPstrLen;
+        }
+
+        if (!std.mem.eql(u8, &self.pstr, &other.pstr)) {
+            return error.InvalidPstr;
+        }
+
+        if (!std.mem.eql(u8, &self.infoHash, &other.infoHash)) {
+            return error.InvalidInfoHash;
+        }
+    }
+};
+
+comptime {
+    if (@sizeOf(TcpHandshake) != TCP_HANDSHAKE_LEN) @compileError("TcpHandshake has invalid size");
+}
+
+pub const Piece = struct { index: u32, begin: u32, len: u32 };
+
 pub const MessageId = enum(u8) {
     choke = 0,
     unchoke = 1,
@@ -20,9 +51,9 @@ pub const Message = union(MessageId) {
     not_interested: void,
     have: u32,
     bitfield: u32,
-    request: struct { index: u32, begin: u32, len: u32 },
-    piece: struct { index: u32, begin: u32, len: u32 },
-    cancel: struct { index: u32, begin: u32, len: u32 },
+    request: Piece,
+    piece: Piece,
+    cancel: Piece,
     port: u16,
 
     /// Length of the message defined by torrent protocol

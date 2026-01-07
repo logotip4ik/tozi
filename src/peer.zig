@@ -6,45 +6,6 @@ const KQ = @import("kq.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
-const TCP_HANDSHAKE_LEN = 68;
-const TcpHandshake = extern struct {
-    pstrlen: u8 = 19,
-    pstr: [19]u8 = "BitTorrent protocol".*,
-    reserved: [8]u8 = [_]u8{0} ** 8,
-    infoHash: [20]u8,
-    peerId: [20]u8,
-
-    const ValidateError = error{ InvalidPstrLen, InvalidPstr, InvalidInfoHash };
-
-    pub fn validate(self: TcpHandshake, other: TcpHandshake) ValidateError!void {
-        if (self.pstrlen != other.pstrlen) {
-            return error.InvalidPstrLen;
-        }
-
-        if (!std.mem.eql(u8, &self.pstr, &other.pstr)) {
-            return error.InvalidPstr;
-        }
-
-        if (!std.mem.eql(u8, &self.infoHash, &other.infoHash)) {
-            return error.InvalidInfoHash;
-        }
-    }
-};
-
-comptime {
-    if (@sizeOf(TcpHandshake) != TCP_HANDSHAKE_LEN) @compileError("TcpHandshake has invalid size");
-}
-
-const Socket = struct {
-    pub fn close(self: *Socket) void {
-        if (self.state != .dead) {
-            std.posix.close(self.fd);
-        }
-
-        self.state = .dead;
-    }
-};
-
 const Peer = struct {
     socket: std.posix.fd_t,
 
@@ -206,12 +167,20 @@ const Peer = struct {
         return null;
     }
 
+    pub fn writeInterested(self: *Peer, alloc: std.mem.Allocator) !void {
+        const m: proto.Message = .interested;
+
+        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &self.buf);
+        defer self.buf = writer.toArrayList();
+
+        try m.writeMessage(&writer.writer);
+    }
+
     pub fn writeRequestsBatch(self: *Peer, alloc: std.mem.Allocator, index: u32, pieceLen: u32) !void {
         const numberOfRequests = try std.math.divCeil(u32, pieceLen, Torrent.BLOCK_SIZE);
 
-        const r: proto.Message = .{ .request = .{ .index = 0, .begin = 0, .len = 0 } };
-
-        try self.buf.resize(alloc, r.wireLen() * numberOfRequests);
+        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &self.buf);
+        defer self.buf = writer.toArrayList();
 
         for (0..numberOfRequests) |i| {
             const begin: u32 = @intCast(i * Torrent.BLOCK_SIZE);
@@ -225,11 +194,7 @@ const Peer = struct {
                     pieceLen - begin,
             } };
 
-            const bufStart = i * message.wireLen();
-            const buf = self.buf.items[bufStart .. bufStart + message.wireLen()];
-            var writer: std.Io.Writer = .fixed(buf);
-
-            try message.writeMessage(&writer);
+            try message.writeMessage(&writer.writer);
         }
     }
 };
@@ -263,7 +228,7 @@ pub fn loop(
 
     var deadCount: usize = 0;
 
-    const handshake = TcpHandshake{ .infoHash = torrent.infoHash, .peerId = peerId };
+    const handshake: proto.TcpHandshake = .{ .infoHash = torrent.infoHash, .peerId = peerId };
     const handshakeBytes = std.mem.asBytes(&handshake);
 
     while (try kq.next()) |event| {
@@ -319,10 +284,10 @@ pub fn loop(
                     }
                 },
                 .handshake => {
-                    const bytes = try peer.readTotalBuf(alloc, TCP_HANDSHAKE_LEN) orelse continue;
+                    const bytes = try peer.readTotalBuf(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
 
                     defer peer.buf.clearRetainingCapacity();
-                    const received: *TcpHandshake = @ptrCast(bytes);
+                    const received: *proto.TcpHandshake = @ptrCast(bytes);
 
                     handshake.validate(received.*) catch |err| {
                         std.log.err("received invalid handshake err {s}", .{@errorName(err)});
@@ -397,15 +362,22 @@ pub fn loop(
                         .unchoke => {
                             peer.choked = false;
 
-                            peer.buf.clearRetainingCapacity();
-
-                            const workingPiece = peer.workingPiece orelse {
-                                std.log.err("unexpected emtpy working piece when unchoking", .{});
+                            const bitfield = peer.bitfield orelse {
+                                std.log.warn("received unchoke message but no bitfield was set", .{});
+                                peer.state = .messageStart;
                                 continue;
                             };
+                            const numberOfPieces = torrent.pieces.len / 20;
+                            const requestsPerPeer = try std.math.divCeil(usize, numberOfPieces, peers.len);
+                            const numberOfPiecesToRequest = @min(requestsPerPeer, 12);
 
-                            const pieceLen = torrent.getPieceSize(workingPiece);
-                            try peer.writeRequestsBatch(alloc, workingPiece, pieceLen);
+                            peer.buf.clearRetainingCapacity();
+
+                            for (0..numberOfPiecesToRequest) |_| {
+                                const index = pieceManager.getWorkingPiece(bitfield) orelse break;
+                                const pieceLen = torrent.getPieceSize(index);
+                                try peer.writeRequestsBatch(alloc, index, pieceLen);
+                            }
 
                             std.log.debug("trying to send requests", .{});
 
@@ -423,6 +395,8 @@ pub fn loop(
                             };
 
                             bitfield.set(piece);
+                            // TODO: check if we don't have this piece and we aren't downloading it,
+                            // then request it
                         },
                         .bitfield => |len| {
                             const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
@@ -432,78 +406,56 @@ pub fn loop(
                             }
                             try peer.setBitfield(alloc, bytes);
 
-                            peer.workingPiece = pieceManager.getWorkingPiece(peer.bitfield.?) orelse {
-                                std.log.debug("peer {d} doesn't have interesting pieces\n", .{
-                                    peer.socket,
-                                });
-
-                                continue :sw .dead;
-                            };
-
                             std.log.debug("peer {d} has interesting pieces", .{peer.socket});
 
                             peer.buf.clearRetainingCapacity();
-
-                            const m: proto.Message = .interested;
-                            try peer.buf.resize(alloc, m.wireLen());
-
-                            const slice = peer.buf.items[0..m.wireLen()];
-                            var writer: std.Io.Writer = .fixed(slice);
-
-                            try m.writeMessage(&writer);
+                            try peer.writeInterested(alloc);
 
                             peer.state = .bufFlush;
                             peer.direction = .write;
 
-                            std.log.debug("trying to send {s}", .{@tagName(m)});
+                            std.log.debug("trying to send interested message", .{});
 
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         },
                         .piece => |piece| {
                             const bytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
 
-                            if (peer.workingPiece) |index| {
-                                if (index != piece.index) {
-                                    peer.state = .messageStart;
-                                    std.log.warn("received piece {d}, while expected {d}", .{
-                                        piece.index,
-                                        index,
-                                    });
-                                    continue;
-                                }
-                            } else {
-                                peer.state = .messageStart;
-                                std.log.warn("received piece {d}, while not expecting anything", .{
+                            const numberOfPieces = torrent.pieces.len / 20;
+                            if (piece.index > numberOfPieces) {
+                                std.log.err("peer {d} sen't unknown piece massage: {d}", .{
+                                    peer.socket,
                                     piece.index,
                                 });
-                                continue;
+                                continue :sw .dead;
                             }
 
                             std.log.debug("received piece {any}", .{piece});
 
                             const pieceLen = torrent.getPieceSize(piece.index);
-                            const buf = try pieceManager.getPieceBuf(alloc, piece.index, pieceLen);
-
-                            @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
-                            buf.fetched += @intCast(bytes.len);
-
-                            if (buf.fetched != pieceLen) {
+                            const completed = try pieceManager.writePiece(alloc, piece, pieceLen, bytes) orelse {
                                 peer.state = .messageStart;
                                 continue;
-                            }
-
-                            const completed = pieceManager.complete(piece.index) catch unreachable;
+                            };
                             defer completed.deinit(alloc);
 
                             std.log.info("fetched {d} piece", .{pieceLen});
 
-                            if (pieceManager.getWorkingPiece(peer.bitfield.?)) |nextWorkingPiece| {
+                            const bitfield = peer.bitfield orelse {
+                                std.log.err("unexpected empty bitfield with piece message", .{});
+                                peer.state = .messageStart;
+                                pieceManager.reset(piece.index);
+                                continue;
+                            };
+
+                            if (pieceManager.getWorkingPiece(bitfield)) |nextWorkingPiece| {
                                 if (peer.choked) {
                                     peer.state = .messageStart;
                                     continue;
                                 }
 
                                 const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
+                                peer.buf.clearRetainingCapacity();
                                 try peer.writeRequestsBatch(alloc, nextWorkingPiece, nextPieceLen);
 
                                 peer.state = .bufFlush;
@@ -524,7 +476,6 @@ pub fn loop(
                                 peer.state = .messageStart;
                                 continue;
                             }
-
                         },
                         .request, // Peer requested block from you (Ignore if leaching)
                         .interested, // Peer is interested in you (Ignore if leaching)

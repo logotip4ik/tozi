@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const proto = @import("proto.zig");
+const utils = @import("utils.zig");
+
 const Self = @This();
 
 const State = enum {
@@ -37,6 +40,32 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     }
 
     self.buffers.deinit(alloc);
+}
+
+pub fn writePiece(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    piece: proto.Piece,
+    pieceLen: u32,
+    noalias bytes: []const u8,
+) !?PieceBuf {
+    if (self.pieces[piece.index] == .have) {
+        return error.PieceAlreadyDownloaded;
+    }
+
+    const buf = try self.getPieceBuf(alloc, piece.index, pieceLen);
+
+    @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
+    buf.fetched += @intCast(bytes.len);
+
+    // TODO: maybe we should reset this piece and abort any operations ?
+    utils.assert(buf.fetched <= pieceLen);
+
+    if (buf.fetched != pieceLen) {
+        return null;
+    }
+
+    return self.complete(piece.index) catch unreachable;
 }
 
 pub fn getPieceBuf(
