@@ -18,7 +18,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void 
     var torrent: Torrent = try .fromSlice(alloc, torrentSlice);
     defer torrent.deinit(alloc);
 
-    utils.assert(std.mem.startsWith(u8, torrent.announce, "http"));
+    for (torrent.announceList) |announce| {
+        utils.assert(std.mem.startsWith(u8, announce, "http"));
+    }
 
     var files: Files = try .init(alloc, torrent);
     defer files.deinit();

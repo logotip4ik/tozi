@@ -55,7 +55,7 @@ fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
     const newQuery = try appendQuery(alloc, uri, &parameters);
     defer alloc.free(newQuery);
 
-    uri.query = .{ .raw = newQuery };
+    uri.query = .{ .percent_encoded = newQuery };
 
     if (builtin.is_test) {
         std.debug.print("skipping sending announce request to {f}\n", .{uri});
@@ -92,7 +92,7 @@ test "getAnnounce" {
     defer torrent.deinit(std.testing.allocator);
 
     const announcement = try getAnnounce(std.testing.allocator, .{
-        .announce = torrent.announce,
+        .announce = torrent.announceList[0],
         .infoHash = &torrent.infoHash,
         .left = torrent.totalLen,
         .downloaded = 0,
@@ -126,24 +126,34 @@ const Peer = struct {
 const Peers = std.array_list.Aligned(std.net.Address, null);
 
 pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Peers {
-    const announcement = try getAnnounce(alloc, .{
-        .peerId = &peerId,
-        .uploaded = 0,
-        .downloaded = 0,
-        .left = torrent.totalLen,
-        .infoHash = &torrent.infoHash,
-        .announce = torrent.announce,
-    });
-    defer alloc.free(announcement);
+    var value, const peers = blk: {
+        for (torrent.announceList) |announce| {
+            const announcement = try getAnnounce(alloc, .{
+                .announce = announce,
+                .peerId = &peerId,
+                .uploaded = 0,
+                .downloaded = 0,
+                .left = torrent.totalLen,
+                .infoHash = &torrent.infoHash,
+            });
+            defer alloc.free(announcement);
 
-    var announceReader: std.Io.Reader = .fixed(announcement);
-    var value = try bencode.parseValue(alloc, &announceReader, 0);
-    defer value.deinit(alloc);
+            var announceReader: std.Io.Reader = .fixed(announcement);
+            var value = try bencode.parseValue(alloc, &announceReader, 0);
 
-    const peers = value.inner.dict.get("peers") orelse {
-        std.log.err("expected 'peers' property to exists", .{});
-        return error.NoPeersField;
+            const peers = value.inner.dict.get("peers") orelse {
+                std.log.err("expected 'peers' property to exists. Trying next announce url...", .{});
+                value.deinit(alloc);
+                continue;
+            };
+
+            break :blk .{ value, peers };
+        } else {
+            std.log.err("failed to get announce url with valid peers.", .{});
+            return error.NoValidPeers;
+        }
     };
+    defer value.deinit(alloc);
 
     const peersNum = try std.math.divExact(usize, peers.inner.string.len, 6);
     var peersArray: Peers = try .initCapacity(alloc, peersNum);
@@ -222,10 +232,13 @@ fn appendQuery(
     for (queries, 0..) |query, i| {
         const key, const val = query;
 
-        if (i == queries.len - 1) {
-            try writer.print("{s}={s}", .{ key, val });
-        } else {
-            try writer.print("{s}={s}&", .{ key, val });
+        const valComp: std.Uri.Component = .{ .raw = val };
+
+        try writer.print("{s}=", .{key});
+        // default zig's query escaping is not enough...
+        try valComp.formatEscaped(writer);
+        if (i != queries.len - 1) {
+            try writer.writeByte('&');
         }
     }
 

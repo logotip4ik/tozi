@@ -11,7 +11,6 @@ const Torrent = @This();
 
 value: bencode.Value,
 
-announce: []const u8,
 files: Files,
 dirname: ?[]const u8 = null,
 pieces: []const u8,
@@ -19,7 +18,7 @@ pieceLen: u32,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
 totalLen: usize,
 
-announceList: ?[]const []const u8,
+announceList: []const []const u8,
 creation_date: ?usize,
 created_by: ?[]const u8,
 
@@ -30,9 +29,7 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
         alloc.free(file.path);
     }
     self.files.deinit(alloc);
-
-    if (self.announceList) |list| alloc.free(list);
-
+    alloc.free(self.announceList);
     self.value.deinit(alloc);
 }
 
@@ -75,17 +72,28 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     errdefer value.deinit(alloc);
 
     const dict = value.inner.dict;
+
+    const announce = if (dict.get("announce")) |v|
+        v.inner.string
+    else
+        null;
+
     const announceList = if (dict.get("announce-list")) |v| blk: {
         const list = v.inner.list.items[0].inner.list;
 
-        const ret = try alloc.alloc([]const u8, list.items.len);
+        const ret = try alloc.alloc([]const u8, list.items.len + 1);
         errdefer alloc.free(ret);
 
         for (list.items, 0..) |item, i| ret[i] = item.inner.string;
+        if (announce) |x| ret[ret.len - 1] = x;
 
         break :blk ret;
-    } else null;
-    errdefer if (announceList) |list| alloc.free(list);
+    } else if (announce) |x| blk: {
+        const ret = try alloc.alloc([]const u8, 1);
+        ret[0] = x;
+        break :blk ret;
+    } else return error.NoAnnounceUrls;
+    errdefer alloc.free(announceList);
 
     const info = if (dict.get("info")) |v| v else {
         std.log.err("expected 'info' property to exists in torrent", .{});
@@ -143,12 +151,6 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
     return Torrent{
         .value = value,
-        .announce = if (dict.get("announce")) |v|
-            v.inner.string
-        else if (announceList) |list|
-            list[0]
-        else
-            return error.MissingAnnounceUrl,
         .announceList = announceList,
         .created_by = null,
         .creation_date = null,
@@ -179,7 +181,7 @@ test "parseTorrent - single file" {
 
     try std.testing.expect(torrent.dirname == null);
     try std.testing.expectEqual(1, torrent.files.items.len);
-    try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.announce);
+    try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.announceList[0]);
 }
 
 test "parseTorrent - info hash for simple torrent" {
