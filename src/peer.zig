@@ -166,37 +166,6 @@ const Peer = struct {
 
         return null;
     }
-
-    pub fn writeInterested(self: *Peer, alloc: std.mem.Allocator) !void {
-        const m: proto.Message = .interested;
-
-        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &self.buf);
-        defer self.buf = writer.toArrayList();
-
-        try m.writeMessage(&writer.writer);
-    }
-
-    pub fn writeRequestsBatch(self: *Peer, alloc: std.mem.Allocator, index: u32, pieceLen: u32) !void {
-        const numberOfRequests = try std.math.divCeil(u32, pieceLen, Torrent.BLOCK_SIZE);
-
-        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &self.buf);
-        defer self.buf = writer.toArrayList();
-
-        for (0..numberOfRequests) |i| {
-            const begin: u32 = @intCast(i * Torrent.BLOCK_SIZE);
-
-            const message: proto.Message = .{ .request = .{
-                .index = index,
-                .begin = begin,
-                .len = if (begin + Torrent.BLOCK_SIZE <= pieceLen)
-                    Torrent.BLOCK_SIZE
-                else
-                    pieceLen - begin,
-            } };
-
-            try message.writeMessage(&writer.writer);
-        }
-    }
 };
 
 pub fn loop(
@@ -372,11 +341,13 @@ pub fn loop(
                             const numberOfPiecesToRequest = @min(requestsPerPeer, 12);
 
                             peer.buf.clearRetainingCapacity();
+                            var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                            defer peer.buf = writer.toArrayList();
 
                             for (0..numberOfPiecesToRequest) |_| {
                                 const index = pieceManager.getWorkingPiece(bitfield) orelse break;
                                 const pieceLen = torrent.getPieceSize(index);
-                                try peer.writeRequestsBatch(alloc, index, pieceLen);
+                                try proto.writeRequestsBatch(&writer.writer, index, pieceLen);
                             }
 
                             std.log.debug("trying to send requests", .{});
@@ -406,10 +377,16 @@ pub fn loop(
                             }
                             try peer.setBitfield(alloc, bytes);
 
+                            // TODO: actually check if peer has interesting pieces
                             std.log.debug("peer {d} has interesting pieces", .{peer.socket});
 
                             peer.buf.clearRetainingCapacity();
-                            try peer.writeInterested(alloc);
+
+                            var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                            defer peer.buf = writer.toArrayList();
+
+                            const interested: proto.Message = .interested;
+                            try interested.writeMessage(&writer.writer);
 
                             peer.state = .bufFlush;
                             peer.direction = .write;
@@ -454,9 +431,14 @@ pub fn loop(
                                     continue;
                                 }
 
-                                const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
                                 peer.buf.clearRetainingCapacity();
-                                try peer.writeRequestsBatch(alloc, nextWorkingPiece, nextPieceLen);
+
+                                const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
+
+                                var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                                defer peer.buf = writer.toArrayList();
+
+                                try proto.writeRequestsBatch(&writer.writer, nextWorkingPiece, nextPieceLen);
 
                                 peer.state = .bufFlush;
                                 peer.direction = .write;

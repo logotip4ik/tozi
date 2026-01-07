@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Torrent = @import("torrent.zig");
+
 pub const TCP_HANDSHAKE_LEN = 68;
 pub const TcpHandshake = extern struct {
     pstrlen: u8 = 19,
@@ -109,3 +111,22 @@ pub const Message = union(MessageId) {
         }
     }
 };
+
+pub fn writeRequestsBatch(writer: *std.Io.Writer, index: u32, pieceLen: u32) !void {
+    const numberOfRequests = try std.math.divCeil(u32, pieceLen, Torrent.BLOCK_SIZE);
+
+    for (0..numberOfRequests) |i| {
+        const begin: u32 = @intCast(i * Torrent.BLOCK_SIZE);
+
+        const message: Message = .{ .request = .{
+            .index = index,
+            .begin = begin,
+            .len = if (begin + Torrent.BLOCK_SIZE <= pieceLen)
+                Torrent.BLOCK_SIZE
+            else
+                pieceLen - begin,
+        } };
+
+        try message.writeMessage(writer);
+    }
+}
