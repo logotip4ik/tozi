@@ -19,6 +19,7 @@ const Peer = struct {
     buf: std.array_list.Aligned(u8, null) = .empty,
 
     bitfield: ?std.DynamicBitSetUnmanaged = null,
+    workingOn: ?std.DynamicBitSetUnmanaged = null,
 
     pub const State = union(enum) {
         handshake,
@@ -72,6 +73,7 @@ const Peer = struct {
         std.posix.close(self.socket);
         self.buf.deinit(alloc);
         if (self.bitfield) |*x| x.deinit(alloc);
+        if (self.workingOn) |*x| x.deinit(alloc);
     }
 
     pub fn setBitfield(self: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void {
@@ -243,6 +245,13 @@ pub fn loop(
             },
             .read => if (peer.direction == .read) sw: switch (peer.state) {
                 .dead => if (peer.state != .dead) {
+                    if (peer.workingOn) |workingOn| {
+                        var iter = workingOn.iterator(.{ .direction = .forward, .kind = .set });
+                        while (iter.next()) |index| {
+                            pieceManager.reset(@intCast(index));
+                        }
+                    }
+
                     peer.deinit(alloc, &kq);
                     deadCount += 1;
 
@@ -323,6 +332,11 @@ pub fn loop(
                             peer.state = .messageStart;
                             continue;
                         };
+
+                        if (peer.workingOn == null) {
+                            peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
+                        }
+
                         const requestsPerPeer = try std.math.divCeil(usize, totalPieces, peers.len);
                         const numberOfPiecesToRequest = @min(requestsPerPeer, 12);
 
@@ -336,6 +350,7 @@ pub fn loop(
                             const index = pieceManager.getWorkingPiece(bitfield) orelse break;
                             const pieceLen = torrent.getPieceSize(index);
                             try proto.writeRequestsBatch(&writer.writer, index, pieceLen);
+                            peer.workingOn.?.set(index);
                         }
 
                         peer.state = .bufFlush;
@@ -379,6 +394,7 @@ pub fn loop(
                         const chunkBytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
 
                         if (piece.index > totalPieces) {
+                            @branchHint(.unlikely);
                             std.log.err("peer {d} sen't unknown piece massage: {d}", .{
                                 peer.socket,
                                 piece.index,
@@ -395,6 +411,7 @@ pub fn loop(
 
                         const expectedHash = torrent.pieces[piece.index * 20 ..];
                         pieceManager.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
+                            @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
                             peer.state = .messageStart;
                             continue;
@@ -409,17 +426,31 @@ pub fn loop(
                         });
 
                         const bitfield = peer.bitfield orelse {
+                            @branchHint(.cold);
                             std.log.err("unexpected empty bitfield with piece message", .{});
                             peer.state = .messageStart;
                             pieceManager.reset(piece.index);
                             continue;
                         };
 
+                        if (peer.workingOn) |*workingOn| {
+                            @branchHint(.likely);
+                            workingOn.unset(piece.index);
+                        } else {
+                            @branchHint(.cold);
+                            std.log.err("unexpected empty workingOn with piece message", .{});
+                            peer.state = .messageStart;
+                            pieceManager.reset(piece.index);
+                            continue;
+                        }
+
+                        if (peer.choked) {
+                            peer.state = .messageStart;
+                            continue;
+                        }
+
                         if (pieceManager.getWorkingPiece(bitfield)) |nextWorkingPiece| {
-                            if (peer.choked) {
-                                peer.state = .messageStart;
-                                continue;
-                            }
+                            @branchHint(.likely);
 
                             peer.buf.clearRetainingCapacity();
 
@@ -432,6 +463,7 @@ pub fn loop(
 
                             peer.state = .bufFlush;
                             peer.direction = .write;
+                            peer.workingOn.?.set(nextWorkingPiece);
 
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
                         } else if (pieceManager.isDownloadComplete()) {
