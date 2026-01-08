@@ -138,12 +138,14 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
 
 pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void {
     const interval = try self.announce(alloc, url);
+    const intervalInMs = interval * std.time.ms_per_s;
 
     const now: usize = @intCast(std.time.milliTimestamp());
+
     try self.trackers.append(alloc, .{
         .url = try alloc.dupe(u8, url),
-        .interval = interval * std.time.ns_per_s,
-        .checkinAt = now + interval * std.time.ns_per_s,
+        .interval = intervalInMs,
+        .checkinAt = now + intervalInMs,
     });
 }
 
@@ -155,7 +157,7 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
             continue;
         }
 
-        const interval = self.announce(alloc, tracker.url);
+        const interval = try self.announce(alloc, tracker.url);
         tracker.interval = interval * std.time.ns_per_s;
         tracker.checkinAt = now + interval * std.time.ns_per_s;
     }
