@@ -12,7 +12,7 @@ const Self = @This();
 
 const KEvent = std.posix.Kevent;
 
-pub const Kind = enum { write, read };
+pub const Kind = enum { write, read, timer };
 
 const logger = std.log.scoped(.kqueue);
 const MAX_EVENTS = 8;
@@ -41,17 +41,33 @@ fn compareKEvents(_: CompareContext, _: KEvent, _: KEvent) std.math.Order {
     return .lt;
 }
 
-pub fn subscribe(self: Self, socketId: std.posix.fd_t, kind: Kind, udata: usize) !void {
+/// adds one time timer, that will fire event after `wait` in **milliseconds**
+pub fn addTimer(self: Self, id: usize, wait: usize) !void {
+    _ = try std.posix.kevent(self.fd, &[_]KEvent{
+        KEvent{
+            .ident = @intCast(id),
+            .filter = std.c.EVFILT.TIMER,
+            .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
+            .fflags = 0, // default is milliseconds
+            .data = @intCast(wait),
+            .udata = 1, // prevents `udata != 0` assert
+        },
+    }, &.{}, null);
+}
+
+/// subscribe to read or write of socket (`ident`)
+pub fn subscribe(self: Self, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
+        .timer => return error.UseAddTimer,
     };
 
     _ = try std.posix.kevent(self.fd, &[_]KEvent{
         KEvent{
-            .ident = @intCast(socketId),
+            .ident = @intCast(ident),
             .filter = @intCast(filter),
             .flags = std.c.EV.ADD | std.c.EV.ENABLE,
             .fflags = 0,
@@ -61,10 +77,11 @@ pub fn subscribe(self: Self, socketId: std.posix.fd_t, kind: Kind, udata: usize)
     }, &.{}, null);
 }
 
-pub fn unsubscribe(self: *Self, socketId: std.posix.fd_t, kind: Kind) !void {
+pub fn unsubscribe(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
+        .timer => std.c.EVFILT.TIMER,
     };
 
     var iter = self.evs.iterator();
@@ -80,7 +97,7 @@ pub fn unsubscribe(self: *Self, socketId: std.posix.fd_t, kind: Kind) !void {
 
     _ = try std.posix.kevent(self.fd, &[_]KEvent{
         KEvent{
-            .ident = @intCast(socketId),
+            .ident = @intCast(ident),
             .filter = @intCast(filter),
             .flags = std.c.EV.DELETE,
             .fflags = 0,
@@ -143,6 +160,7 @@ pub fn next(self: *Self) NextError!?CustomEvent {
     const kind: Kind = switch (ev.filter) {
         std.c.EVFILT.READ => .read,
         std.c.EVFILT.WRITE => .write,
+        std.c.EVFILT.TIMER => .timer,
         else => unreachable,
     };
 
