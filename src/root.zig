@@ -6,7 +6,8 @@ pub const PieceManager = @import("piece-manager.zig");
 pub const Files = @import("files.zig");
 pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
-const httpTracker = @import("http-tracker.zig");
+pub const HttpTracker = @import("http-tracker.zig");
+
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
@@ -14,28 +15,32 @@ comptime {
     utils.assert(builtin.os.tag == .macos);
 }
 
-pub const generatePeerId = httpTracker.generatePeerId;
-
 pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !void {
-    for (torrent.announceList) |announce| {
-        utils.assert(std.mem.startsWith(u8, announce, "http"));
-    }
-
     var files: Files = try .init(alloc, torrent);
     defer files.deinit();
 
-    var peers = httpTracker.getPeers(alloc, peerId, torrent) catch |err| {
-        std.log.err("failed sending announcement with {s}", .{@errorName(err)});
-        return;
+    var tracker: HttpTracker = .{
+        .peerId = peerId,
+        .infoHash = torrent.infoHash,
+        .downloaded = 0,
+        .uploaded = 0,
+        .left = 0,
     };
-    defer peers.deinit(alloc);
+    defer tracker.deinit(alloc);
+
+    for (torrent.announceList) |announce| {
+        if (std.mem.startsWith(u8, announce, "http")) {
+            std.log.debug("adding tracker url {s}", .{announce});
+            try tracker.addTracker(alloc, announce);
+        }
+    }
 
     const numberOfPieces = torrent.pieces.len / 20;
 
     var pieces: PieceManager = try .init(alloc, numberOfPieces);
     defer pieces.deinit(alloc);
 
-    try loop(alloc, peerId, torrent, &files, &pieces, peers.items);
+    try loop(alloc, peerId, torrent, &files, &pieces, &tracker);
 }
 
 pub fn loop(
@@ -44,28 +49,32 @@ pub fn loop(
     torrent: Torrent,
     files: *Files,
     pieceManager: *PieceManager,
-    addrs: []const std.net.Address,
+    tracker: *HttpTracker,
 ) !void {
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
-    var peers = try alloc.alloc(Peer, addrs.len);
+    var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
-        for (peers) |*peer| {
+        for (peers.items) |peer| {
             if (peer.workingOn) |x| pieceManager.keelPeer(x);
             kq.killPeer(peer.socket);
             peer.deinit(alloc);
+            alloc.destroy(peer);
         }
-        alloc.free(peers);
+        peers.deinit(alloc);
     }
 
-    for (addrs, 0..) |addr, i| {
-        const peer = &peers[i];
+    while (tracker.nextNewPeer()) |addr| {
+        const peer = try alloc.create(Peer);
+        errdefer alloc.destroy(peer);
 
         peer.* = try .init(addr);
 
         try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
         try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+
+        try peers.append(alloc, peer);
     }
 
     var deadCount: usize = 0;
@@ -120,10 +129,11 @@ pub fn loop(
                     if (peer.workingOn) |x| pieceManager.keelPeer(x);
                     kq.killPeer(peer.socket);
                     peer.deinit(alloc);
+                    alloc.destroy(peer);
 
                     deadCount += 1;
 
-                    if (deadCount == peers.len) {
+                    if (deadCount == peers.items.len) {
                         return error.AllStreamsDead;
                     }
                 },
@@ -205,7 +215,7 @@ pub fn loop(
                             peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                         }
 
-                        const requestsPerPeer = try std.math.divCeil(usize, totalPieces, peers.len);
+                        const requestsPerPeer = try std.math.divCeil(usize, totalPieces, peers.items.len);
                         const numberOfPiecesToRequest = @min(requestsPerPeer, 5);
 
                         std.log.info("peer: {d} unchoked, requesting", .{peer.socket});

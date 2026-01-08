@@ -44,10 +44,6 @@ pub fn init(addr: std.net.Address) !Self {
 }
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-    if (self.state == .dead) {
-        return;
-    }
-
     self.state = .dead;
 
     std.posix.close(self.socket);

@@ -1,221 +1,198 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
+const Peer = @import("peer.zig");
 const bencode = @import("bencode.zig");
-const Torrent = @import("torrent.zig");
 const utils = @import("utils.zig");
 
-const DEFAULT_LISTENING_PORT = 6882;
+const Self = @This();
 
-const QueryParam = struct { []const u8, []const u8 };
-const GetAnnounceOpts = struct {
-    peerId: []const u8,
-    announce: []const u8,
-    infoHash: []const u8,
-    port: ?u16 = DEFAULT_LISTENING_PORT,
-    uploaded: usize = 0,
-    downloaded: usize = 0,
-    left: usize,
+peerId: [20]u8,
+
+infoHash: [20]u8,
+
+uploaded: usize,
+
+downloaded: usize,
+
+left: usize,
+
+port: u16 = 6889,
+
+http: ?std.http.Client = null,
+
+oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
+newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
+
+trackers: std.array_list.Aligned(Tracker, null) = .empty,
+
+const Tracker = struct {
+    url: []const u8,
+    interval: usize,
+    checkinAt: usize,
 };
 
-/// caller owns memory
-fn getAnnounce(alloc: std.mem.Allocator, opts: GetAnnounceOpts) ![]const u8 {
-    var http: std.http.Client = .{ .allocator = alloc };
-    defer http.deinit();
+pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    self.oldAddrs.deinit(alloc);
+    self.newAddrs.deinit(alloc);
 
-    try http.initDefaultProxies(alloc);
-
-    var portStringBuf: [10]u8 = undefined;
-    const portString = std.fmt.bufPrint(&portStringBuf, "{d}", .{
-        opts.port orelse DEFAULT_LISTENING_PORT,
-    }) catch unreachable;
-
-    const uploadedString = try std.fmt.allocPrint(alloc, "{d}", .{opts.uploaded});
-    defer alloc.free(uploadedString);
-
-    const downloadedString = try std.fmt.allocPrint(alloc, "{d}", .{opts.downloaded});
-    defer alloc.free(downloadedString);
-
-    const leftString = try std.fmt.allocPrint(alloc, "{d}", .{opts.left});
-    defer alloc.free(leftString);
-
-    const parameters = [_]QueryParam{
-        .{ "info_hash", opts.infoHash },
-        .{ "peer_id", opts.peerId },
-        .{ "port", portString },
-        .{ "uploaded", uploadedString },
-        .{ "downloaded", downloadedString },
-        .{ "left", leftString },
-        .{ "compact", "1" },
-        .{ "key", opts.peerId[16..20] },
-    };
-
-    var uri = try std.Uri.parse(opts.announce);
-
-    const newQuery = try appendQuery(alloc, uri, &parameters);
-    defer alloc.free(newQuery);
-
-    uri.query = .{ .percent_encoded = newQuery };
-
-    if (builtin.is_test) {
-        std.debug.print("skipping sending announce request to {f}\n", .{uri});
-        return try alloc.dupe(u8, @embedFile("./test_files/announce.bencode"));
+    for (self.trackers.items) |tracker| {
+        alloc.free(tracker.url);
     }
+    self.trackers.deinit(alloc);
 
-    std.debug.print("sending request to {f}\n", .{uri});
+    if (self.http) |*x| x.deinit();
+}
 
-    var stream: std.Io.Writer.Allocating = .init(alloc);
-    errdefer stream.deinit();
+fn getHttp(self: *Self, alloc: std.mem.Allocator) !std.http.Client {
+    return self.http orelse blk: {
+        var client: std.http.Client = .{ .allocator = alloc };
+        errdefer client.deinit();
+
+        try client.initDefaultProxies(alloc);
+
+        self.http = client;
+
+        break :blk client;
+    };
+}
+
+pub fn sendAnnounce(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    url: []const u8,
+    responseWriter: *std.Io.Writer,
+    event: ?enum { started },
+) !void {
+    var http = try self.getHttp(alloc);
+
+    var uri: std.Uri = try .parse(url);
+
+    var newQuery = try appendQuery(alloc, uri, &[_]QueryParam{
+        .{ "info_hash", .{ .string = self.infoHash[0..20] } },
+        .{ "peer_id", .{ .string = self.peerId[0..20] } },
+        .{ "port", .{ .int = self.port } },
+        .{ "uploaded", .{ .int = self.uploaded } },
+        .{ "downloaded", .{ .int = self.downloaded } },
+        .{ "left", .{ .int = self.left } },
+        .{ "compact", .{ .int = 1 } },
+        .{ "key", .{ .string = self.peerId[16..20] } },
+        .{
+            "event",
+            if (event) |x| .{ .string = @tagName(x) } else .skip,
+        },
+    });
+    defer newQuery.deinit(alloc);
+
+    uri.query = .{ .percent_encoded = newQuery.items };
 
     const res = try http.fetch(.{
-        .keep_alive = false,
         .method = .GET,
         .location = .{ .uri = uri },
-        .response_writer = &stream.writer,
+        .keep_alive = false,
+        .response_writer = responseWriter,
     });
 
     if (res.status != .ok) {
-        std.log.err("received non ok response ({s}), while fetching {f}", .{
-            @tagName(res.status),
-            uri,
-        });
-        return error.NonOkResponse;
+        return error.NonOkStatus;
     }
-
-    return try alloc.realloc(stream.writer.buffer, stream.writer.end);
 }
 
-test "getAnnounce" {
-    const torrentString = @embedFile("./test_files/custom.torrent");
+/// returns tracker interval, peers are appended to `newPeers`
+pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
+    var stream: std.Io.Writer.Allocating = .init(alloc);
+    defer stream.deinit();
 
-    var torrent: Torrent = try .fromSlice(std.testing.allocator, torrentString);
-    defer torrent.deinit(std.testing.allocator);
+    try self.sendAnnounce(alloc, url, &stream.writer, .started);
 
-    const announcement = try getAnnounce(std.testing.allocator, .{
-        .announce = torrent.announceList[0],
-        .infoHash = &torrent.infoHash,
-        .left = torrent.totalLen,
-        .downloaded = 0,
-        .uploaded = 0,
-        .peerId = &generatePeerId(),
-    });
-    defer std.testing.allocator.free(announcement);
-}
+    var reader: std.Io.Reader = .fixed(stream.written());
 
-const Peer = struct {
-    value: [6]u8,
-    address: std.net.Ip4Address,
-
-    pub fn init(buff: *const [6]u8) Peer {
-        var peer: Peer = undefined;
-
-        @memcpy(&peer.value, buff);
-
-        const ip = peer.value[0..4];
-        const port = std.mem.readInt(u16, peer.value[4..6], .big);
-
-        peer.address = .init(ip, port);
-
-        return peer;
-    }
-
-    pub fn format(self: Peer, w: *std.Io.Writer) !void {
-        try self.address.format(w);
-    }
-};
-const Peers = std.array_list.Aligned(std.net.Address, null);
-
-pub fn getPeers(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !Peers {
-    var value, const peers = blk: {
-        for (torrent.announceList) |announce| {
-            const announcement = try getAnnounce(alloc, .{
-                .announce = announce,
-                .peerId = &peerId,
-                .uploaded = 0,
-                .downloaded = 0,
-                .left = torrent.totalLen,
-                .infoHash = &torrent.infoHash,
-            });
-            defer alloc.free(announcement);
-
-            var announceReader: std.Io.Reader = .fixed(announcement);
-            var value = try bencode.parseValue(alloc, &announceReader, 0);
-
-            const peers = value.inner.dict.get("peers") orelse {
-                std.log.err("expected 'peers' property to exists. Trying next announce url...", .{});
-                value.deinit(alloc);
-                continue;
-            };
-
-            break :blk .{ value, peers };
-        } else {
-            std.log.err("failed to get announce url with valid peers.", .{});
-            return error.NoValidPeers;
-        }
-    };
+    var value = try bencode.parseValue(alloc, &reader, 0);
     defer value.deinit(alloc);
 
-    const peersNum = try std.math.divExact(usize, peers.inner.string.len, 6);
-    var peersArray: Peers = try .initCapacity(alloc, peersNum);
-    errdefer peersArray.deinit(alloc);
+    if (value.inner.dict.get("failure reason")) |failureReason| {
+        std.log.err("received err from tracker: {s}", .{failureReason.inner.string});
+        return error.FailedAnnouncement;
+    }
+
+    const interval = value.inner.dict.get("interval") orelse return error.MissingInternal;
+    const peers = value.inner.dict.get("peers") orelse return error.MissinPeers;
 
     var window = std.mem.window(u8, peers.inner.string, 6, 6);
     var i: u32 = 0;
     while (window.next()) |peerString| : (i += 1) {
-        utils.assert(peerString.len == 6);
+        const new = peerString[0..6];
 
-        const port = std.mem.readInt(u16, peerString[4..6], .big);
+        for (self.oldAddrs.items) |old| {
+            if (std.mem.eql(u8, old[0..6], new)) {
+                continue;
+            }
+        }
 
-        peersArray.appendAssumeCapacity(.initIp4(peerString[0..4].*, port));
+        try self.newAddrs.append(alloc, new.*);
     }
 
-    return peersArray;
+    try self.oldAddrs.ensureTotalCapacity(alloc, self.newAddrs.items.len);
+
+    return interval.inner.int;
 }
 
-test "getPeers" {
-    const file = @embedFile("./test_files/custom.torrent");
+pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void {
+    const interval = try self.announce(alloc, url);
 
-    var torrent: Torrent = try .fromSlice(std.testing.allocator, file);
-    defer torrent.deinit(std.testing.allocator);
+    const now: usize = @intCast(std.time.milliTimestamp());
+    try self.trackers.append(alloc, .{
+        .url = try alloc.dupe(u8, url),
+        .interval = interval * std.time.ns_per_s,
+        .checkinAt = now + interval * std.time.ns_per_s,
+    });
+}
 
-    const peerId = generatePeerId();
+pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
+    const now: usize = @intCast(std.time.milliTimestamp());
 
-    var peers = try getPeers(std.testing.allocator, peerId, torrent);
-    defer peers.deinit(std.testing.allocator);
+    for (self.trackers.items) |*tracker| {
+        if (tracker.checkinAt > now) {
+            continue;
+        }
 
-    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer writer.deinit();
-
-    for (peers.items) |peer| {
-        try writer.writer.print("{f}\n", .{peer});
+        const interval = self.announce(alloc, tracker.url);
+        tracker.interval = interval * std.time.ns_per_s;
+        tracker.checkinAt = now + interval * std.time.ns_per_s;
     }
 
-    try std.testing.expectEqualStrings(
-        \\192.168.97.1:6881
-        \\127.0.0.1:9000
-        \\
-    , writer.writer.buffered());
-}
-
-pub fn generatePeerId() [20]u8 {
-    var id: [20]u8 = undefined;
-
-    @memcpy(id[0..8], "-TZ0001-");
-
-    var random: std.Random.DefaultPrng = .init(@intCast(std.time.milliTimestamp()));
-    for (8..20) |i| {
-        const char = random.random().intRangeAtMost(u8, '0', 'Z');
-        id[i] = char;
+    var interval = self.trackers.items[0].interval;
+    for (self.trackers.items[1..]) |tracker| {
+        if (interval > tracker.interval) {
+            interval = tracker.interval;
+        }
     }
 
-    return id;
+    return interval;
 }
+
+pub fn nextNewPeer(self: *Self) ?std.net.Address {
+    const newPeer = self.newAddrs.pop() orelse return null;
+
+    self.oldAddrs.appendAssumeCapacity(newPeer);
+
+    const port = std.mem.readInt(u16, newPeer[4..6], .big);
+
+    return std.net.Address.initIp4(newPeer[0..4].*, port);
+}
+
+const QueryValue = union(enum) {
+    string: []const u8,
+    int: usize,
+    skip,
+};
+
+const QueryParam = struct { []const u8, QueryValue };
 
 fn appendQuery(
     alloc: std.mem.Allocator,
     url: std.Uri,
     queries: []const QueryParam,
-) ![]const u8 {
+) !std.array_list.Aligned(u8, null) {
     var w: std.Io.Writer.Allocating = .init(alloc);
     errdefer w.deinit();
 
@@ -232,47 +209,72 @@ fn appendQuery(
     for (queries, 0..) |query, i| {
         const key, const val = query;
 
-        const valComp: std.Uri.Component = .{ .raw = val };
+        switch (val) {
+            .int => |int| {
+                try writer.print("{s}=", .{key});
+                try writer.print("{d}", .{int});
+            },
 
-        try writer.print("{s}=", .{key});
-        // default zig's query escaping is not enough...
-        try valComp.formatEscaped(writer);
+            // default zig's query escaping is not enough...
+            .string => |string| {
+                try writer.print("{s}=", .{key});
+                const valComp: std.Uri.Component = .{ .raw = string };
+                try valComp.formatEscaped(writer);
+            },
+
+            .skip => continue,
+        }
+
         if (i != queries.len - 1) {
             try writer.writeByte('&');
         }
     }
 
-    return try alloc.realloc(writer.buffer, writer.end);
+    return w.toArrayList();
 }
 
-test "mergeQuery" {
+test "appendQuery" {
     const url1 = try std.Uri.parse("https://toloka.ua/something?else=true");
 
-    const query1 = try appendQuery(std.testing.allocator, url1, &.{
-        .{ "port", "456" },
-        .{ "compact", "1" },
+    var query1 = try appendQuery(std.testing.allocator, url1, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
     });
-    defer std.testing.allocator.free(query1);
+    defer query1.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("else=true&port=456&compact=1", query1);
+    try std.testing.expectEqualStrings("else=true&port=456&compact=1", query1.items);
 
     const url2 = try std.Uri.parse("https://toloka.ua/something");
 
-    const query2 = try appendQuery(std.testing.allocator, url2, &.{
-        .{ "port", "456" },
-        .{ "compact", "1" },
+    var query2 = try appendQuery(std.testing.allocator, url2, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
     });
-    defer std.testing.allocator.free(query2);
+    defer query2.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("port=456&compact=1", query2);
+    try std.testing.expectEqualStrings("port=456&compact=1", query2.items);
 
     const url3 = try std.Uri.parse("https://toloka.ua/something?testing&");
 
-    const query3 = try appendQuery(std.testing.allocator, url3, &.{
-        .{ "port", "456" },
-        .{ "compact", "1" },
+    var query3 = try appendQuery(std.testing.allocator, url3, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
     });
-    defer std.testing.allocator.free(query3);
+    defer query3.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("testing&port=456&compact=1", query3);
+    try std.testing.expectEqualStrings("testing&port=456&compact=1", query3.items);
+}
+
+pub fn generatePeerId() [20]u8 {
+    var id: [20]u8 = undefined;
+
+    @memcpy(id[0..8], "-TZ0001-");
+
+    var random: std.Random.DefaultPrng = .init(@intCast(std.time.milliTimestamp()));
+    for (8..20) |i| {
+        const char = random.random().intRangeAtMost(u8, '0', 'Z');
+        id[i] = char;
+    }
+
+    return id;
 }

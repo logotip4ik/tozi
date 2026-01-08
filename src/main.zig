@@ -25,7 +25,7 @@ pub fn main() !void {
     var torrent: tozi.Torrent = try .fromSlice(alloc, fileContents);
     defer torrent.deinit(alloc);
 
-    const peerId = tozi.generatePeerId();
+    const peerId = tozi.HttpTracker.generatePeerId();
 
     try tozi.downloadTorrent(alloc, peerId, torrent);
 }
