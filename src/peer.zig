@@ -44,28 +44,12 @@ pub fn init(addr: std.net.Address) !Self {
     return .{ .socket = fd };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator, k: *KQ) void {
+pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     if (self.state == .dead) {
         return;
     }
 
     self.state = .dead;
-
-    k.unsubscribe(self.socket, .read) catch |err| {
-        std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
-            self.socket,
-            @errorName(err),
-        });
-    };
-    k.unsubscribe(self.socket, .write) catch |err| switch (err) {
-        error.EventNotFound => {}, // already unsubscribed
-        else => {
-            std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
-                self.socket,
-                @errorName(err),
-            });
-        },
-    };
 
     std.posix.close(self.socket);
     self.buf.deinit(alloc);
@@ -92,7 +76,7 @@ pub fn setBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8) !vo
     }
 }
 
-pub fn readInt(self: *Self, comptime T: type, endian: std.builtin.Endian) !T {
+pub fn readInt(self: *Self, comptime T: type) !T {
     const n = @divExact(@typeInfo(T).int.bits, 8);
     var buf: [n]u8 = undefined;
 
@@ -106,7 +90,7 @@ pub fn readInt(self: *Self, comptime T: type, endian: std.builtin.Endian) !T {
         total += count;
     }
 
-    return std.mem.readInt(T, &buf, endian);
+    return std.mem.readInt(T, &buf, .big);
 }
 
 pub fn readTotalBuf(self: *Self, alloc: std.mem.Allocator, size: usize) !?[]u8 {

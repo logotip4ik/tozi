@@ -51,7 +51,25 @@ pub fn loop(
 
     var peers = try alloc.alloc(Peer, addrs.len);
     defer {
-        for (peers) |*peer| peer.deinit(alloc, &kq);
+        for (peers) |*peer| {
+            kq.unsubscribe(peer.socket, .read) catch |err| {
+                std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
+                    peer.socket,
+                    @errorName(err),
+                });
+            };
+            kq.unsubscribe(peer.socket, .write) catch |err| switch (err) {
+                error.EventNotFound => {}, // already unsubscribed
+                else => {
+                    std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
+                        peer.socket,
+                        @errorName(err),
+                    });
+                },
+            };
+
+            peer.deinit(alloc);
+        }
         alloc.free(peers);
     }
 
@@ -75,19 +93,13 @@ pub fn loop(
     while (try kq.next()) |event| {
         const peer: *Peer = @ptrFromInt(event.kevent.udata);
 
-        if (event.err) |err| {
-            std.log.err("peer: {d} error {s}", .{ peer.socket, @tagName(err) });
-            peer.deinit(alloc, &kq);
-            deadCount += 1;
-
-            if (deadCount == peers.len) {
-                return error.AllStreamsDead;
-            }
+        if (event.err) |_| {
+            peer.state = .dead;
+            peer.direction = .read;
         }
 
         switch (event.op) {
             .write => if (peer.direction == .write) switch (peer.state) {
-                .dead => {},
                 .handshake => {
                     _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
 
@@ -113,6 +125,12 @@ pub fn loop(
             },
             .read => if (peer.direction == .read) sw: switch (peer.state) {
                 .dead => if (peer.state != .dead) {
+                    if (event.err) |err| {
+                        std.log.err("peer: {d} dead with error {s}", .{ peer.socket, @tagName(err) });
+                    } else {
+                        std.log.err("peer: {d} dead", .{peer.socket});
+                    }
+
                     if (peer.workingOn) |workingOn| {
                         var iter = workingOn.iterator(.{ .direction = .forward, .kind = .set });
                         while (iter.next()) |index| {
@@ -120,7 +138,23 @@ pub fn loop(
                         }
                     }
 
-                    peer.deinit(alloc, &kq);
+                    kq.unsubscribe(peer.socket, .read) catch |e| {
+                        std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
+                            peer.socket,
+                            @errorName(e),
+                        });
+                    };
+                    kq.unsubscribe(peer.socket, .write) catch |e| switch (e) {
+                        error.EventNotFound => {}, // already unsubscribed
+                        else => {
+                            std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
+                                peer.socket,
+                                @errorName(e),
+                            });
+                        },
+                    };
+
+                    peer.deinit(alloc);
                     deadCount += 1;
 
                     if (deadCount == peers.len) {
@@ -142,7 +176,7 @@ pub fn loop(
                     std.log.info("peer: {d} handshake ok", .{peer.socket});
                 },
                 .messageStart => {
-                    const len = try peer.readInt(u32, .big);
+                    const len = try peer.readInt(u32);
                     if (len == 0) {
                         // keep alive, send requests ?
                         continue;
@@ -153,7 +187,7 @@ pub fn loop(
                         continue :sw .dead;
                     }
 
-                    const idInt = try peer.readInt(u8, .big);
+                    const idInt = try peer.readInt(u8);
                     const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
                         std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
                         continue;
@@ -164,24 +198,24 @@ pub fn loop(
                         .unchoke => .unchoke,
                         .interested => .interested,
                         .not_interested => .not_interested,
-                        .have => .{ .have = try peer.readInt(u32, .big) },
+                        .have => .{ .have = try peer.readInt(u32) },
                         .bitfield => .{ .bitfield = len - 1 },
                         .request => .{ .request = .{
-                            .index = try peer.readInt(u32, .big),
-                            .begin = try peer.readInt(u32, .big),
+                            .index = try peer.readInt(u32),
+                            .begin = try peer.readInt(u32),
                             .len = len - 9,
                         } },
                         .piece => .{ .piece = .{
-                            .index = try peer.readInt(u32, .big),
-                            .begin = try peer.readInt(u32, .big),
+                            .index = try peer.readInt(u32),
+                            .begin = try peer.readInt(u32),
                             .len = len - 9,
                         } },
                         .cancel => .{ .cancel = .{
-                            .index = try peer.readInt(u32, .big),
-                            .begin = try peer.readInt(u32, .big),
+                            .index = try peer.readInt(u32),
+                            .begin = try peer.readInt(u32),
                             .len = len - 9,
                         } },
-                        .port => .{ .port = try peer.readInt(u16, .big) },
+                        .port => .{ .port = try peer.readInt(u16) },
                     };
 
                     peer.state = .{ .message = message };
