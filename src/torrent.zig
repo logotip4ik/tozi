@@ -78,22 +78,34 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     else
         null;
 
-    const announceList = if (dict.get("announce-list")) |v| blk: {
+    var announces: std.array_list.Aligned([]const u8, null) = .empty;
+
+    if (dict.get("announce-list")) |v| {
         const list = v.inner.list.items[0].inner.list;
 
-        const ret = try alloc.alloc([]const u8, list.items.len + 1);
-        errdefer alloc.free(ret);
+        outer: for (list.items) |item| {
+            for (announces.items) |existing| {
+                if (std.mem.eql(u8, existing, item.inner.string)) {
+                    continue :outer;
+                }
+            }
 
-        for (list.items, 0..) |item, i| ret[i] = item.inner.string;
-        if (announce) |x| ret[ret.len - 1] = x;
+            try announces.append(alloc, item.inner.string);
+        }
 
-        break :blk ret;
-    } else if (announce) |x| blk: {
-        const ret = try alloc.alloc([]const u8, 1);
-        ret[0] = x;
-        break :blk ret;
+        if (announce) |a| {
+            for (announces.items) |existing| {
+                if (std.mem.eql(u8, existing, a)) {
+                    break;
+                }
+            } else {
+                try announces.append(alloc, a);
+            }
+        }
+    } else if (announce) |x| {
+        try announces.append(alloc, x);
     } else return error.NoAnnounceUrls;
-    errdefer alloc.free(announceList);
+    defer announces.deinit(alloc);
 
     const info = if (dict.get("info")) |v| v else {
         std.log.err("expected 'info' property to exists in torrent", .{});
@@ -151,7 +163,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
     return Torrent{
         .value = value,
-        .announceList = announceList,
+        .announceList = try announces.toOwnedSlice(alloc),
         .created_by = null,
         .creation_date = null,
         .files = files,
