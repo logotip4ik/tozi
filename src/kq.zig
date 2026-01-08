@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Peer = @import("peer.zig");
 const utils = @import("utils.zig");
 
 fd: std.posix.fd_t,
@@ -11,7 +12,7 @@ const Self = @This();
 
 const KEvent = std.posix.Kevent;
 
-pub const Op = enum { write, read };
+pub const Kind = enum { write, read };
 
 const logger = std.log.scoped(.kqueue);
 const MAX_EVENTS = 8;
@@ -40,10 +41,10 @@ fn compareKEvents(_: CompareContext, _: KEvent, _: KEvent) std.math.Order {
     return .lt;
 }
 
-pub fn subscribe(self: Self, socketId: std.posix.fd_t, op: Op, udata: usize) !void {
+pub fn subscribe(self: Self, socketId: std.posix.fd_t, kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
-    const filter: isize = switch (op) {
+    const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
     };
@@ -60,8 +61,8 @@ pub fn subscribe(self: Self, socketId: std.posix.fd_t, op: Op, udata: usize) !vo
     }, &.{}, null);
 }
 
-pub fn unsubscribe(self: *Self, socketId: std.posix.fd_t, op: Op) !void {
-    const filter: isize = switch (op) {
+pub fn unsubscribe(self: *Self, socketId: std.posix.fd_t, kind: Kind) !void {
+    const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
     };
@@ -96,7 +97,7 @@ const NextError = error{
 
 const CustomEvent = struct {
     kevent: KEvent,
-    op: Op,
+    kind: Kind,
     err: ?std.c.E,
 };
 
@@ -139,11 +140,30 @@ pub fn next(self: *Self) NextError!?CustomEvent {
         }
     }
 
-    const op: Op = switch (ev.filter) {
+    const kind: Kind = switch (ev.filter) {
         std.c.EVFILT.READ => .read,
         std.c.EVFILT.WRITE => .write,
         else => unreachable,
     };
 
-    return .{ .kevent = ev, .op = op, .err = err };
+    return .{ .kevent = ev, .kind = kind, .err = err };
+}
+
+pub fn killPeer(self: *Self, socket: std.posix.fd_t) void {
+    self.unsubscribe(socket, .read) catch |err| {
+        std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
+            socket,
+            @errorName(err),
+        });
+    };
+
+    self.unsubscribe(socket, .write) catch |err| switch (err) {
+        error.EventNotFound => {}, // already unsubscribed
+        else => {
+            std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
+                socket,
+                @errorName(err),
+            });
+        },
+    };
 }

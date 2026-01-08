@@ -52,22 +52,8 @@ pub fn loop(
     var peers = try alloc.alloc(Peer, addrs.len);
     defer {
         for (peers) |*peer| {
-            kq.unsubscribe(peer.socket, .read) catch |err| {
-                std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
-                    peer.socket,
-                    @errorName(err),
-                });
-            };
-            kq.unsubscribe(peer.socket, .write) catch |err| switch (err) {
-                error.EventNotFound => {}, // already unsubscribed
-                else => {
-                    std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
-                        peer.socket,
-                        @errorName(err),
-                    });
-                },
-            };
-
+            if (peer.workingOn) |x| pieceManager.keelPeer(x);
+            kq.killPeer(peer.socket);
             peer.deinit(alloc);
         }
         alloc.free(peers);
@@ -98,7 +84,7 @@ pub fn loop(
             peer.direction = .read;
         }
 
-        switch (event.op) {
+        switch (event.kind) {
             .write => if (peer.direction == .write) switch (peer.state) {
                 .handshake => {
                     _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
@@ -131,30 +117,10 @@ pub fn loop(
                         std.log.err("peer: {d} dead", .{peer.socket});
                     }
 
-                    if (peer.workingOn) |workingOn| {
-                        var iter = workingOn.iterator(.{ .direction = .forward, .kind = .set });
-                        while (iter.next()) |index| {
-                            pieceManager.reset(@intCast(index));
-                        }
-                    }
-
-                    kq.unsubscribe(peer.socket, .read) catch |e| {
-                        std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
-                            peer.socket,
-                            @errorName(e),
-                        });
-                    };
-                    kq.unsubscribe(peer.socket, .write) catch |e| switch (e) {
-                        error.EventNotFound => {}, // already unsubscribed
-                        else => {
-                            std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
-                                peer.socket,
-                                @errorName(e),
-                            });
-                        },
-                    };
-
+                    if (peer.workingOn) |x| pieceManager.keelPeer(x);
+                    kq.killPeer(peer.socket);
                     peer.deinit(alloc);
+
                     deadCount += 1;
 
                     if (deadCount == peers.len) {

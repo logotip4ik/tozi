@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const KQ = @import("kq.zig");
 const proto = @import("proto.zig");
 
 const Self = @This();
@@ -8,7 +7,7 @@ const Self = @This();
 socket: std.posix.fd_t,
 
 state: State = .handshake,
-direction: KQ.Op = .write,
+direction: enum { write, read } = .write,
 
 choked: bool = true,
 interested: bool = false,

@@ -132,3 +132,14 @@ pub fn complete(self: *Self, index: u32) !PieceBuf {
     const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
     return kv.value;
 }
+
+pub fn keelPeer(self: *Self, workingOn: std.DynamicBitSetUnmanaged) void {
+    var iter = workingOn.iterator(.{
+        .direction = .forward,
+        .kind = .set,
+    });
+
+    while (iter.next()) |index| {
+        self.reset(@intCast(index));
+    }
+}
