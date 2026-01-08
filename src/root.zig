@@ -40,24 +40,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     var pieces: PieceManager = try .init(alloc, numberOfPieces);
     defer pieces.deinit(alloc);
 
-    try loop(alloc, peerId, torrent, &files, &pieces, &tracker);
-}
-
-pub fn loop(
-    alloc: std.mem.Allocator,
-    peerId: [20]u8,
-    torrent: Torrent,
-    files: *Files,
-    pieceManager: *PieceManager,
-    tracker: *HttpTracker,
-) !void {
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
-            if (peer.workingOn) |x| pieceManager.keelPeer(x);
+            if (peer.workingOn) |x| pieces.keelPeer(x);
             kq.killPeer(peer.socket);
             peer.deinit(alloc);
             alloc.destroy(peer);
@@ -65,17 +54,8 @@ pub fn loop(
         peers.deinit(alloc);
     }
 
-    while (tracker.nextNewPeer()) |addr| {
-        const peer = try alloc.create(Peer);
-        errdefer alloc.destroy(peer);
-
-        peer.* = try .init(addr);
-
-        try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
-        try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
-
-        try peers.append(alloc, peer);
-    }
+    // initiate loop
+    try kq.addTimer(0, 0);
 
     var deadCount: usize = 0;
 
@@ -86,6 +66,38 @@ pub fn loop(
     const handshakeBytes = std.mem.asBytes(&handshake);
 
     while (try kq.next()) |event| {
+        if (event.kind == .timer) {
+            var downloaded: u64 = 0;
+
+            for (pieces.pieces, 0..) |state, i| {
+                if (state == .have) {
+                    downloaded += torrent.getPieceSize(i);
+                }
+            }
+
+            tracker.downloaded = downloaded;
+            tracker.left = torrent.totalLen - downloaded;
+
+            const nextKeepAlive = try tracker.keepAlive(alloc);
+
+            std.log.info("setting timer to next: {d}", .{nextKeepAlive});
+            try kq.addTimer(0, nextKeepAlive);
+
+            while (tracker.nextNewPeer()) |addr| {
+                const peer = try alloc.create(Peer);
+                errdefer alloc.destroy(peer);
+
+                peer.* = try .init(addr);
+
+                try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
+                try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+
+                try peers.append(alloc, peer);
+            }
+
+            continue;
+        }
+
         const peer: *Peer = @ptrFromInt(event.kevent.udata);
 
         if (event.err) |_| {
@@ -126,11 +138,7 @@ pub fn loop(
                         std.log.err("peer: {d} dead", .{peer.socket});
                     }
 
-                    if (peer.workingOn) |x| pieceManager.keelPeer(x);
-                    kq.killPeer(peer.socket);
-                    peer.deinit(alloc);
-                    alloc.destroy(peer);
-
+                    peer.state = .dead;
                     deadCount += 1;
 
                     if (deadCount == peers.items.len) {
@@ -225,7 +233,7 @@ pub fn loop(
                         defer peer.buf = writer.toArrayList();
 
                         for (0..numberOfPiecesToRequest) |_| {
-                            const index = pieceManager.getWorkingPiece(bitfield) orelse break;
+                            const index = pieces.getWorkingPiece(bitfield) orelse break;
                             const pieceLen = torrent.getPieceSize(index);
                             try proto.writeRequestsBatch(&writer.writer, index, pieceLen);
                             peer.workingOn.?.set(index);
@@ -281,14 +289,14 @@ pub fn loop(
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
-                        const completed = try pieceManager.writePiece(alloc, piece, pieceLen, chunkBytes) orelse {
+                        const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse {
                             peer.state = .messageStart;
                             continue;
                         };
                         defer completed.deinit(alloc);
 
                         const expectedHash = torrent.pieces[piece.index * 20 ..];
-                        pieceManager.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
+                        pieces.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
                             peer.state = .messageStart;
@@ -305,7 +313,7 @@ pub fn loop(
                             @branchHint(.cold);
                             std.log.err("unexpected empty bitfield with piece message", .{});
                             peer.state = .messageStart;
-                            pieceManager.reset(piece.index);
+                            pieces.reset(piece.index);
                             continue;
                         };
 
@@ -316,7 +324,7 @@ pub fn loop(
                             @branchHint(.cold);
                             std.log.err("unexpected empty workingOn with piece message", .{});
                             peer.state = .messageStart;
-                            pieceManager.reset(piece.index);
+                            pieces.reset(piece.index);
                             continue;
                         }
 
@@ -325,7 +333,7 @@ pub fn loop(
                             continue;
                         }
 
-                        if (pieceManager.getWorkingPiece(bitfield)) |nextWorkingPiece| {
+                        if (pieces.getWorkingPiece(bitfield)) |nextWorkingPiece| {
                             @branchHint(.likely);
 
                             peer.buf.clearRetainingCapacity();
@@ -342,7 +350,7 @@ pub fn loop(
                             peer.workingOn.?.set(nextWorkingPiece);
 
                             try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                        } else if (pieceManager.isDownloadComplete()) {
+                        } else if (pieces.isDownloadComplete()) {
                             std.log.info("download finished", .{});
                             return;
                         } else {
@@ -360,6 +368,7 @@ pub fn loop(
                 },
                 else => unreachable,
             },
+            else => unreachable,
         }
     }
 }
