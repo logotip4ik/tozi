@@ -36,7 +36,7 @@ const Peer = struct {
         );
         errdefer std.posix.close(fd);
 
-        std.log.info("peer: connecting to {f}\n", .{addr});
+        std.log.info("peer: {d} connecting to {f}", .{fd, addr});
 
         std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
             error.WouldBlock => {},
