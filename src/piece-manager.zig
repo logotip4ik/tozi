@@ -42,7 +42,7 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.buffers.deinit(alloc);
 }
 
-pub fn verifyPiece(
+pub fn validatePiece(
     self: *Self,
     index: u32,
     noalias bytes: []const u8,
