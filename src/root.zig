@@ -1,25 +1,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Torrent = @import("torrent.zig");
-const PieceManager = @import("piece-manager.zig");
-const Files = @import("files.zig");
-const KQ = @import("kq.zig");
-const Peer = @import("peer.zig");
+pub const Torrent = @import("torrent.zig");
+pub const PieceManager = @import("piece-manager.zig");
+pub const Files = @import("files.zig");
+pub const KQ = @import("kq.zig");
+pub const Peer = @import("peer.zig");
 const httpTracker = @import("http-tracker.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
-pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void {
-    const torrentFile = try std.fs.cwd().openFile(torrentPath, .{});
-    defer torrentFile.close();
+comptime {
+    utils.assert(builtin.os.tag == .macos);
+}
 
-    const torrentSlice = try torrentFile.readToEndAlloc(alloc, 64 * 1024 * 1024);
-    defer alloc.free(torrentSlice);
+pub const generatePeerId = httpTracker.generatePeerId;
 
-    var torrent: Torrent = try .fromSlice(alloc, torrentSlice);
-    defer torrent.deinit(alloc);
-
+pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !void {
     for (torrent.announceList) |announce| {
         utils.assert(std.mem.startsWith(u8, announce, "http"));
     }
@@ -27,28 +24,24 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, torrentPath: []const u8) !void 
     var files: Files = try .init(alloc, torrent);
     defer files.deinit();
 
-    const peerId = httpTracker.generatePeerId();
-
     var peers = httpTracker.getPeers(alloc, peerId, torrent) catch |err| {
         std.log.err("failed sending announcement with {s}", .{@errorName(err)});
         return;
     };
     defer peers.deinit(alloc);
 
-    comptime utils.assert(builtin.os.tag == .macos);
-
     const numberOfPieces = torrent.pieces.len / 20;
 
     var pieces: PieceManager = try .init(alloc, numberOfPieces);
     defer pieces.deinit(alloc);
 
-    try loop(alloc, peerId, &torrent, &files, &pieces, peers.items);
+    try loop(alloc, peerId, torrent, &files, &pieces, peers.items);
 }
 
 pub fn loop(
     alloc: std.mem.Allocator,
     peerId: [20]u8,
-    torrent: *Torrent,
+    torrent: Torrent,
     files: *Files,
     pieceManager: *PieceManager,
     addrs: []const std.net.Address,
@@ -296,9 +289,7 @@ pub fn loop(
                         completedCount += 1;
 
                         const percent = (completedCount * 100) / totalPieces;
-                        std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{
-                            completedCount, totalPieces, percent, piece.index 
-                        });
+                        std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{ completedCount, totalPieces, percent, piece.index });
 
                         const bitfield = peer.bitfield orelse {
                             @branchHint(.cold);

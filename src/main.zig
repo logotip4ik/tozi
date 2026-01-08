@@ -10,5 +10,22 @@ pub fn main() !void {
 
     const alloc = gpa.allocator();
 
-    try tozi.downloadTorrent(alloc, "./src/test_files/toloka.torrent");
+    const torrentPath = "src/test_files/copper.torrent";
+    const file = std.fs.cwd().openFile(torrentPath, .{}) catch {
+        std.log.err("failed openning {s} file", .{torrentPath});
+        return;
+    };
+    defer file.close();
+
+    var readerBuf: [64 * 1024]u8 = undefined;
+    var reader = file.reader(&readerBuf);
+    const fileContents = try reader.interface.allocRemaining(alloc, .unlimited);
+    defer alloc.free(fileContents);
+
+    var torrent: tozi.Torrent = try .fromSlice(alloc, fileContents);
+    defer torrent.deinit(alloc);
+
+    const peerId = tozi.generatePeerId();
+
+    try tozi.downloadTorrent(alloc, peerId, torrent);
 }
