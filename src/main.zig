@@ -10,5 +10,5 @@ pub fn main() !void {
 
     const alloc = gpa.allocator();
 
-    try tozi.downloadTorrent(alloc, "./src/test_files/copper.torrent");
+    try tozi.downloadTorrent(alloc, "./src/test_files/toloka.torrent");
 }
