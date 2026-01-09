@@ -1,14 +1,43 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
 const tozi = @import("tozi");
 
-pub fn main() !void {
-    // var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
-    // defer arena.deinit();
-    // const alloc = arena.allocator();
+const Heap = if (builtin.mode == .Debug) struct {
+    gpa: std.heap.DebugAllocator(.{}),
 
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    pub fn init() @This() {
+        return .{ .gpa = .init };
+    }
+
+    pub fn alloc(self: *@This()) std.mem.Allocator {
+        return self.gpa.allocator();
+    }
+
+    pub fn deinit(self: *@This()) void {
+        _ = self.gpa.deinit();
+    }
+} else struct {
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init() @This() {
+        return .{ .arena = .init(std.heap.smp_allocator) };
+    }
+
+    pub fn alloc(self: *@This()) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.arena.deinit();
+    }
+};
+
+pub fn main() !void {
+    var heap: Heap = .init();
+    defer heap.deinit();
+
+    const alloc = heap.alloc();
 
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
