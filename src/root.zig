@@ -93,7 +93,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     continue;
                 };
 
-                try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
                 try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
 
                 try peers.append(alloc, peer);
@@ -122,6 +121,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 peer.buf.clearRetainingCapacity();
 
                 try kq.unsubscribe(peer.socket, .write);
+                try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
             },
             .bufFlush => {
                 if (peer.buf.items.len == 0) {
