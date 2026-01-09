@@ -46,7 +46,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
-            if (peer.workingOn) |x| pieces.keelPeer(x);
+            if (peer.workingOn) |x| pieces.killPeer(x);
             kq.killPeer(peer.socket);
             peer.deinit(alloc);
             alloc.destroy(peer);
@@ -104,12 +104,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
         const peer: *Peer = @ptrFromInt(event.kevent.udata);
 
-        if (event.err) |_| {
+        if (event.err) |err| {
             peer.state = .dead;
-            peer.direction = .read;
+            std.log.err("peer: {d} received {t}", .{ peer.socket, err });
         }
 
-        switch (event.kind) {
+        if (peer.state != .dead) switch (event.kind) {
             .write => if (peer.direction == .write) switch (peer.state) {
                 .handshake => {
                     _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
@@ -135,19 +135,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 },
             },
             .read => if (peer.direction == .read) sw: switch (peer.state) {
-                .dead => if (peer.state != .dead) {
-                    if (event.err) |err| {
-                        std.log.err("peer: {d} dead with error {s}", .{ peer.socket, @tagName(err) });
-                    } else {
-                        std.log.err("peer: {d} dead", .{peer.socket});
-                    }
-
+                .dead => {
                     peer.state = .dead;
-                    deadCount += 1;
-
-                    if (deadCount == peers.items.len) {
-                        return error.AllStreamsDead;
-                    }
                 },
                 .handshake => {
                     const bytes = try peer.readTotalBuf(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
@@ -373,6 +362,17 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 else => unreachable,
             },
             else => unreachable,
+        };
+
+        if (peer.state == .dead) {
+            deadCount += 1;
+
+            kq.killPeer(peer.socket);
+            if (peer.workingOn) |x| pieces.killPeer(x);
+
+            if (deadCount == peers.items.len) {
+                return error.AllStreamsDead;
+            }
         }
     }
 }

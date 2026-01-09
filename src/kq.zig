@@ -168,20 +168,19 @@ pub fn next(self: *Self) NextError!?CustomEvent {
 }
 
 pub fn killPeer(self: *Self, socket: std.posix.fd_t) void {
-    self.unsubscribe(socket, .read) catch |err| {
-        std.log.err("received err while unsubscribing from read for socket {d} with {s}\n", .{
+    self.unsubscribe(socket, .read) catch |err| switch (err) {
+        error.EventNotFound => {}, // already unsubscribed
+        else => std.log.err("received err while unsubscribing from read for socket {d} with {s}", .{
             socket,
             @errorName(err),
-        });
+        }),
     };
 
     self.unsubscribe(socket, .write) catch |err| switch (err) {
         error.EventNotFound => {}, // already unsubscribed
-        else => {
-            std.log.err("received err while unsubscribing from write for socket {d} with {s}\n", .{
-                socket,
-                @errorName(err),
-            });
-        },
+        else => std.log.err("received err while unsubscribing from write for socket {d} with {s}", .{
+            socket,
+            @errorName(err),
+        }),
     };
 }

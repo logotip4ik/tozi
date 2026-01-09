@@ -133,7 +133,7 @@ pub fn complete(self: *Self, index: u32) !PieceBuf {
     return kv.value;
 }
 
-pub fn keelPeer(self: *Self, workingOn: std.DynamicBitSetUnmanaged) void {
+pub fn killPeer(self: *Self, workingOn: std.DynamicBitSetUnmanaged) void {
     var iter = workingOn.iterator(.{
         .direction = .forward,
         .kind = .set,
