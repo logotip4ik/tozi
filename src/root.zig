@@ -195,7 +195,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     .request => .{ .request = .{
                         .index = try peer.readInt(u32),
                         .begin = try peer.readInt(u32),
-                        .len = len - 9,
+                        .len = try peer.readInt(u32),
                     } },
                     .piece => .{ .piece = .{
                         .index = try peer.readInt(u32),
@@ -205,7 +205,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     .cancel => .{ .cancel = .{
                         .index = try peer.readInt(u32),
                         .begin = try peer.readInt(u32),
-                        .len = len - 9,
+                        .len = try peer.readInt(u32),
                     } },
                     .port => .{ .port = try peer.readInt(u16) },
                 };
