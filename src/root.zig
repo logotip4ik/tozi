@@ -285,11 +285,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
 
                     peer.inFlight.receive(.{ .pieceIndex = piece.index, .begin = piece.begin }) catch {};
-                    if (peer.getNextWorkingPiece(&pieces)) |workingPiece| {
+                    if (!peer.choked) if (peer.getNextWorkingPiece(&pieces)) |workingPiece| {
+                        @branchHint(.likely);
+
                         _ = peer.addRequest(workingPiece, torrent.getPieceSize(workingPiece));
 
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                    }
+                    };
 
                     const pieceLen = torrent.getPieceSize(piece.index);
                     const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
@@ -316,6 +318,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{ completedCount, totalPieces, percent, piece.index });
 
                     if (pieces.isDownloadComplete()) {
+                        @branchHint(.cold);
                         std.log.info("download finished", .{});
                         return;
                     }
