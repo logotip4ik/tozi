@@ -1,8 +1,11 @@
 const std = @import("std");
 
 const proto = @import("proto.zig");
+const utils = @import("utils.zig");
+const Torrent = @import("torrent.zig");
+const PieceManager = @import("piece-manager.zig");
 
-const Self = @This();
+const Peer = @This();
 
 socket: std.posix.fd_t,
 
@@ -16,6 +19,12 @@ buf: std.array_list.Aligned(u8, null) = .empty,
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
 
+mq: utils.Queue(proto.Message, 16) = .{},
+
+workingPiece: ?u32 = null,
+workingPieceOffset: u32 = 0,
+inFlight: utils.RqPool(5) = .{},
+
 pub const State = union(enum) {
     readHandshake,
     writeHandshake,
@@ -25,7 +34,7 @@ pub const State = union(enum) {
     dead,
 };
 
-pub fn init(addr: std.net.Address) !Self {
+pub fn init(addr: std.net.Address) !Peer {
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
@@ -43,18 +52,18 @@ pub fn init(addr: std.net.Address) !Self {
     return .{ .socket = fd };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-    self.state = .dead;
+pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
+    p.state = .dead;
 
-    std.posix.close(self.socket);
-    self.buf.deinit(alloc);
-    if (self.bitfield) |*x| x.deinit(alloc);
-    if (self.workingOn) |*x| x.deinit(alloc);
+    std.posix.close(p.socket);
+    p.buf.deinit(alloc);
+    if (p.bitfield) |*x| x.deinit(alloc);
+    if (p.workingOn) |*x| x.deinit(alloc);
 }
 
-pub fn setBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8) !void {
+pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void {
     var bitfield: std.DynamicBitSetUnmanaged = try .initEmpty(alloc, bytes.len * 8);
-    defer self.bitfield = bitfield;
+    defer p.bitfield = bitfield;
 
     for (bytes, 0..) |byte, i| {
         for (0..8) |bit_idx| {
@@ -71,13 +80,13 @@ pub fn setBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8) !vo
     }
 }
 
-pub fn readInt(self: *Self, comptime T: type) !T {
+pub fn readInt(p: *Peer, comptime T: type) !T {
     const n = @divExact(@typeInfo(T).int.bits, 8);
     var buf: [n]u8 = undefined;
 
     var total: usize = 0;
     while (total != n) {
-        const count = std.posix.read(self.socket, buf[total..n]) catch |err| switch (err) {
+        const count = std.posix.read(p.socket, buf[total..n]) catch |err| switch (err) {
             error.WouldBlock => 0,
             else => return err,
         };
@@ -88,40 +97,82 @@ pub fn readInt(self: *Self, comptime T: type) !T {
     return std.mem.readInt(T, &buf, .big);
 }
 
-pub fn readTotalBuf(self: *Self, alloc: std.mem.Allocator, size: usize) !?[]u8 {
-    if (self.buf.items.len >= size) {
-        return self.buf.items[0..size];
+pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
+    if (p.buf.items.len >= size) {
+        return p.buf.items[0..size];
     }
 
-    try self.buf.ensureTotalCapacity(alloc, size);
+    try p.buf.ensureTotalCapacity(alloc, size);
 
-    const slice = self.buf.allocatedSlice();
-    const len = self.buf.items.len;
-    const count = try std.posix.read(self.socket, slice[len..size]);
+    const slice = p.buf.allocatedSlice();
+    const len = p.buf.items.len;
+    const count = try std.posix.read(p.socket, slice[len..size]);
 
-    self.buf.items.len += count;
+    p.buf.items.len += count;
 
-    if (self.buf.items.len >= size) {
-        return self.buf.items[0..size];
+    if (p.buf.items.len >= size) {
+        return p.buf.items[0..size];
     }
 
     return null;
 }
 
-pub fn writeBuf(self: *Self) !?void {
-    if (self.buf.items.len == 0) {
+pub fn writeBuf(p: *Peer) !?void {
+    if (p.buf.items.len == 0) {
         return;
     }
 
-    const wrote = try std.posix.write(self.socket, self.buf.items);
+    const wrote = try std.posix.write(p.socket, p.buf.items);
 
-    const left = self.buf.items.len - wrote;
+    const left = p.buf.items.len - wrote;
+    p.buf.items.len = left;
+
     if (left == 0) {
         return;
     }
 
-    @memmove(self.buf.items[0..left], self.buf.items[wrote .. wrote + left]);
-    self.buf.items.len = left;
+    @memmove(p.buf.items[0..left], p.buf.items[wrote .. wrote + left]);
 
     return null;
+}
+
+pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
+    const piece = p.workingPiece orelse blk: {
+        p.workingPieceOffset = 0;
+        p.workingPiece = pieces.getWorkingPiece(p.bitfield orelse return null) orelse return null;
+        break :blk p.workingPiece.?;
+    };
+    if (p.workingOn) |*x| x.set(piece);
+    return piece;
+}
+
+// returns true if pipeline is full
+pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) bool {
+    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
+
+    p.inFlight.push(.{
+        .pieceIndex = piece,
+        .begin = p.workingPieceOffset,
+    }) catch return true;
+
+    p.mq.add(.{ .request = .{
+        .index = piece,
+        .begin = p.workingPieceOffset,
+        .len = chunkLen,
+    } }) catch {
+        p.inFlight.receive(.{
+            .pieceIndex = piece,
+            .begin = p.workingPieceOffset,
+        }) catch unreachable;
+        return true;
+    };
+
+    p.workingPieceOffset += chunkLen;
+
+    if (p.workingPieceOffset >= pieceLen) {
+        p.workingPiece = null;
+        p.workingPieceOffset = 0;
+    }
+
+    return false;
 }
