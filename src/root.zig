@@ -115,7 +115,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     try peer.buf.appendSlice(alloc, handshakeBytes);
                 }
 
-                _ = try peer.writeBuf() orelse continue;
+                try peer.writeBuf() orelse continue;
 
                 peer.state = .readHandshake;
 
@@ -294,6 +294,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     try files.writePiece(piece.index, completed.bytes);
                     peer.workingOn.?.unset(piece.index);
+
+                    for (peers.items) |otherPeer| {
+                        if (peer.socket != otherPeer.socket) {
+                            otherPeer.mq.add(.{ .have = piece.index }) catch {};
+                        }
+                    }
 
                     completedCount += 1;
                     const percent = (completedCount * 100) / totalPieces;
