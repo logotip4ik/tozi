@@ -87,7 +87,11 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 const peer = try alloc.create(Peer);
                 errdefer alloc.destroy(peer);
 
-                peer.* = try .init(addr);
+                peer.* = Peer.init(addr) catch |err| {
+                    std.log.err("failed connecting to {f} with {t}", .{ addr, err });
+                    alloc.destroy(peer);
+                    continue;
+                };
 
                 try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
                 try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
