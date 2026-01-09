@@ -30,7 +30,6 @@ pub const State = union(enum) {
     writeHandshake,
     messageStart,
     message: proto.Message,
-    bufFlush,
     dead,
 };
 
@@ -136,6 +135,8 @@ pub fn writeBuf(p: *Peer) !?void {
     return null;
 }
 
+/// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
+/// need
 pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
     const piece = p.workingPiece orelse blk: {
         p.workingPieceOffset = 0;
