@@ -119,16 +119,29 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
 
     var window = std.mem.window(u8, peers.inner.string, 6, 6);
     var i: u32 = 0;
-    while (window.next()) |peerString| : (i += 1) {
-        const new = peerString[0..6];
+    outer: while (window.next()) |peerString| : (i += 1) {
+        if (@rem(peerString.len, 6) != 0) {
+            std.log.err("received invalid peer string {s}", .{peerString});
+            continue;
+        }
 
-        for (self.oldAddrs.items) |old| {
-            if (std.mem.eql(u8, old[0..6], new)) {
-                continue;
+        if (peerString[0] == 0 or peerString[0] == 255) {
+            continue;
+        }
+
+        for (self.newAddrs.items) |addr| {
+            if (std.mem.eql(u8, addr[0..6], peerString[0..6])) {
+                continue :outer;
             }
         }
 
-        try self.newAddrs.append(alloc, new.*);
+        for (self.oldAddrs.items) |addr| {
+            if (std.mem.eql(u8, addr[0..6], peerString[0..6])) {
+                continue :outer;
+            }
+        }
+
+        try self.newAddrs.append(alloc, peerString[0..6].*);
     }
 
     try self.oldAddrs.ensureTotalCapacity(alloc, self.newAddrs.items.len);
