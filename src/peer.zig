@@ -108,25 +108,6 @@ pub fn readTotalBuf(self: *Self, alloc: std.mem.Allocator, size: usize) !?[]u8 {
     return null;
 }
 
-pub fn writeTotalBuf(self: *Self, alloc: std.mem.Allocator, slice: []const u8) !?usize {
-    if (self.buf.items.len == slice.len) {
-        return slice.len;
-    }
-
-    try self.buf.ensureTotalCapacity(alloc, slice.len);
-
-    const len = self.buf.items.len;
-    const wrote = try std.posix.write(self.socket, slice[len..]);
-    try self.buf.appendSlice(alloc, slice[len .. len + wrote]);
-
-    if (wrote == slice.len) {
-        return wrote;
-    }
-
-    return null;
-}
-
-/// returns null when there is still data pending to be written
 pub fn writeBuf(self: *Self) !?void {
     if (self.buf.items.len == 0) {
         return;
