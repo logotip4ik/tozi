@@ -108,14 +108,19 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             std.log.err("peer: {d} received {t}", .{ peer.socket, err });
         }
 
-        if (event.kind == .write and peer.state != .dead) switch (peer.state) {
+        if (event.kind == .write and peer.state != .dead) sw: switch (peer.state) {
             .readHandshake, .dead => {},
             .writeHandshake => {
                 if (peer.buf.items.len == 0) {
                     try peer.buf.appendSlice(alloc, handshakeBytes);
                 }
 
-                try peer.writeBuf() orelse continue;
+                const ready = peer.writeBuf() catch {
+                    peer.state = .dead;
+                    break :sw;
+                };
+
+                if (!ready) continue;
 
                 peer.state = .readHandshake;
 
@@ -132,7 +137,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
                 }
 
-                try peer.writeBuf() orelse continue;
+                const ready = peer.writeBuf() catch {
+                    peer.state = .dead;
+                    break :sw;
+                };
+
+                if (!ready) continue;
 
                 try kq.unsubscribe(peer.socket, .write);
             },

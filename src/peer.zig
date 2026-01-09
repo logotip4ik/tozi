@@ -116,9 +116,10 @@ pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
     return null;
 }
 
-pub fn writeBuf(p: *Peer) !?void {
+/// returns `true` when all data was written to socket
+pub fn writeBuf(p: *Peer) !bool {
     if (p.buf.items.len == 0) {
-        return;
+        return true;
     }
 
     const wrote = try std.posix.write(p.socket, p.buf.items);
@@ -127,12 +128,12 @@ pub fn writeBuf(p: *Peer) !?void {
     p.buf.items.len = left;
 
     if (left == 0) {
-        return;
+        return true;
     }
 
     @memmove(p.buf.items[0..left], p.buf.items[wrote .. wrote + left]);
 
-    return null;
+    return false;
 }
 
 /// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
