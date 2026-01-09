@@ -6,8 +6,7 @@ const Self = @This();
 
 socket: std.posix.fd_t,
 
-state: State = .handshake,
-direction: enum { write, read } = .write,
+state: State = .writeHandshake,
 
 choked: bool = true,
 interested: bool = false,
@@ -18,7 +17,8 @@ bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
 
 pub const State = union(enum) {
-    handshake,
+    readHandshake,
+    writeHandshake,
     messageStart,
     message: proto.Message,
     bufFlush,

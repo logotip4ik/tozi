@@ -109,259 +109,249 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             std.log.err("peer: {d} received {t}", .{ peer.socket, err });
         }
 
-        if (peer.state != .dead) switch (event.kind) {
-            .write => if (peer.direction == .write) switch (peer.state) {
-                .handshake => {
-                    _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
+        if (event.kind == .write and peer.state != .dead) switch (peer.state) {
+            .readHandshake, .messageStart, .message, .dead => {},
+            .writeHandshake => {
+                _ = try peer.writeTotalBuf(alloc, handshakeBytes) orelse continue;
 
-                    peer.state = .handshake;
-                    peer.direction = .read;
-                    peer.buf.clearRetainingCapacity();
+                peer.state = .readHandshake;
+                peer.buf.clearRetainingCapacity();
 
-                    try kq.unsubscribe(peer.socket, .write);
-                },
-                .bufFlush => {
-                    if (peer.buf.items.len == 0) continue;
-                    try peer.writeBuf() orelse continue;
-
-                    peer.state = .messageStart;
-                    peer.direction = .read;
-
-                    try kq.unsubscribe(peer.socket, .write);
-                },
-                else => {
-                    std.log.err("receivd {any} for write", .{peer.state});
-                    return error.Unknown;
-                },
+                try kq.unsubscribe(peer.socket, .write);
             },
-            .read => if (peer.direction == .read) sw: switch (peer.state) {
-                .dead => {
-                    peer.state = .dead;
-                },
-                .handshake => {
-                    const bytes = try peer.readTotalBuf(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
+            .bufFlush => {
+                if (peer.buf.items.len == 0) continue;
+                try peer.writeBuf() orelse continue;
 
-                    defer peer.buf.clearRetainingCapacity();
-                    const received: *proto.TcpHandshake = @ptrCast(bytes);
+                peer.state = .messageStart;
 
-                    handshake.validate(received.*) catch |err| {
-                        std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
-                        continue :sw .dead;
-                    };
+                try kq.unsubscribe(peer.socket, .write);
+            },
+        };
 
+        if (event.kind == .read and peer.state != .dead) sw: switch (peer.state) {
+            .writeHandshake, .bufFlush => {},
+            .dead => {
+                peer.state = .dead;
+            },
+            .readHandshake => {
+                const bytes = try peer.readTotalBuf(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
+
+                defer peer.buf.clearRetainingCapacity();
+                const received: *proto.TcpHandshake = @ptrCast(bytes);
+
+                handshake.validate(received.*) catch |err| {
+                    std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
+                    continue :sw .dead;
+                };
+
+                peer.state = .messageStart;
+                std.log.info("peer: {d} handshake ok", .{peer.socket});
+            },
+            .messageStart => {
+                const len = try peer.readInt(u32);
+                if (len == 0) {
+                    // keep alive, send requests ?
+                    continue;
+                }
+
+                if (len > 16 * 1024 * 1024) {
+                    std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
+                    continue :sw .dead;
+                }
+
+                const idInt = try peer.readInt(u8);
+                const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
+                    std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
+                    continue;
+                };
+
+                const message: proto.Message = switch (id) {
+                    .choke => .choke,
+                    .unchoke => .unchoke,
+                    .interested => .interested,
+                    .not_interested => .not_interested,
+                    .have => .{ .have = try peer.readInt(u32) },
+                    .bitfield => .{ .bitfield = len - 1 },
+                    .request => .{ .request = .{
+                        .index = try peer.readInt(u32),
+                        .begin = try peer.readInt(u32),
+                        .len = len - 9,
+                    } },
+                    .piece => .{ .piece = .{
+                        .index = try peer.readInt(u32),
+                        .begin = try peer.readInt(u32),
+                        .len = len - 9,
+                    } },
+                    .cancel => .{ .cancel = .{
+                        .index = try peer.readInt(u32),
+                        .begin = try peer.readInt(u32),
+                        .len = len - 9,
+                    } },
+                    .port => .{ .port = try peer.readInt(u16) },
+                };
+
+                peer.state = .{ .message = message };
+                peer.buf.clearRetainingCapacity();
+            },
+            .message => |message| switch (message) {
+                .choke => {
+                    peer.choked = true;
                     peer.state = .messageStart;
-                    std.log.info("peer: {d} handshake ok", .{peer.socket});
                 },
-                .messageStart => {
-                    const len = try peer.readInt(u32);
-                    if (len == 0) {
-                        // keep alive, send requests ?
-                        continue;
-                    }
+                .unchoke => {
+                    peer.choked = false;
 
-                    if (len > 16 * 1024 * 1024) {
-                        std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                        continue :sw .dead;
-                    }
-
-                    const idInt = try peer.readInt(u8);
-                    const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
-                        std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
-                        continue;
-                    };
-
-                    const message: proto.Message = switch (id) {
-                        .choke => .choke,
-                        .unchoke => .unchoke,
-                        .interested => .interested,
-                        .not_interested => .not_interested,
-                        .have => .{ .have = try peer.readInt(u32) },
-                        .bitfield => .{ .bitfield = len - 1 },
-                        .request => .{ .request = .{
-                            .index = try peer.readInt(u32),
-                            .begin = try peer.readInt(u32),
-                            .len = len - 9,
-                        } },
-                        .piece => .{ .piece = .{
-                            .index = try peer.readInt(u32),
-                            .begin = try peer.readInt(u32),
-                            .len = len - 9,
-                        } },
-                        .cancel => .{ .cancel = .{
-                            .index = try peer.readInt(u32),
-                            .begin = try peer.readInt(u32),
-                            .len = len - 9,
-                        } },
-                        .port => .{ .port = try peer.readInt(u16) },
-                    };
-
-                    peer.state = .{ .message = message };
-                    peer.buf.clearRetainingCapacity();
-                },
-                .message => |message| switch (message) {
-                    .choke => {
-                        peer.choked = true;
+                    const bitfield = peer.bitfield orelse {
+                        std.log.warn("received unchoke message but no bitfield was set", .{});
                         peer.state = .messageStart;
-                    },
-                    .unchoke => {
-                        peer.choked = false;
+                        continue;
+                    };
 
-                        const bitfield = peer.bitfield orelse {
-                            std.log.warn("received unchoke message but no bitfield was set", .{});
-                            peer.state = .messageStart;
-                            continue;
-                        };
+                    if (peer.workingOn == null) {
+                        peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
+                    }
 
-                        if (peer.workingOn == null) {
-                            peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
-                        }
+                    const requestsPerPeer = try std.math.divCeil(usize, totalPieces, peers.items.len);
+                    const numberOfPiecesToRequest = @min(requestsPerPeer, 5);
 
-                        const requestsPerPeer = try std.math.divCeil(usize, totalPieces, peers.items.len);
-                        const numberOfPiecesToRequest = @min(requestsPerPeer, 5);
+                    std.log.info("peer: {d} unchoked, requesting", .{peer.socket});
 
-                        std.log.info("peer: {d} unchoked, requesting", .{peer.socket});
+                    peer.buf.clearRetainingCapacity();
+                    var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                    defer peer.buf = writer.toArrayList();
 
-                        peer.buf.clearRetainingCapacity();
-                        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
-                        defer peer.buf = writer.toArrayList();
+                    for (0..numberOfPiecesToRequest) |_| {
+                        const index = pieces.getWorkingPiece(bitfield) orelse break;
+                        const pieceLen = torrent.getPieceSize(index);
+                        try proto.writeRequestsBatch(&writer.writer, index, pieceLen);
+                        peer.workingOn.?.set(index);
+                    }
 
-                        for (0..numberOfPiecesToRequest) |_| {
-                            const index = pieces.getWorkingPiece(bitfield) orelse break;
-                            const pieceLen = torrent.getPieceSize(index);
-                            try proto.writeRequestsBatch(&writer.writer, index, pieceLen);
-                            peer.workingOn.?.set(index);
-                        }
+                    peer.state = .bufFlush;
 
-                        peer.state = .bufFlush;
-                        peer.direction = .write;
-
-                        try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                    },
-                    .have => |piece| {
-                        defer peer.state = .messageStart;
-
-                        var bitfield = peer.bitfield orelse {
-                            std.log.err("unexpected empty bitfield with have message", .{});
-                            continue;
-                        };
-
-                        bitfield.set(piece);
-                        // TODO: check if we don't have this piece and we aren't downloading it,
-                        // then request it
-                    },
-                    .bitfield => |len| {
-                        const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
-
-                        try peer.setBitfield(alloc, bytes);
-
-                        // TODO: actually check if peer has interesting pieces
-
-                        peer.buf.clearRetainingCapacity();
-
-                        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
-                        defer peer.buf = writer.toArrayList();
-
-                        const interested: proto.Message = .interested;
-                        try interested.writeMessage(&writer.writer);
-
-                        peer.state = .bufFlush;
-                        peer.direction = .write;
-
-                        try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                    },
-                    .piece => |piece| {
-                        const chunkBytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
-
-                        if (piece.index > totalPieces) {
-                            @branchHint(.unlikely);
-                            std.log.err("peer {d} sen't unknown piece massage: {d}", .{
-                                peer.socket,
-                                piece.index,
-                            });
-                            continue :sw .dead;
-                        }
-
-                        const pieceLen = torrent.getPieceSize(piece.index);
-                        const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse {
-                            peer.state = .messageStart;
-                            continue;
-                        };
-                        defer completed.deinit(alloc);
-
-                        const expectedHash = torrent.pieces[piece.index * 20 ..];
-                        pieces.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
-                            @branchHint(.unlikely);
-                            std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
-                            peer.state = .messageStart;
-                            continue;
-                        };
-
-                        try files.writePiece(piece.index, completed.bytes);
-                        completedCount += 1;
-
-                        const percent = (completedCount * 100) / totalPieces;
-                        std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{ completedCount, totalPieces, percent, piece.index });
-
-                        const bitfield = peer.bitfield orelse {
-                            @branchHint(.cold);
-                            std.log.err("unexpected empty bitfield with piece message", .{});
-                            peer.state = .messageStart;
-                            pieces.reset(piece.index);
-                            continue;
-                        };
-
-                        if (peer.workingOn) |*workingOn| {
-                            @branchHint(.likely);
-                            workingOn.unset(piece.index);
-                        } else {
-                            @branchHint(.cold);
-                            std.log.err("unexpected empty workingOn with piece message", .{});
-                            peer.state = .messageStart;
-                            pieces.reset(piece.index);
-                            continue;
-                        }
-
-                        if (peer.choked) {
-                            peer.state = .messageStart;
-                            continue;
-                        }
-
-                        if (pieces.getWorkingPiece(bitfield)) |nextWorkingPiece| {
-                            @branchHint(.likely);
-
-                            peer.buf.clearRetainingCapacity();
-
-                            const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
-
-                            var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
-                            defer peer.buf = writer.toArrayList();
-
-                            try proto.writeRequestsBatch(&writer.writer, nextWorkingPiece, nextPieceLen);
-
-                            peer.state = .bufFlush;
-                            peer.direction = .write;
-                            peer.workingOn.?.set(nextWorkingPiece);
-
-                            try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                        } else if (pieces.isDownloadComplete()) {
-                            std.log.info("download finished", .{});
-                            return;
-                        } else {
-                            peer.state = .messageStart;
-                        }
-                    },
-                    .request, // Peer requested block from you (Ignore if leaching)
-                    .interested, // Peer is interested in you (Ignore if leaching)
-                    .not_interested, // Peer not interested (Ignore)
-                    .cancel,
-                    .port,
-                    => {
-                        defer peer.state = .messageStart;
-                    },
+                    try kq.subscribe(peer.socket, .write, event.kevent.udata);
                 },
-                else => unreachable,
+                .have => |piece| {
+                    defer peer.state = .messageStart;
+
+                    var bitfield = peer.bitfield orelse {
+                        std.log.err("unexpected empty bitfield with have message", .{});
+                        continue;
+                    };
+
+                    bitfield.set(piece);
+                    // TODO: check if we don't have this piece and we aren't downloading it,
+                    // then request it
+                },
+                .bitfield => |len| {
+                    const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
+
+                    try peer.setBitfield(alloc, bytes);
+
+                    // TODO: actually check if peer has interesting pieces
+
+                    peer.buf.clearRetainingCapacity();
+
+                    var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                    defer peer.buf = writer.toArrayList();
+
+                    const interested: proto.Message = .interested;
+                    try interested.writeMessage(&writer.writer);
+
+                    peer.state = .bufFlush;
+
+                    try kq.subscribe(peer.socket, .write, event.kevent.udata);
+                },
+                .piece => |piece| {
+                    const chunkBytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
+
+                    if (piece.index > totalPieces) {
+                        @branchHint(.unlikely);
+                        std.log.err("peer {d} sen't unknown piece massage: {d}", .{
+                            peer.socket,
+                            piece.index,
+                        });
+                        continue :sw .dead;
+                    }
+
+                    const pieceLen = torrent.getPieceSize(piece.index);
+                    const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse {
+                        peer.state = .messageStart;
+                        continue;
+                    };
+                    defer completed.deinit(alloc);
+
+                    const expectedHash = torrent.pieces[piece.index * 20 ..];
+                    pieces.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
+                        @branchHint(.unlikely);
+                        std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
+                        peer.state = .messageStart;
+                        continue;
+                    };
+
+                    try files.writePiece(piece.index, completed.bytes);
+                    completedCount += 1;
+
+                    const percent = (completedCount * 100) / totalPieces;
+                    std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{ completedCount, totalPieces, percent, piece.index });
+
+                    const bitfield = peer.bitfield orelse {
+                        @branchHint(.cold);
+                        std.log.err("unexpected empty bitfield with piece message", .{});
+                        peer.state = .messageStart;
+                        pieces.reset(piece.index);
+                        continue;
+                    };
+
+                    if (peer.workingOn) |*workingOn| {
+                        @branchHint(.likely);
+                        workingOn.unset(piece.index);
+                    } else {
+                        @branchHint(.cold);
+                        std.log.err("unexpected empty workingOn with piece message", .{});
+                        peer.state = .messageStart;
+                        pieces.reset(piece.index);
+                        continue;
+                    }
+
+                    if (peer.choked) {
+                        peer.state = .messageStart;
+                        continue;
+                    }
+
+                    if (pieces.getWorkingPiece(bitfield)) |nextWorkingPiece| {
+                        @branchHint(.likely);
+
+                        peer.buf.clearRetainingCapacity();
+
+                        const nextPieceLen = torrent.getPieceSize(nextWorkingPiece);
+
+                        var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.buf);
+                        defer peer.buf = writer.toArrayList();
+
+                        try proto.writeRequestsBatch(&writer.writer, nextWorkingPiece, nextPieceLen);
+
+                        peer.state = .bufFlush;
+                        peer.workingOn.?.set(nextWorkingPiece);
+
+                        try kq.subscribe(peer.socket, .write, event.kevent.udata);
+                    } else if (pieces.isDownloadComplete()) {
+                        std.log.info("download finished", .{});
+                        return;
+                    } else {
+                        peer.state = .messageStart;
+                    }
+                },
+                .request, // Peer requested block from you (Ignore if leaching)
+                .interested, // Peer is interested in you (Ignore if leaching)
+                .not_interested, // Peer not interested (Ignore)
+                .cancel,
+                .port,
+                => {
+                    defer peer.state = .messageStart;
+                },
             },
-            else => unreachable,
         };
 
         if (peer.state == .dead) {
