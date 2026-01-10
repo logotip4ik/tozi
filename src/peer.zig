@@ -181,3 +181,14 @@ pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) bool {
 
     return false;
 }
+
+pub fn fillRqPool(p: *Peer, torrent: Torrent, pieces: *PieceManager) void {
+    while (p.inFlight.count < p.inFlight.size) {
+        const piece = p.getNextWorkingPiece(pieces) orelse break;
+        const len = torrent.getPieceSize(piece);
+
+        if (p.addRequest(piece, len)) {
+            break;
+        }
+    }
+}

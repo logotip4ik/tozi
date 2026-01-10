@@ -165,13 +165,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             .messageStart => {
                 const len = try peer.readInt(u32);
                 if (len == 0) {
-                    if (!peer.choked) if (peer.getNextWorkingPiece(&pieces)) |workingPiece| {
-                        @branchHint(.likely);
-
-                        _ = peer.addRequest(workingPiece, torrent.getPieceSize(workingPiece));
+                    if (!peer.choked) {
+                        peer.fillRqPool(torrent, &pieces);
 
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                    };
+                    }
+
                     continue;
                 }
 
@@ -231,17 +230,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                     }
 
-                    while (peer.inFlight.count < peer.inFlight.size) {
-                        const piece = peer.getNextWorkingPiece(&pieces) orelse break;
-                        const len = torrent.getPieceSize(piece);
+                    std.log.info("peer: {d} unchoked", .{ peer.socket });
 
-                        if (peer.addRequest(piece, len)) {
-                            break;
-                        }
-                    }
-
-                    std.log.info("peer: {d} unchoked, inflight: {f}", .{ peer.socket, peer.inFlight });
-
+                    peer.fillRqPool(torrent, &pieces);
                     peer.state = .messageStart;
                     try kq.subscribe(peer.socket, .write, event.kevent.udata);
                 },
@@ -286,13 +277,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
 
                     peer.inFlight.receive(.{ .pieceIndex = piece.index, .begin = piece.begin }) catch {};
-                    if (!peer.choked) if (peer.getNextWorkingPiece(&pieces)) |workingPiece| {
+                    if (!peer.choked) {
                         @branchHint(.likely);
 
-                        _ = peer.addRequest(workingPiece, torrent.getPieceSize(workingPiece));
+                        peer.fillRqPool(torrent, &pieces);
 
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
-                    };
+                    }
 
                     const pieceLen = torrent.getPieceSize(piece.index);
                     const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;

@@ -104,15 +104,26 @@ pub fn getPieceBuf(
 
 pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u32 {
     for (self.pieces, 0..) |*piece, index| {
-        if (piece.* != .missing) {
-            continue;
-        }
-
-        if (peerBitfield.isSet(index)) {
+        if (piece.* == .missing and peerBitfield.isSet(index)) {
             piece.* = .downloading;
             return @intCast(index);
         }
     }
+
+    const isEndgame = blk: for (self.pieces) |piece| {
+        if (piece == .missing) break :blk false;
+    } else true;
+
+    if (!isEndgame or self.isDownloadComplete()) {
+        return null;
+    }
+
+    for (self.pieces, 0..) |*piece, index| {
+        if (piece.* == .downloading and peerBitfield.isSet(index)) {
+            return @intCast(index);
+        }
+    }
+
     return null;
 }
 
