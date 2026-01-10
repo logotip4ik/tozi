@@ -133,8 +133,10 @@ pub fn complete(self: *Self, index: u32) !PieceBuf {
     return kv.value;
 }
 
-pub fn killPeer(self: *Self, workingOn: std.DynamicBitSetUnmanaged) void {
-    var iter = workingOn.iterator(.{
+pub fn killPeer(self: *Self, workingOn: ?std.DynamicBitSetUnmanaged) void {
+    const bitfield = workingOn orelse return;
+
+    var iter = bitfield.iterator(.{
         .direction = .forward,
         .kind = .set,
     });

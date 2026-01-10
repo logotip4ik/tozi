@@ -46,8 +46,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
-            if (peer.workingOn) |x| pieces.killPeer(x);
             kq.killPeer(peer.socket);
+            pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
             alloc.destroy(peer);
         }
@@ -67,16 +67,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
     while (try kq.next()) |event| {
         if (event.kind == .timer) {
-            var downloaded: u64 = 0;
+            updateTracker(&tracker, pieces, torrent);
 
-            for (pieces.pieces, 0..) |state, i| {
-                if (state == .have) {
-                    downloaded += torrent.getPieceSize(i);
-                }
-            }
-
-            tracker.downloaded = downloaded;
-            tracker.left = torrent.totalLen - downloaded;
             if (peers.items.len - deadCount < 10) {
                 tracker.numWant += 50;
             }
@@ -354,13 +346,35 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             deadCount += 1;
 
             kq.killPeer(peer.socket);
-            if (peer.workingOn) |x| pieces.killPeer(x);
+            pieces.killPeer(peer.workingOn);
+
+            if (peers.items.len - deadCount < 10) {
+                kq.addTimer(0, 0) catch {};
+            }
 
             if (deadCount == peers.items.len) {
                 return error.AllStreamsDead;
             }
         }
     }
+
+    updateTracker(&tracker, pieces, torrent);
+    for (tracker.trackers.items) |t| {
+        tracker.sendAnnounce(alloc, t.url, null, .completed) catch {};
+    }
+}
+
+fn updateTracker(tracker: *HttpTracker, pieces: PieceManager, torrent: Torrent) void {
+    var downloaded: u64 = 0;
+
+    for (pieces.pieces, 0..) |state, i| {
+        if (state == .have) {
+            downloaded += torrent.getPieceSize(i);
+        }
+    }
+
+    tracker.downloaded = downloaded;
+    tracker.left = torrent.totalLen - downloaded;
 }
 
 test {

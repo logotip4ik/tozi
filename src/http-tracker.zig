@@ -62,8 +62,8 @@ pub fn sendAnnounce(
     self: *Self,
     alloc: std.mem.Allocator,
     url: []const u8,
-    responseWriter: *std.Io.Writer,
-    event: ?enum { started },
+    responseWriter: ?*std.Io.Writer,
+    event: ?enum { started, stopped, completed },
 ) !void {
     var http = try self.getHttp(alloc);
 
@@ -148,6 +148,10 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
         }
 
         try self.newAddrs.append(alloc, peerString[0..6].*);
+
+        if (self.newAddrs.items.len + self.oldAddrs.items.len == self.numWant) {
+            break;
+        }
     }
 
     try self.oldAddrs.ensureTotalCapacity(alloc, self.newAddrs.items.len);
@@ -172,9 +176,10 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
     var now: usize = @intCast(std.time.milliTimestamp());
 
     for (self.trackers.items) |*tracker| {
-        if (tracker.checkinAt > now) {
+        if (tracker.checkinAt > now and self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
             continue;
         }
+        std.log.debug("heeey", .{});
 
         const interval = try self.announce(alloc, tracker.url);
         const intervalInMs = interval * std.time.ms_per_s;

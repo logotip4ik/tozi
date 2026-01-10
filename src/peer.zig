@@ -140,7 +140,7 @@ pub fn send(p: *Peer) !bool {
 }
 
 /// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
-/// need
+/// needed
 pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
     const piece = p.workingPiece orelse blk: {
         p.workingPieceOffset = 0;
