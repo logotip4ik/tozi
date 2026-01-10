@@ -78,7 +78,7 @@ pub fn writePiece(
     noalias bytes: []const u8,
 ) !?PieceBuf {
     if (self.pieces[piece.index] == .have) {
-        return error.PieceAlreadyDownloaded;
+        return null;
     }
 
     const buf = try self.getPieceBuf(alloc, piece.index, pieceLen);

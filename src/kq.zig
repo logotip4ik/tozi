@@ -31,7 +31,7 @@ pub fn deinit(self: *Self) void {
 
 /// adds one time timer, that will fire event after `wait` in **milliseconds**
 pub fn addTimer(self: Self, id: usize, ms: usize, opts: struct { periodic: bool = false }) !void {
-    const flags: u16 = if (opts.periodic)
+    const flags: usize = if (opts.periodic)
         std.c.EV.ADD | std.c.EV.ENABLE
     else
         std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT;
@@ -40,7 +40,7 @@ pub fn addTimer(self: Self, id: usize, ms: usize, opts: struct { periodic: bool 
         KEvent{
             .ident = @intCast(id),
             .filter = std.c.EVFILT.TIMER,
-            .flags = flags,
+            .flags = @intCast(flags),
             .fflags = 0, // default is milliseconds
             .data = @intCast(ms),
             .udata = 1, // prevents `udata != 0` assert
