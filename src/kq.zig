@@ -78,7 +78,6 @@ pub fn unsubscribe(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
         const ev = self.evs.get(i);
         if (ev.ident == ident and ev.filter == filter) {
             self.evs.removeIndex(i);
-            break;
         }
     }
 
@@ -147,19 +146,14 @@ pub fn next(self: *Self) NextError!?CustomEvent {
 }
 
 pub fn killPeer(self: *Self, socket: std.posix.fd_t) void {
-    self.unsubscribe(socket, .read) catch |err| switch (err) {
-        error.EventNotFound => {}, // already unsubscribed
-        else => std.log.err("received err while unsubscribing from read for socket {d} with {s}", .{
-            socket,
-            @errorName(err),
-        }),
-    };
+    std.posix.close(socket);
 
-    self.unsubscribe(socket, .write) catch |err| switch (err) {
-        error.EventNotFound => {}, // already unsubscribed
-        else => std.log.err("received err while unsubscribing from write for socket {d} with {s}", .{
-            socket,
-            @errorName(err),
-        }),
-    };
+    var i = self.evs.count;
+    while (i > 0) {
+        i -= 1;
+        const ev = self.evs.get(i);
+        if (ev.ident == socket) {
+            self.evs.removeIndex(i);
+        }
+    }
 }
