@@ -54,43 +54,64 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         peers.deinit(alloc);
     }
 
-    // initiate loop
-    try kq.addTimer(0, 0);
+    const Timer = enum { tracker, speed };
+    try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
+    try kq.addTimer(@intFromEnum(Timer.speed), 1 * std.time.ms_per_s, .{ .periodic = true });
 
     var deadCount: usize = 0;
 
     const totalPieces = torrent.pieces.len / 20;
     var completedCount: usize = 0;
+    var bytesPerSecond: usize = 0;
 
     const handshake: proto.TcpHandshake = .{ .infoHash = torrent.infoHash, .peerId = peerId };
     const handshakeBytes = std.mem.asBytes(&handshake);
 
     while (try kq.next()) |event| {
         if (event.kind == .timer) {
-            updateTracker(&tracker, pieces, torrent);
+            const timer = std.enums.fromInt(Timer, event.kevent.ident) orelse continue;
 
-            if (peers.items.len - deadCount < 10 and tracker.newAddrs.items.len < 10) {
-                tracker.numWant += 50;
-            }
+            switch (timer) {
+                .tracker => {
+                    updateTracker(&tracker, pieces, torrent);
 
-            const nextKeepAlive = try tracker.keepAlive(alloc);
+                    if (peers.items.len - deadCount < 10 and tracker.newAddrs.items.len < 10) {
+                        tracker.numWant += 50;
+                    }
 
-            std.log.info("setting timer to next: {d}", .{nextKeepAlive});
-            try kq.addTimer(0, nextKeepAlive);
+                    const nextKeepAlive = try tracker.keepAlive(alloc);
 
-            while (tracker.nextNewPeer()) |addr| {
-                const peer = try alloc.create(Peer);
-                errdefer alloc.destroy(peer);
+                    std.log.info("setting timer to next: {d}", .{nextKeepAlive});
+                    try kq.addTimer(0, nextKeepAlive, .{ .periodic = false });
 
-                peer.* = Peer.init(addr) catch |err| {
-                    std.log.err("failed connecting to {f} with {t}", .{ addr, err });
-                    alloc.destroy(peer);
-                    continue;
-                };
+                    while (tracker.nextNewPeer()) |addr| {
+                        const peer = try alloc.create(Peer);
+                        errdefer alloc.destroy(peer);
 
-                try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+                        peer.* = Peer.init(addr) catch |err| {
+                            std.log.err("failed connecting to {f} with {t}", .{ addr, err });
+                            alloc.destroy(peer);
+                            continue;
+                        };
 
-                try peers.append(alloc, peer);
+                        try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+
+                        try peers.append(alloc, peer);
+                    }
+                },
+                .speed => {
+                    defer bytesPerSecond = 0;
+
+                    const percent = (completedCount * 100) / totalPieces;
+
+                    std.log.info("progress: {d:3}% {d}/{d} (alive peers: {d}, speed: {Bi:.2})", .{
+                        percent,
+                        completedCount,
+                        totalPieces,
+                        peers.items.len - deadCount,
+                        bytesPerSecond,
+                    });
+                },
             }
 
             continue;
@@ -230,7 +251,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                     }
 
-                    std.log.info("peer: {d} unchoked", .{ peer.socket });
+                    std.log.info("peer: {d} unchoked", .{peer.socket});
 
                     peer.fillRqPool(torrent, &pieces);
                     peer.state = .messageStart;
@@ -266,6 +287,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     defer peer.readBuf.clearRetainingCapacity();
 
                     peer.state = .messageStart;
+                    bytesPerSecond += chunkBytes.len;
 
                     if (piece.index > totalPieces) {
                         @branchHint(.unlikely);
@@ -299,23 +321,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     try files.writePiece(piece.index, completed.bytes);
                     peer.workingOn.?.unset(piece.index);
 
+                    completedCount += 1;
+
                     for (peers.items) |otherPeer| {
                         if (otherPeer.state != .dead and peer.socket != otherPeer.socket) {
                             otherPeer.mq.add(.{ .have = piece.index }) catch {};
                             kq.subscribe(otherPeer.socket, .write, @intFromPtr(otherPeer)) catch {};
                         }
                     }
-
-                    completedCount += 1;
-                    const percent = (completedCount * 100) / totalPieces;
-                    std.log.info("progress: ({d}%) {d}/{d} - piece {d} ok (peer: {d}, alive peers: {d})", .{
-                        percent,
-                        completedCount,
-                        totalPieces,
-                        piece.index,
-                        peer.socket,
-                        peers.items.len - deadCount,
-                    });
 
                     if (pieces.isDownloadComplete()) {
                         @branchHint(.cold);
@@ -341,7 +354,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             pieces.killPeer(peer.workingOn);
 
             if (peers.items.len - deadCount < 10) {
-                kq.addTimer(0, 0) catch {};
+                kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false }) catch {};
             }
 
             if (deadCount == peers.items.len) {
