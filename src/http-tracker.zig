@@ -117,9 +117,12 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     const interval = value.inner.dict.get("interval") orelse return error.MissingInternal;
     const peers = value.inner.dict.get("peers") orelse return error.MissinPeers;
 
+    if (peers.inner.string.len < 6) {
+        return interval.inner.int;
+    }
+
     var window = std.mem.window(u8, peers.inner.string, 6, 6);
-    var i: u32 = 0;
-    outer: while (window.next()) |peerString| : (i += 1) {
+    outer: while (window.next()) |peerString| {
         if (@rem(peerString.len, 6) != 0) {
             std.log.err("received invalid peer string {s}", .{peerString});
             continue;
