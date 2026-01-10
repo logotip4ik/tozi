@@ -69,7 +69,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         if (event.kind == .timer) {
             updateTracker(&tracker, pieces, torrent);
 
-            if (peers.items.len - deadCount < 10) {
+            if (peers.items.len - deadCount < 10 and tracker.newAddrs.items.len < 10) {
                 tracker.numWant += 50;
             }
 
@@ -300,8 +300,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     peer.workingOn.?.unset(piece.index);
 
                     for (peers.items) |otherPeer| {
-                        if (peer.state != .dead and peer.socket != otherPeer.socket) {
+                        if (otherPeer.state != .dead and peer.socket != otherPeer.socket) {
                             otherPeer.mq.add(.{ .have = piece.index }) catch {};
+                            kq.subscribe(otherPeer.socket, .write, @intFromPtr(otherPeer)) catch {};
                         }
                     }
 
