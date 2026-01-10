@@ -24,7 +24,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         .infoHash = torrent.infoHash,
         .downloaded = 0,
         .uploaded = 0,
-        .left = 0,
+        .left = torrent.totalLen,
     };
     defer tracker.deinit(alloc);
 

@@ -76,6 +76,7 @@ pub fn sendAnnounce(
         .{ "left", .{ .int = self.left } },
         .{ "compact", .{ .int = 1 } },
         .{ "key", .{ .string = self.peerId[16..20] } },
+        .{ "numwant", .{ .int = 50 } },
         .{
             "event",
             if (event) |x| .{ .string = @tagName(x) } else .skip,

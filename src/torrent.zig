@@ -83,6 +83,10 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     if (dict.get("announce-list")) |v| {
         const list = v.inner.list.items[0].inner.list;
 
+        if (announce) |a| {
+            try announces.append(alloc, a);
+        }
+
         outer: for (list.items) |item| {
             for (announces.items) |existing| {
                 if (std.mem.eql(u8, existing, item.inner.string)) {
@@ -91,16 +95,6 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
             }
 
             try announces.append(alloc, item.inner.string);
-        }
-
-        if (announce) |a| {
-            for (announces.items) |existing| {
-                if (std.mem.eql(u8, existing, a)) {
-                    break;
-                }
-            } else {
-                try announces.append(alloc, a);
-            }
         }
     } else if (announce) |x| {
         try announces.append(alloc, x);
