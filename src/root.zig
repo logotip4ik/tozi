@@ -352,6 +352,16 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
             kq.killPeer(peer.socket);
             pieces.killPeer(peer.workingOn);
+            peer.deinit(alloc);
+
+            for (peers.items, 0..) |item, i| {
+                if (item == peer) {
+                    _ = peers.swapRemove(i);
+                    break;
+                }
+            }
+
+            alloc.destroy(peer);
 
             if (peers.items.len - deadCount < 10) {
                 kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false }) catch {};
