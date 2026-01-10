@@ -308,7 +308,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     peer.workingOn.?.unset(piece.index);
 
                     for (peers.items) |otherPeer| {
-                        if (peer.socket != otherPeer.socket) {
+                        if (peer.state != .dead and peer.socket != otherPeer.socket) {
                             otherPeer.mq.add(.{ .have = piece.index }) catch {};
                         }
                     }
