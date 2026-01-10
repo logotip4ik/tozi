@@ -169,7 +169,7 @@ pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void 
 }
 
 pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
-    const now: usize = @intCast(std.time.milliTimestamp());
+    var now: usize = @intCast(std.time.milliTimestamp());
 
     for (self.trackers.items) |*tracker| {
         if (tracker.checkinAt > now) {
@@ -177,18 +177,26 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
         }
 
         const interval = try self.announce(alloc, tracker.url);
-        tracker.interval = interval * std.time.ns_per_s;
-        tracker.checkinAt = now + interval * std.time.ns_per_s;
+        const intervalInMs = interval * std.time.ms_per_s;
+
+        tracker.interval = intervalInMs;
+        tracker.checkinAt = now + intervalInMs;
     }
 
-    var interval = self.trackers.items[0].interval;
+    if (self.trackers.items.len == 0) return 1800 * 1000;
+
+    now = @intCast(std.time.milliTimestamp());
+
+    var soonest = self.trackers.items[0].checkinAt;
     for (self.trackers.items[1..]) |tracker| {
-        if (interval > tracker.interval) {
-            interval = tracker.interval;
+        if (soonest > tracker.checkinAt) {
+            soonest = tracker.checkinAt;
         }
     }
 
-    return interval;
+    if (soonest <= now) return 0;
+
+    return soonest - now;
 }
 
 pub fn nextNewPeer(self: *Self) ?std.net.Address {
