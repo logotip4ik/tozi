@@ -74,6 +74,27 @@ pub fn Queue(comptime T: type, comptime Size: usize) type {
 
             return item;
         }
+
+        pub fn removeIndex(self: *Self, index: usize) void {
+            assert(index < self.count);
+
+            var i = index;
+            while (i < self.count - 1) : (i += 1) {
+                const current = @rem(self.begin + i, Size);
+                const next = @rem(self.begin + i + 1, Size);
+
+                self.buf[current] = self.buf[next];
+            }
+
+            self.count -= 1;
+            self.end = @rem(self.end + Size - 1, Size);
+        }
+
+        pub fn get(self: Self, index: usize) T {
+            assert(index < self.count);
+            const targetIndex = @rem(self.begin + index, Size);
+            return self.buf[targetIndex];
+        }
     };
 }
 

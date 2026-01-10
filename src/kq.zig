@@ -6,50 +6,38 @@ const utils = @import("utils.zig");
 
 fd: std.posix.fd_t,
 
-evs: std.PriorityQueue(KEvent, CompareContext, compareKEvents),
+evs: utils.Queue(KEvent, MAX_EVENTS) = .{},
 
 const Self = @This();
 
 const KEvent = std.posix.Kevent;
 
-pub const Kind = enum { write, read, timer };
+pub const Kind = enum(u2) { timer, read, write };
 
-const logger = std.log.scoped(.kqueue);
-const MAX_EVENTS = 8;
+const MAX_EVENTS = 64;
 
-pub fn init(alloc: std.mem.Allocator) !Self {
+pub fn init() !Self {
     comptime utils.assert(builtin.os.tag == .macos);
 
     const kqueue = try std.posix.kqueue();
     errdefer std.posix.close(kqueue);
 
-    var evs: std.PriorityQueue(KEvent, CompareContext, compareKEvents) = .init(alloc, .{});
-    errdefer evs.deinit();
-
-    try evs.ensureUnusedCapacity(MAX_EVENTS);
-
-    return .{ .fd = kqueue, .evs = evs };
+    return .{ .fd = kqueue };
 }
 
 pub fn deinit(self: *Self) void {
     std.posix.close(self.fd);
-    self.evs.deinit();
-}
-
-const CompareContext = struct {};
-fn compareKEvents(_: CompareContext, _: KEvent, _: KEvent) std.math.Order {
-    return .lt;
 }
 
 /// adds one time timer, that will fire event after `wait` in **milliseconds**
-pub fn addTimer(self: Self, id: usize, wait: usize) !void {
+pub fn addTimer(self: Self, id: usize, ms: usize) !void {
     _ = try std.posix.kevent(self.fd, &[_]KEvent{
         KEvent{
             .ident = @intCast(id),
             .filter = std.c.EVFILT.TIMER,
             .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
             .fflags = 0, // default is milliseconds
-            .data = @intCast(wait),
+            .data = @intCast(ms),
             .udata = 1, // prevents `udata != 0` assert
         },
     }, &.{}, null);
@@ -84,14 +72,13 @@ pub fn unsubscribe(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
         .timer => std.c.EVFILT.TIMER,
     };
 
-    var iter = self.evs.iterator();
-    while (iter.next()) |item| {
-        if (item.filter == filter) {
-            if (iter.count == self.evs.items.len) {
-                _ = self.evs.remove();
-            } else {
-                _ = self.evs.removeIndex(iter.count);
-            }
+    var i = self.evs.count;
+    while (i > 0) {
+        i -= 1;
+        const ev = self.evs.get(i);
+        if (ev.ident == ident and ev.filter == filter) {
+            self.evs.removeIndex(i);
+            break;
         }
     }
 
@@ -121,23 +108,15 @@ const CustomEvent = struct {
 const FALLBACK_ERROR = std.c.E.CONNREFUSED;
 
 pub fn next(self: *Self) NextError!?CustomEvent {
-    const ev = self.evs.removeOrNull() orelse blk: {
+    while (self.evs.count == 0) {
         var buf: [MAX_EVENTS]KEvent = undefined;
-
-        var readyCount: usize = 0;
-        while (readyCount == 0) {
-            readyCount = try std.posix.kevent(self.fd, &.{}, &buf, null);
-            if (readyCount == 0) {
-                std.Thread.sleep(std.time.ns_per_us * 4);
-            }
+        const readyCount = try std.posix.kevent(self.fd, &.{}, &buf, null);
+        for (buf[0..readyCount]) |e| {
+            self.evs.add(e) catch unreachable;
         }
+    }
 
-        if (readyCount > 1) {
-            self.evs.addSlice(buf[1..readyCount]) catch unreachable;
-        }
-
-        break :blk buf[0];
-    };
+    const ev = self.evs.remove() orelse unreachable;
 
     utils.assert(ev.udata != 0);
 

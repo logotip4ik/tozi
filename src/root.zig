@@ -40,7 +40,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     var pieces: PieceManager = try .init(alloc, numberOfPieces);
     defer pieces.deinit(alloc);
 
-    var kq: KQ = try .init(alloc);
+    var kq: KQ = try .init();
     defer kq.deinit();
 
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
