@@ -18,19 +18,15 @@ const Heap = if (builtin.mode == .Debug) struct {
         _ = self.gpa.deinit();
     }
 } else struct {
-    arena: std.heap.ArenaAllocator,
-
     pub fn init() @This() {
-        return .{ .arena = .init(std.heap.smp_allocator) };
+        return .{};
     }
 
-    pub fn alloc(self: *@This()) std.mem.Allocator {
-        return self.arena.allocator();
+    pub fn alloc(_: *@This()) std.mem.Allocator {
+        return std.heap.smp_allocator;
     }
 
-    pub fn deinit(self: *@This()) void {
-        self.arena.deinit();
-    }
+    pub fn deinit(_: *@This()) void {}
 };
 
 pub fn main() !void {
