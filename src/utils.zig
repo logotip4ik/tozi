@@ -38,6 +38,16 @@ pub fn RqPool(comptime Size: usize) type {
 
             return error.UnknownChunk;
         }
+
+        pub fn format(self: Self, w: *std.Io.Writer) !void {
+            for (self.buf[0..self.count], 0..) |r, i| {
+                try w.print("(piece: {d} + {d})", .{ r.pieceIndex, r.begin });
+
+                if (i != self.count - 1) {
+                    try w.writeAll(", ");
+                }
+            }
+        }
     };
 }
 

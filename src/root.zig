@@ -233,8 +233,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                     }
 
-                    std.log.info("peer: {d} unchoked, requesting", .{peer.socket});
-
                     while (peer.inFlight.count < peer.inFlight.size) {
                         const piece = peer.getNextWorkingPiece(&pieces) orelse break;
                         const len = torrent.getPieceSize(piece);
@@ -243,6 +241,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                             break;
                         }
                     }
+
+                    std.log.info("peer: {d} unchoked, inflight: {f}", .{ peer.socket, peer.inFlight });
 
                     peer.state = .messageStart;
                     try kq.subscribe(peer.socket, .write, event.kevent.udata);
