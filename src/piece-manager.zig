@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const Torrent = @import("torrent.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
@@ -12,8 +13,19 @@ const State = enum {
 };
 
 const PieceBuf = struct {
-    fetched: u32,
     bytes: []u8,
+    received: std.bit_set.IntegerBitSet(256),
+    fetched: u32,
+
+    pub fn hasBlock(self: PieceBuf, begin: u32) bool {
+        const chunkIdx = begin / Torrent.BLOCK_SIZE;
+        return self.received.isSet(chunkIdx);
+    }
+
+    pub fn markBlock(self: *PieceBuf, begin: u32) void {
+        const chunkIdx = begin / Torrent.BLOCK_SIZE;
+        self.received.set(chunkIdx);
+    }
 
     pub fn deinit(self: PieceBuf, alloc: std.mem.Allocator) void {
         alloc.free(self.bytes);
@@ -71,8 +83,11 @@ pub fn writePiece(
 
     const buf = try self.getPieceBuf(alloc, piece.index, pieceLen);
 
-    @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
-    buf.fetched += @intCast(bytes.len);
+    if (!buf.hasBlock(piece.begin)) {
+        @memcpy(buf.bytes[piece.begin .. piece.begin + piece.len], bytes[0..piece.len]);
+        buf.markBlock(piece.begin);
+        buf.fetched += piece.len;
+    }
 
     // TODO: maybe we should reset this piece and abort any operations ?
     utils.assert(buf.fetched <= pieceLen);
@@ -81,7 +96,7 @@ pub fn writePiece(
         return null;
     }
 
-    return self.complete(piece.index) catch unreachable;
+    return self.complete(piece.index) catch null;
 }
 
 pub fn getPieceBuf(
@@ -95,6 +110,7 @@ pub fn getPieceBuf(
     if (!res.found_existing) {
         res.value_ptr.* = .{
             .bytes = try alloc.alloc(u8, len),
+            .received = .initEmpty(),
             .fetched = 0,
         };
     }
@@ -135,12 +151,14 @@ pub fn reset(self: *Self, index: u32) void {
     self.pieces[index] = .missing;
     const buf = self.buffers.getPtr(index) orelse return;
     buf.fetched = 0;
+    buf.received = .initEmpty();
 }
 
 pub fn complete(self: *Self, index: u32) !PieceBuf {
+    const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
+
     self.pieces[index] = .have;
 
-    const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
     return kv.value;
 }
 
