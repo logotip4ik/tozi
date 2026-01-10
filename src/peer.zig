@@ -55,7 +55,6 @@ pub fn init(addr: std.net.Address) !Peer {
 pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     p.state = .dead;
 
-    std.posix.close(p.socket);
     p.readBuf.deinit(alloc);
     p.writeBuf.deinit(alloc);
 
