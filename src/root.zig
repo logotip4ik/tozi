@@ -77,6 +77,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
             tracker.downloaded = downloaded;
             tracker.left = torrent.totalLen - downloaded;
+            if (peers.items.len - deadCount < 10) {
+                tracker.numWant += 50;
+            }
 
             const nextKeepAlive = try tracker.keepAlive(alloc);
 
