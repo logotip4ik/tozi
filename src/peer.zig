@@ -14,7 +14,8 @@ state: State = .writeHandshake,
 choked: bool = true,
 interested: bool = false,
 
-buf: std.array_list.Aligned(u8, null) = .empty,
+readBuf: std.array_list.Aligned(u8, null) = .empty,
+writeBuf: std.array_list.Aligned(u8, null) = .empty,
 
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
@@ -55,7 +56,9 @@ pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     p.state = .dead;
 
     std.posix.close(p.socket);
-    p.buf.deinit(alloc);
+    p.readBuf.deinit(alloc);
+    p.writeBuf.deinit(alloc);
+
     if (p.bitfield) |*x| x.deinit(alloc);
     if (p.workingOn) |*x| x.deinit(alloc);
 }
@@ -97,41 +100,41 @@ pub fn readInt(p: *Peer, comptime T: type) !T {
 }
 
 pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
-    if (p.buf.items.len >= size) {
-        return p.buf.items[0..size];
+    if (p.readBuf.items.len >= size) {
+        return p.readBuf.items[0..size];
     }
 
-    try p.buf.ensureTotalCapacity(alloc, size);
+    try p.readBuf.ensureTotalCapacity(alloc, size);
 
-    const slice = p.buf.allocatedSlice();
-    const len = p.buf.items.len;
+    const slice = p.readBuf.allocatedSlice();
+    const len = p.readBuf.items.len;
     const count = try std.posix.read(p.socket, slice[len..size]);
 
-    p.buf.items.len += count;
+    p.readBuf.items.len += count;
 
-    if (p.buf.items.len >= size) {
-        return p.buf.items[0..size];
+    if (p.readBuf.items.len >= size) {
+        return p.readBuf.items[0..size];
     }
 
     return null;
 }
 
 /// returns `true` when all data was written to socket
-pub fn writeBuf(p: *Peer) !bool {
-    if (p.buf.items.len == 0) {
+pub fn send(p: *Peer) !bool {
+    if (p.writeBuf.items.len == 0) {
         return true;
     }
 
-    const wrote = try std.posix.write(p.socket, p.buf.items);
+    const wrote = try std.posix.write(p.socket, p.writeBuf.items);
 
-    const left = p.buf.items.len - wrote;
-    p.buf.items.len = left;
+    const left = p.writeBuf.items.len - wrote;
+    p.writeBuf.items.len = left;
 
     if (left == 0) {
         return true;
     }
 
-    @memmove(p.buf.items[0..left], p.buf.items[wrote .. wrote + left]);
+    @memmove(p.writeBuf.items[0..left], p.writeBuf.items[wrote .. wrote + left]);
 
     return false;
 }
