@@ -131,6 +131,10 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
             continue;
         }
 
+        if (self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
+            break;
+        }
+
         if (peerString[0] == 0 or peerString[0] == 255) {
             continue;
         }
@@ -148,13 +152,9 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
         }
 
         try self.newAddrs.append(alloc, peerString[0..6].*);
-
-        if (self.newAddrs.items.len + self.oldAddrs.items.len == self.numWant) {
-            break;
-        }
     }
 
-    try self.oldAddrs.ensureTotalCapacity(alloc, self.newAddrs.items.len);
+    try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
 
     return interval.inner.int;
 }
