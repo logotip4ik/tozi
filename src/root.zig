@@ -315,7 +315,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     completedCount += 1;
                     const percent = (completedCount * 100) / totalPieces;
-                    std.log.info("progress: {d}/{d} ({d}%) - piece {d} ok", .{ completedCount, totalPieces, percent, piece.index });
+                    std.log.info("progress: ({d}%) {d}/{d} - piece {d} ok (peer: {d}, alive peers: {d})", .{
+                        percent,
+                        completedCount,
+                        totalPieces,
+                        piece.index,
+                        peer.socket,
+                        peers.items.len - deadCount,
+                    });
 
                     if (pieces.isDownloadComplete()) {
                         @branchHint(.cold);
