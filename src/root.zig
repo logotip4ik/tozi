@@ -385,7 +385,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
     const minutes = @as(f64, @floatFromInt(delta)) / std.time.ms_per_min;
 
-    std.log.info("downloaded in: {d:.2} minutes", .{minutes});
+    if (minutes < 60) {
+        std.log.info("downloaded in: {d:.2} minutes", .{minutes});
+    } else {
+        const hours = minutes / 60;
+        std.log.info("downloaded in: {d:.2} hours", .{hours});
+    }
 }
 
 fn updateTracker(tracker: *HttpTracker, pieces: PieceManager, torrent: Torrent) void {
