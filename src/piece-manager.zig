@@ -1,4 +1,5 @@
 const std = @import("std");
+const hasher = @import("hasher");
 
 const Torrent = @import("torrent.zig");
 const proto = @import("proto.zig");
@@ -60,9 +61,10 @@ pub fn validatePiece(
     noalias bytes: []const u8,
     noalias expectedHash: []const u8,
 ) !void {
-    var computedHash: [20]u8 = undefined;
-
-    std.crypto.hash.Sha1.hash(bytes, computedHash[0..20], .{});
+    const computedHash = hasher.hash(bytes) catch {
+        self.reset(index);
+        return error.HashingFailed;
+    };
 
     if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
         self.reset(index);

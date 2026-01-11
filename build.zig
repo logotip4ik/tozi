@@ -4,11 +4,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("tozi", .{
+    const hasherMod = b.addModule("hasher", .{
+        .root_source_file = b.path("src/hasher.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .single_threaded = true,
+        .strip = true,
+    });
+
+    const toziMod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .single_threaded = true,
+        .imports = &.{
+            .{ .name = "hasher", .module = hasherMod },
+        },
     });
 
     const opts = std.Build.ExecutableOptions{
@@ -18,7 +29,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "tozi", .module = mod },
+                .{ .name = "tozi", .module = toziMod },
             },
         }),
     };
@@ -29,7 +40,7 @@ pub fn build(b: *std.Build) void {
     const checkExe = b.addExecutable(opts);
     const checkMod = b.addLibrary(.{
         .name = "libtozi",
-        .root_module = mod,
+        .root_module = toziMod,
     });
     const checkStep = b.step("check", "Run check on exe");
     checkStep.dependOn(&checkExe.step);
@@ -47,7 +58,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = toziMod,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);

@@ -108,7 +108,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     const percent = (completedCount * 100) / totalPieces;
                     const bytesPerSecond = bytesPerTick / 3;
 
-                    std.log.info("progress: {d:3}% {d}/{d} (alive peers: {d}, speed: {Bi:.2})", .{
+                    std.log.info("progress: {d:3}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
                         percent,
                         completedCount,
                         totalPieces,
