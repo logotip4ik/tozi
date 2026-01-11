@@ -77,9 +77,7 @@ pub fn writePiece(self: Self, index: u32, data: []const u8) !void {
         const rem = data.len - dataOffset;
         const toWrite = @min(spaceInFile, rem);
 
-        var writer = file.handle.writer(&.{});
-        try writer.seekTo(writeStart);
-        try writer.interface.writeAll(data[dataOffset..][0..toWrite]);
+        try file.handle.pwriteAll(data[dataOffset..][0..toWrite], writeStart);
 
         dataOffset += toWrite;
         globalOffset += toWrite;

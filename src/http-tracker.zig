@@ -16,7 +16,7 @@ downloaded: usize,
 
 left: usize,
 
-numWant: usize = 50,
+numWant: usize = defaultNumWant,
 
 port: u16 = 6889,
 
@@ -32,6 +32,8 @@ const Tracker = struct {
     interval: usize,
     checkinAt: usize,
 };
+
+pub const defaultNumWant = 20;
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.oldAddrs.deinit(alloc);

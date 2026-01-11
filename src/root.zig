@@ -75,7 +75,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     updateTracker(&tracker, pieces, torrent);
 
                     if (peers.items.len < 10 and tracker.newAddrs.items.len < 10) {
-                        tracker.numWant += 50;
+                        tracker.numWant += HttpTracker.defaultNumWant;
                     }
 
                     const nextKeepAlive = try tracker.keepAlive(alloc);
