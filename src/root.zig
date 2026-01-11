@@ -159,12 +159,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
                 }
 
-                const ready = peer.send() catch {
-                    peer.state = .dead;
-                    break :sw;
-                };
+                if (!peer.choked) {
+                    const ready = peer.send() catch {
+                        peer.state = .dead;
+                        break :sw;
+                    };
 
-                if (!ready) continue;
+                    if (!ready) continue;
+                }
 
                 try kq.unsubscribe(peer.socket, .write);
             },
