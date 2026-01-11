@@ -14,7 +14,7 @@ const State = enum {
 
 const PieceBuf = struct {
     bytes: []u8,
-    received: std.bit_set.IntegerBitSet(256),
+    received: std.bit_set.ArrayBitSet(usize, 2048),
     fetched: u32,
 
     pub fn hasBlock(self: PieceBuf, begin: u32) bool {

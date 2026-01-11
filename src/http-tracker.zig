@@ -179,7 +179,6 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
         if (tracker.checkinAt > now and self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
             continue;
         }
-        std.log.debug("heeey", .{});
 
         const interval = try self.announce(alloc, tracker.url);
         const intervalInMs = interval * std.time.ms_per_s;
