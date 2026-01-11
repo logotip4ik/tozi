@@ -176,7 +176,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 peer.state = .dead;
             },
             .readHandshake => {
-                const bytes = try peer.readTotalBuf(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
+                const bytes = try peer.read(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
                 defer peer.readBuf.clearRetainingCapacity();
 
                 const received: *proto.TcpHandshake = @ptrCast(bytes);
@@ -276,7 +276,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     // then request it
                 },
                 .bitfield => |len| {
-                    const bytes = try peer.readTotalBuf(alloc, len) orelse continue;
+                    const bytes = try peer.read(alloc, len) orelse continue;
                     defer peer.readBuf.clearRetainingCapacity();
 
                     try peer.setBitfield(alloc, bytes);
@@ -289,7 +289,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     try kq.subscribe(peer.socket, .write, event.kevent.udata);
                 },
                 .piece => |piece| {
-                    const chunkBytes = try peer.readTotalBuf(alloc, piece.len) orelse continue;
+                    const chunkBytes = try peer.read(alloc, piece.len) orelse continue;
                     defer peer.readBuf.clearRetainingCapacity();
 
                     peer.state = .messageStart;

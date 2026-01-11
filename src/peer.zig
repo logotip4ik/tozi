@@ -17,6 +17,8 @@ interested: bool = false,
 readBuf: std.array_list.Aligned(u8, null) = .empty,
 writeBuf: std.array_list.Aligned(u8, null) = .empty,
 
+writeStart: usize = 0,
+
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
 
@@ -98,7 +100,7 @@ pub fn readInt(p: *Peer, comptime T: type) !T {
     return std.mem.readInt(T, &buf, .big);
 }
 
-pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
+pub fn read(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
     if (p.readBuf.items.len >= size) {
         return p.readBuf.items[0..size];
     }
@@ -107,7 +109,10 @@ pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
 
     const slice = p.readBuf.allocatedSlice();
     const len = p.readBuf.items.len;
-    const count = try std.posix.read(p.socket, slice[len..size]);
+    const count = std.posix.read(p.socket, slice[len..size]) catch |err| switch (err) {
+        error.WouldBlock => return null,
+        else => |e| return e,
+    };
 
     p.readBuf.items.len += count;
 
@@ -121,19 +126,23 @@ pub fn readTotalBuf(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
 /// returns `true` when all data was written to socket
 pub fn send(p: *Peer) !bool {
     if (p.writeBuf.items.len == 0) {
+        p.writeStart = 0;
         return true;
     }
 
-    const wrote = try std.posix.write(p.socket, p.writeBuf.items);
+    const toWrite = p.writeBuf.items[p.writeStart..];
+    const wrote = std.posix.write(p.socket, toWrite) catch |err| switch (err) {
+        error.WouldBlock => return false,
+        else => |e| return e,
+    };
 
-    const left = p.writeBuf.items.len - wrote;
-    p.writeBuf.items.len = left;
+    p.writeStart += wrote;
 
-    if (left == 0) {
+    if (p.writeStart == p.writeBuf.items.len) {
+        p.writeStart = 0;
+        p.writeBuf.clearRetainingCapacity();
         return true;
     }
-
-    @memmove(p.writeBuf.items[0..left], p.writeBuf.items[wrote .. wrote + left]);
 
     return false;
 }
