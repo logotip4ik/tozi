@@ -5,6 +5,10 @@ const Torrent = @import("torrent.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
+pieces: []State,
+
+buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
+
 const Self = @This();
 
 const State = enum {
@@ -32,10 +36,6 @@ const PieceBuf = struct {
         alloc.free(self.bytes);
     }
 };
-
-pieces: []State,
-
-buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
 
 pub fn init(alloc: std.mem.Allocator, numberOfPieces: usize) !Self {
     const pieces = try alloc.alloc(State, numberOfPieces);
@@ -175,4 +175,21 @@ pub fn killPeer(self: *Self, workingOn: ?std.DynamicBitSetUnmanaged) void {
     while (iter.next()) |index| {
         self.reset(@intCast(index));
     }
+}
+
+pub fn hasInterestingPiece(self: *Self, bitfield: std.DynamicBitSetUnmanaged) bool {
+    var iterator = bitfield.iterator(.{
+        .direction = .forward,
+        .kind = .set,
+    });
+
+    while (iterator.next()) |index| {
+        if (index >= self.pieces.len) continue;
+
+        if (self.pieces[index] == .missing) {
+            return true;
+        }
+    }
+
+    return false;
 }

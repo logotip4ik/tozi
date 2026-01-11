@@ -281,12 +281,12 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     try peer.setBitfield(alloc, bytes);
 
-                    // TODO: actually check if peer has interesting pieces
+                    if (pieces.hasInterestingPiece(peer.bitfield.?)) {
+                        try peer.mq.add(.interested);
 
-                    try peer.mq.add(.interested);
-
-                    peer.state = .messageStart;
-                    try kq.subscribe(peer.socket, .write, event.kevent.udata);
+                        peer.state = .messageStart;
+                        try kq.subscribe(peer.socket, .write, event.kevent.udata);
+                    }
                 },
                 .piece => |piece| {
                     const chunkBytes = try peer.read(alloc, piece.len) orelse continue;
