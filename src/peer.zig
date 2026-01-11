@@ -12,7 +12,12 @@ socket: std.posix.fd_t,
 state: State = .writeHandshake,
 
 choked: bool = true,
-interested: bool = false,
+
+isInterested: bool = false,
+isUnchoked: bool = false,
+
+bytesReceived: usize = 0,
+requestsPerTick: usize = 0,
 
 readBuf: std.array_list.Aligned(u8, null) = .empty,
 
@@ -41,8 +46,6 @@ pub fn init(addr: std.net.Address) !Peer {
         std.posix.IPPROTO.TCP,
     );
     errdefer std.posix.close(fd);
-
-    std.log.info("peer: {d} connecting to {f}", .{ fd, addr });
 
     std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
         error.WouldBlock => {},
@@ -196,9 +199,7 @@ pub fn addRequest(p: *Peer, alloc: std.mem.Allocator, piece: u32, pieceLen: u32)
 }
 
 pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) void {
-    var count: usize = 0;
-
-    while (p.inFlight.count < p.inFlight.size) : (count += 1) {
+    while (p.inFlight.count < p.inFlight.size) {
         const piece = p.getNextWorkingPiece(pieces) orelse break;
         const len = torrent.getPieceSize(piece);
 
@@ -206,8 +207,8 @@ pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: 
             break;
         }
     }
+}
 
-    if (count > 3) {
-        std.log.info("peer: {d} added {d} new requests", .{ p.socket, count });
-    }
+pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
+    return std.math.order(a.bytesReceived, b.bytesReceived) == .gt;
 }

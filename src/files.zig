@@ -58,6 +58,38 @@ pub fn deinit(self: *Self) void {
     self.alloc.free(self.files);
 }
 
+pub fn readPiece(self: *Self, alloc: std.mem.Allocator, index: u32, begin: u32, len: u32) ![]u8 {
+    const buf = try alloc.alloc(u8, len);
+    errdefer alloc.free(buf);
+
+    var globalOffset = @as(usize, index) * self.pieceLen + begin;
+    var bufOffset: usize = 0;
+
+    for (self.files) |file| {
+        const fileEnd = file.start + file.size;
+        if (globalOffset >= fileEnd) continue;
+
+        const readStart = if (globalOffset > file.start)
+            globalOffset - file.start
+        else
+            0;
+
+        const avail = file.size - readStart;
+        const rem = len - bufOffset;
+        const toRead = @min(avail, rem);
+
+         _ = try file.handle.preadAll(buf[bufOffset..][0..toRead], readStart);
+
+        bufOffset += toRead;
+        globalOffset += toRead;
+
+        if (bufOffset >= len) break;
+    }
+
+    if (bufOffset < len) return error.UnexpectedEof;
+    return buf;
+}
+
 pub fn writePiece(self: Self, index: u32, data: []const u8) !void {
     var globalOffset = @as(usize, index) * self.pieceLen;
     var dataOffset: usize = 0;

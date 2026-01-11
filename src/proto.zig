@@ -96,16 +96,12 @@ pub const Message = union(MessageId) {
             .choke, .unchoke, .interested, .not_interested => {},
             .have => |idx| try w.writeInt(u32, idx, .big),
             .port => |p| try w.writeInt(u16, p, .big),
-            .bitfield => {
-                try w.writeAll(data);
-            },
-
+            .bitfield => try w.writeAll(data),
             .request, .cancel => |r| {
                 try w.writeInt(u32, r.index, .big);
                 try w.writeInt(u32, r.begin, .big);
                 try w.writeInt(u32, r.len, .big);
             },
-
             .piece => |p| {
                 try w.writeInt(u32, p.index, .big);
                 try w.writeInt(u32, p.begin, .big);
