@@ -148,15 +148,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 try kq.subscribe(peer.socket, .read, @intFromPtr(peer));
             },
             .messageStart, .message => {
-                {
-                    var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &peer.writeBuf);
-                    defer peer.writeBuf = writer.toArrayList();
-
-                    while (peer.mq.remove()) |m| {
-                        try m.writeMessage(&writer.writer);
-                    }
-                }
-
                 if (!peer.choked) {
                     const ready = peer.send() catch {
                         peer.state = .dead;
@@ -187,13 +178,18 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 };
 
                 peer.state = .messageStart;
-                std.log.info("peer: {d} handshake ok", .{peer.socket});
+
+                const bitfield = try pieces.torrentBitfieldBytes(alloc);
+                defer alloc.free(bitfield);
+
+                try peer.addMessage(alloc, .{ .bitfield = @intCast(bitfield.len) }, bitfield);
+                try kq.subscribe(peer.socket, .write, event.kevent.udata);
             },
             .messageStart => {
                 const len = try peer.readInt(u32);
                 if (len == 0) {
                     if (!peer.choked) {
-                        peer.fillRqPool(torrent, &pieces);
+                        peer.fillRqPool(alloc, torrent, &pieces);
 
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
                     }
@@ -259,7 +255,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     std.log.info("peer: {d} unchoked", .{peer.socket});
 
-                    peer.fillRqPool(torrent, &pieces);
+                    peer.fillRqPool(alloc, torrent, &pieces);
                     peer.state = .messageStart;
                     try kq.subscribe(peer.socket, .write, event.kevent.udata);
                 },
@@ -282,8 +278,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     try peer.setBitfield(alloc, bytes);
 
                     if (pieces.hasInterestingPiece(peer.bitfield.?)) {
-                        try peer.mq.add(.interested);
-
+                        try peer.addMessage(alloc, .interested, &.{});
                         peer.state = .messageStart;
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
                     }
@@ -308,7 +303,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     if (!peer.choked) {
                         @branchHint(.likely);
 
-                        peer.fillRqPool(torrent, &pieces);
+                        peer.fillRqPool(alloc, torrent, &pieces);
 
                         try kq.subscribe(peer.socket, .write, event.kevent.udata);
                     }
@@ -337,7 +332,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     for (peers.items) |otherPeer| {
                         if (peer.socket != otherPeer.socket) {
-                            otherPeer.mq.add(.{ .have = piece.index }) catch {};
+                            otherPeer.addMessage(alloc, .{ .have = piece.index }, &.{}) catch continue;
                             kq.subscribe(otherPeer.socket, .write, @intFromPtr(otherPeer)) catch {};
                         }
                     }

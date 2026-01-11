@@ -64,7 +64,9 @@ pub const Message = union(MessageId) {
         const u32_size = @sizeOf(u32);
 
         return switch (self) {
-            .choke, .unchoke, .interested, .not_interested, .port => id_size,
+            .choke, .unchoke, .interested, .not_interested => id_size,
+
+            .port => id_size + @sizeOf(u16),
 
             // ID (1) + Index (4)
             .have => id_size + u32_size,
@@ -86,28 +88,29 @@ pub const Message = union(MessageId) {
         return 4 + self.len();
     }
 
-    pub inline fn writeMessage(m: Message, w: *std.Io.Writer) !void {
+    pub inline fn writeMessage(m: Message, w: *std.Io.Writer, data: []const u8) !void {
         try w.writeInt(u32, m.len(), .big);
+        try w.writeByte(@intFromEnum(m));
 
         switch (m) {
-            .request => |r| {
-                try w.writeByte(@intFromEnum(m));
+            .choke, .unchoke, .interested, .not_interested => {},
+            .have => |idx| try w.writeInt(u32, idx, .big),
+            .port => |p| try w.writeInt(u16, p, .big),
+            .bitfield => {
+                try w.writeAll(data);
+            },
+
+            .request, .cancel => |r| {
                 try w.writeInt(u32, r.index, .big);
                 try w.writeInt(u32, r.begin, .big);
                 try w.writeInt(u32, r.len, .big);
             },
-            .interested,
-            .unchoke,
-            .choke,
-            .not_interested,
-            => {
-                try w.writeByte(@intFromEnum(m));
+
+            .piece => |p| {
+                try w.writeInt(u32, p.index, .big);
+                try w.writeInt(u32, p.begin, .big);
+                try w.writeAll(data);
             },
-            .have => |idx| {
-                try w.writeByte(@intFromEnum(m));
-                try w.writeInt(u32, idx, .big);
-            },
-            else => unreachable,
         }
     }
 };

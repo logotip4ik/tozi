@@ -193,3 +193,22 @@ pub fn hasInterestingPiece(self: *Self, bitfield: std.DynamicBitSetUnmanaged) bo
 
     return false;
 }
+
+pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
+    const byteLen = (self.pieces.len + 7) / 8;
+
+    const bytes = try alloc.alloc(u8, byteLen);
+    errdefer alloc.free(bytes);
+
+    @memset(bytes, 0);
+
+    for (self.pieces, 0..) |p, i| {
+        if (p == .have) {
+            const byteIdx = i / 8;
+            const bitPos: u3 = @intCast(7 - (i % 8));
+            bytes[byteIdx] |= (@as(u8, 1) << bitPos);
+        }
+    }
+
+    return bytes;
+}

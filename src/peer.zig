@@ -15,14 +15,12 @@ choked: bool = true,
 interested: bool = false,
 
 readBuf: std.array_list.Aligned(u8, null) = .empty,
-writeBuf: std.array_list.Aligned(u8, null) = .empty,
 
+writeBuf: std.array_list.Aligned(u8, null) = .empty,
 writeStart: usize = 0,
 
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
-
-mq: utils.Queue(proto.Message, 64) = .{},
 
 workingPiece: ?u32 = null,
 workingPieceOffset: u32 = 0,
@@ -81,6 +79,13 @@ pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void 
             }
         }
     }
+}
+
+pub fn addMessage(p: *Peer, alloc: std.mem.Allocator, message: proto.Message, data: []const u8) !void {
+    var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &p.writeBuf);
+    defer p.writeBuf = writer.toArrayList();
+
+    try message.writeMessage(&writer.writer, data);
 }
 
 pub fn readInt(p: *Peer, comptime T: type) !T {
@@ -160,7 +165,7 @@ pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
 }
 
 // returns true if pipeline is full
-pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) bool {
+pub fn addRequest(p: *Peer, alloc: std.mem.Allocator, piece: u32, pieceLen: u32) bool {
     const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
 
     p.inFlight.push(.{
@@ -168,11 +173,11 @@ pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) bool {
         .begin = p.workingPieceOffset,
     }) catch return true;
 
-    p.mq.add(.{ .request = .{
+    p.addMessage(alloc, .{ .request = .{
         .index = piece,
         .begin = p.workingPieceOffset,
         .len = chunkLen,
-    } }) catch {
+    } }, &.{}) catch {
         p.inFlight.receive(.{
             .pieceIndex = piece,
             .begin = p.workingPieceOffset,
@@ -190,19 +195,19 @@ pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) bool {
     return false;
 }
 
-pub fn fillRqPool(p: *Peer, torrent: Torrent, pieces: *PieceManager) void {
+pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) void {
     var count: usize = 0;
 
     while (p.inFlight.count < p.inFlight.size) : (count += 1) {
         const piece = p.getNextWorkingPiece(pieces) orelse break;
         const len = torrent.getPieceSize(piece);
 
-        if (p.addRequest(piece, len)) {
+        if (p.addRequest(alloc, piece, len)) {
             break;
         }
     }
 
     if (count > 3) {
-        std.log.info("peer: {d} added {d} new requests", .{p.socket, count});
+        std.log.info("peer: {d} added {d} new requests", .{ p.socket, count });
     }
 }
