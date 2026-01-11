@@ -14,7 +14,7 @@ const KEvent = std.posix.Kevent;
 
 pub const Kind = enum(u2) { timer, read, write };
 
-const MAX_EVENTS = 64;
+const MAX_EVENTS = 1024;
 
 pub fn init() !Self {
     comptime utils.assert(builtin.os.tag == .macos);
@@ -110,12 +110,12 @@ const CustomEvent = struct {
 };
 
 const FALLBACK_ERROR = std.c.E.CONNREFUSED;
+var intermidiateKqBuf: [MAX_EVENTS]KEvent = undefined;
 
 pub fn next(self: *Self) NextError!?CustomEvent {
     while (self.evs.count == 0) {
-        var buf: [MAX_EVENTS]KEvent = undefined;
-        const readyCount = try std.posix.kevent(self.fd, &.{}, &buf, null);
-        for (buf[0..readyCount]) |e| {
+        const readyCount = try std.posix.kevent(self.fd, &.{}, &intermidiateKqBuf, null);
+        for (intermidiateKqBuf[0..readyCount]) |e| {
             self.evs.add(e) catch unreachable;
         }
     }

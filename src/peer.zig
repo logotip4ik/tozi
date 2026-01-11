@@ -20,11 +20,11 @@ writeBuf: std.array_list.Aligned(u8, null) = .empty,
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
 
-mq: utils.Queue(proto.Message, 16) = .{},
+mq: utils.Queue(proto.Message, 64) = .{},
 
 workingPiece: ?u32 = null,
 workingPieceOffset: u32 = 0,
-inFlight: utils.RqPool(5) = .{},
+inFlight: utils.RqPool(32) = .{},
 
 pub const State = union(enum) {
     readHandshake,
