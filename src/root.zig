@@ -58,8 +58,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
     try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
 
-    var deadCount: usize = 0;
-
     const downloadStart = std.time.milliTimestamp();
     const totalPieces = torrent.pieces.len / 20;
     var completedCount: usize = 0;
@@ -76,7 +74,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 .tracker => {
                     updateTracker(&tracker, pieces, torrent);
 
-                    if (tracker.oldAddrs.items.len - deadCount < 10 and tracker.newAddrs.items.len < 10) {
+                    if (peers.items.len < 10 and tracker.newAddrs.items.len < 10) {
                         tracker.numWant += 50;
                     }
 
@@ -100,7 +98,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         try peers.append(alloc, peer);
                     }
 
-                    if (deadCount == tracker.oldAddrs.items.len) {
+                    if (peers.items.len == 0) {
                         return error.AllStreamsDead;
                     }
                 },
@@ -114,7 +112,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         percent,
                         completedCount,
                         totalPieces,
-                        tracker.oldAddrs.items.len - deadCount,
+                        peers.items.len,
                         bytesPerSecond,
                     });
                 },
@@ -363,15 +361,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             for (peers.items, 0..) |item, i| {
                 if (item == peer) {
                     _ = peers.swapRemove(i);
-                    std.log.debug("dead count: {d}", .{deadCount});
-                    deadCount += 1;
                     break;
                 }
             }
 
             alloc.destroy(peer);
 
-            if (tracker.oldAddrs.items.len - deadCount < 10) {
+            if (peers.items.len < 10) {
                 kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false }) catch {};
             }
         }
@@ -379,7 +375,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
     updateTracker(&tracker, pieces, torrent);
     for (tracker.trackers.items) |t| {
-        tracker.sendAnnounce(alloc, t.url, null, .completed) catch {};
+        tracker.sendAnnounce(alloc, t.url, null, .stopped) catch {};
     }
 
     const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
