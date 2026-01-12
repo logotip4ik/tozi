@@ -21,8 +21,7 @@ requestsPerTick: usize = 0,
 
 readBuf: std.array_list.Aligned(u8, null) = .empty,
 
-writeBuf: std.array_list.Aligned(u8, null) = .empty,
-writeStart: usize = 0,
+writeBuf: std.Io.Writer.Allocating,
 
 bitfield: ?std.DynamicBitSetUnmanaged = null,
 workingOn: ?std.DynamicBitSetUnmanaged = null,
@@ -39,27 +38,15 @@ pub const State = union(enum) {
     dead,
 };
 
-pub fn init(addr: std.net.Address) !Peer {
-    const fd = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-        std.posix.IPPROTO.TCP,
-    );
-    errdefer std.posix.close(fd);
-
-    std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => return err,
-    };
-
-    return .{ .socket = fd };
+pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
+    return .{ .socket = fd, .writeBuf = .init(alloc) };
 }
 
 pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     p.state = .dead;
 
     p.readBuf.deinit(alloc);
-    p.writeBuf.deinit(alloc);
+    p.writeBuf.deinit();
 
     if (p.bitfield) |*x| x.deinit(alloc);
     if (p.workingOn) |*x| x.deinit(alloc);
@@ -84,11 +71,8 @@ pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void 
     }
 }
 
-pub fn addMessage(p: *Peer, alloc: std.mem.Allocator, message: proto.Message, data: []const u8) !void {
-    var writer: std.Io.Writer.Allocating = .fromArrayList(alloc, &p.writeBuf);
-    defer p.writeBuf = writer.toArrayList();
-
-    try message.writeMessage(&writer.writer, data);
+pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !void {
+    try message.writeMessage(&p.writeBuf.writer, data);
 }
 
 pub fn readInt(p: *Peer, comptime T: type) !T {
@@ -133,22 +117,19 @@ pub fn read(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
 
 /// returns `true` when all data was written to socket
 pub fn send(p: *Peer) !bool {
-    if (p.writeBuf.items.len == 0) {
-        p.writeStart = 0;
+    const toWrite = p.writeBuf.written();
+
+    if (toWrite.len == 0) {
         return true;
     }
 
-    const toWrite = p.writeBuf.items[p.writeStart..];
     const wrote = std.posix.write(p.socket, toWrite) catch |err| switch (err) {
         error.WouldBlock => return false,
         else => |e| return e,
     };
 
-    p.writeStart += wrote;
-
-    if (p.writeStart == p.writeBuf.items.len) {
-        p.writeStart = 0;
-        p.writeBuf.clearRetainingCapacity();
+    _ = p.writeBuf.writer.consume(wrote);
+    if (p.writeBuf.writer.end == 0) {
         return true;
     }
 
@@ -168,7 +149,7 @@ pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
 }
 
 // returns true if pipeline is full
-pub fn addRequest(p: *Peer, alloc: std.mem.Allocator, piece: u32, pieceLen: u32) bool {
+pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) bool {
     const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
 
     p.inFlight.push(.{
@@ -176,7 +157,7 @@ pub fn addRequest(p: *Peer, alloc: std.mem.Allocator, piece: u32, pieceLen: u32)
         .begin = p.workingPieceOffset,
     }) catch return true;
 
-    p.addMessage(alloc, .{ .request = .{
+    p.addMessage(.{ .request = .{
         .index = piece,
         .begin = p.workingPieceOffset,
         .len = chunkLen,
