@@ -16,7 +16,7 @@ downloaded: usize,
 
 left: usize,
 
-numWant: usize = defaultNumWant,
+numWant: usize = 50,
 
 port: u16 = 6889,
 
