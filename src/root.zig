@@ -174,7 +174,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             std.log.err("peer: {d} received {t}", .{ peer.socket, err });
         }
 
-        if (event.kind == .write and peer.state != .dead) sw: switch (peer.state) {
+        const isDead = peer.state == .dead;
+
+        if (event.kind == .write and !isDead) sw: switch (peer.state) {
             .readHandshake, .dead => {},
             .writeHandshake => {
                 if (peer.writeBuf.written().len == 0) {
@@ -205,7 +207,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             },
         };
 
-        if (event.kind == .read and peer.state != .dead) sw: switch (peer.state) {
+        if (event.kind == .read and !isDead) sw: switch (peer.state) {
             .writeHandshake, .dead => {},
             .readHandshake => {
                 const bytes = try peer.read(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
@@ -308,23 +310,22 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 },
                 .unchoke => {
                     peer.choked = false;
+                    peer.state = .messageStart;
 
                     const bitfield = peer.bitfield orelse {
                         std.log.warn("received unchoke message but no bitfield was set", .{});
-                        peer.state = .messageStart;
-                        continue;
+                        break :sw;
                     };
 
                     if (peer.workingOn == null) {
                         peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                     }
 
-                    peer.state = .messageStart;
                     const needsWrite = try peer.fillRqPool(alloc, torrent, &pieces);
                     if (needsWrite) try kq.enable(peer.socket, .write, event.udata);
                 },
                 .have => |piece| {
-                    defer peer.state = .messageStart;
+                    peer.state = .messageStart;
 
                     var bitfield = peer.bitfield orelse {
                         std.log.err("unexpected empty bitfield with have message", .{});
@@ -334,13 +335,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     bitfield.set(piece);
                 },
                 .bitfield => |len| {
+                    peer.state = .messageStart;
+
                     const bytes = try peer.read(alloc, len) orelse continue;
                     defer peer.readBuf.clearRetainingCapacity();
 
                     try peer.setBitfield(alloc, bytes);
 
                     if (pieces.hasInterestingPiece(peer.bitfield.?)) {
-                        peer.state = .messageStart;
                         try peer.addMessage(.interested, &.{});
                         try kq.enable(peer.socket, .write, event.udata);
                     }
