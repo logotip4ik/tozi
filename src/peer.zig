@@ -71,10 +71,6 @@ pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void 
     }
 }
 
-pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !void {
-    try message.writeMessage(&p.writeBuf.writer, data);
-}
-
 pub fn readInt(p: *Peer, comptime T: type) !T {
     const n = @divExact(@typeInfo(T).int.bits, 8);
     var buf: [n]u8 = undefined;
@@ -129,11 +125,13 @@ pub fn send(p: *Peer) !bool {
     };
 
     _ = p.writeBuf.writer.consume(wrote);
-    if (p.writeBuf.writer.end == 0) {
-        return true;
-    }
 
-    return false;
+    const stillBuffered = p.writeBuf.written();
+    return stillBuffered.len == 0;
+}
+
+pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !void {
+    try message.writeMessage(&p.writeBuf.writer, data);
 }
 
 /// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
@@ -149,7 +147,7 @@ pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
 }
 
 // returns true if pipeline is full
-pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) bool {
+pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) !bool {
     const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
 
     p.inFlight.push(.{
@@ -157,17 +155,13 @@ pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) boo
         .begin = p.workingPieceOffset,
     }) catch return true;
 
-    p.addMessage(.{ .request = .{
+    const m: proto.Message = .{ .request = .{
         .index = piece,
         .begin = p.workingPieceOffset,
         .len = chunkLen,
-    } }, &.{}) catch {
-        p.inFlight.receive(.{
-            .pieceIndex = piece,
-            .begin = p.workingPieceOffset,
-        }) catch unreachable;
-        return true;
-    };
+    } };
+
+    try m.writeMessage(&p.writeBuf.writer, &.{});
 
     p.workingPieceOffset += chunkLen;
 
@@ -179,15 +173,20 @@ pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) boo
     return false;
 }
 
-pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) void {
-    while (p.inFlight.count < p.inFlight.size) {
+/// returns `true` when there is data to be written
+pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) !bool {
+    var count: u16 = 0;
+
+    while (p.inFlight.count < p.inFlight.size) : (count += 1) {
         const piece = p.getNextWorkingPiece(pieces) orelse break;
         const len = torrent.getPieceSize(piece);
 
-        if (p.addRequest(alloc, piece, len)) {
+        if (try p.addRequest(alloc, piece, len)) {
             break;
         }
     }
+
+    return count > 0;
 }
 
 pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
