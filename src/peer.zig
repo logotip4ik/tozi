@@ -139,6 +139,8 @@ pub fn send(p: *Peer) !bool {
 }
 
 pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !void {
+    utils.assert(p.state == .messageStart or p.state == .message);
+
     try message.writeMessage(&p.writeBuf.writer, data);
 }
 

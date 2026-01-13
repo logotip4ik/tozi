@@ -457,6 +457,11 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
 
                     for (peers.items) |p| {
+                        switch (p.state) {
+                            .readHandshake, .writeHandshake, .dead => continue,
+                            .messageStart, .message => {},
+                        }
+
                         try p.addMessage(.{ .have = piece.index }, &.{});
                         try kq.enable(p.socket, .write, @intFromPtr(p));
                     }
