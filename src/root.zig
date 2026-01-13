@@ -206,10 +206,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         };
 
         if (event.kind == .read and peer.state != .dead) sw: switch (peer.state) {
-            .writeHandshake => {},
-            .dead => {
-                peer.state = .dead;
-            },
+            .writeHandshake, .dead => {},
             .readHandshake => {
                 const bytes = try peer.read(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
                 defer peer.readBuf.clearRetainingCapacity();
@@ -218,7 +215,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                 handshake.validate(received.*) catch |err| {
                     std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
-                    continue :sw .dead;
+                    peer.state = .dead;
+                    break :sw;
                 };
 
                 peer.state = .messageStart;
@@ -242,7 +240,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                 if (len > Torrent.BLOCK_SIZE + 9) {
                     std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                    continue :sw .dead;
+                    peer.state = .dead;
+                    break :sw;
                 }
 
                 const idInt = try peer.readInt(u8);
@@ -251,7 +250,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     continue;
                 };
 
-                const message: proto.Message = blk: switch (id) {
+                const message: proto.Message = switch (id) {
                     .choke => .choke,
                     .unchoke => .unchoke,
                     .interested => .interested,
@@ -263,14 +262,15 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         .begin = try peer.readInt(u32),
                         .len = len - 9,
                     } },
-                    .request => {
+                    .request => blk: {
                         const index = try peer.readInt(u32);
                         const begin = try peer.readInt(u32);
                         const rLen = try peer.readInt(u32);
 
                         if (rLen > Torrent.BLOCK_SIZE) {
                             std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                            continue :sw .dead;
+                            peer.state = .dead;
+                            break :sw;
                         }
 
                         break :blk .{ .request = .{
@@ -279,14 +279,15 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                             .len = rLen,
                         } };
                     },
-                    .cancel => {
+                    .cancel => blk: {
                         const index = try peer.readInt(u32);
                         const begin = try peer.readInt(u32);
                         const cLen = try peer.readInt(u32);
 
                         if (cLen > Torrent.BLOCK_SIZE) {
                             std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                            continue :sw .dead;
+                            peer.state = .dead;
+                            break :sw;
                         }
 
                         break :blk .{ .cancel = .{
@@ -357,7 +358,8 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                             peer.socket,
                             piece.index,
                         });
-                        continue :sw .dead;
+                        peer.state = .dead;
+                        break :sw;
                     }
 
                     peer.inFlight.receive(.{ .pieceIndex = piece.index, .begin = piece.begin }) catch {};
