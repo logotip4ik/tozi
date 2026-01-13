@@ -19,8 +19,7 @@ isUnchoked: bool = false,
 bytesReceived: usize = 0,
 requestsPerTick: usize = 0,
 
-readBuf: std.array_list.Aligned(u8, null) = .empty,
-
+readBuf: std.Io.Writer.Allocating,
 writeBuf: std.Io.Writer.Allocating,
 
 bitfield: ?std.DynamicBitSetUnmanaged = null,
@@ -39,13 +38,13 @@ pub const State = union(enum) {
 };
 
 pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
-    return .{ .socket = fd, .writeBuf = .init(alloc) };
+    return .{ .socket = fd, .readBuf = .init(alloc), .writeBuf = .init(alloc) };
 }
 
 pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     p.state = .dead;
 
-    p.readBuf.deinit(alloc);
+    p.readBuf.deinit();
     p.writeBuf.deinit();
 
     if (p.bitfield) |*x| x.deinit(alloc);
@@ -88,27 +87,49 @@ pub fn readInt(p: *Peer, comptime T: type) !T {
     return std.mem.readInt(T, &buf, .big);
 }
 
-pub fn read(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
-    if (p.readBuf.items.len >= size) {
-        return p.readBuf.items[0..size];
+pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
+    utils.assert(size < Torrent.BLOCK_SIZE * 2);
+
+    if (p.readBuf.writer.end > size) {
+        return;
     }
 
-    try p.readBuf.ensureTotalCapacity(alloc, size);
+    var list = p.readBuf.toArrayList();
+    defer p.readBuf = .fromArrayList(alloc, &list);
 
-    const slice = p.readBuf.allocatedSlice();
-    const len = p.readBuf.items.len;
-    const count = std.posix.read(p.socket, slice[len..size]) catch |err| switch (err) {
+    try list.ensureTotalCapacity(alloc, size);
+
+    const left = size - list.items.len;
+    const count = std.posix.read(p.socket, list.unusedCapacitySlice()[0..left]) catch |err| switch (err) {
         error.WouldBlock => return null,
         else => |e| return e,
     };
 
-    p.readBuf.items.len += count;
+    list.items.len += count;
 
-    if (p.readBuf.items.len >= size) {
-        return p.readBuf.items[0..size];
+    if (list.items.len < size) {
+        return null;
     }
+}
 
-    return null;
+pub fn peekInt(p: *Peer, alloc: std.mem.Allocator, comptime T: type, offset: usize) !?T {
+    const n = @divExact(@typeInfo(T).int.bits, 8);
+
+    try p.fillReadBuffer(alloc, n + offset) orelse return null;
+
+    const buffered = p.readBuf.written();
+
+    return std.mem.readInt(T, buffered[offset .. offset + n][0..n], .big);
+}
+
+pub fn read(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
+    try p.fillReadBuffer(alloc, size) orelse return null;
+
+    const buffered = p.readBuf.written();
+    const dupe = try alloc.dupe(u8, buffered[0..size]);
+    _ = p.readBuf.writer.consume(size);
+
+    return dupe;
 }
 
 /// returns `true` when all data was written to socket

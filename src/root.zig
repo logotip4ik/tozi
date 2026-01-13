@@ -108,8 +108,10 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                             alloc.destroy(peer);
                             continue;
                         };
+                        errdefer peer.deinit(alloc);
 
                         try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+                        errdefer kq.killPeer(peer.socket);
 
                         try peers.append(alloc, peer);
                     }
@@ -211,7 +213,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             .writeHandshake, .dead => {},
             .readHandshake => {
                 const bytes = try peer.read(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
-                defer peer.readBuf.clearRetainingCapacity();
+                defer alloc.free(bytes);
 
                 const received: *proto.TcpHandshake = @ptrCast(bytes);
 
@@ -230,8 +232,10 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 try kq.enable(peer.socket, .write, event.udata);
             },
             .messageStart => {
-                const len = try peer.readInt(u32);
+                const len = try peer.peekInt(alloc, u32, 0) orelse continue;
                 if (len == 0) {
+                    _ = peer.readBuf.writer.consume(@sizeOf(u32));
+
                     if (!peer.choked) {
                         const needsWrite = try peer.fillRqPool(alloc, torrent, &pieces);
                         if (needsWrite) try kq.enable(peer.socket, .write, event.udata);
@@ -246,28 +250,47 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     break :sw;
                 }
 
-                const idInt = try peer.readInt(u8);
+                const idInt = try peer.peekInt(alloc, u8, @sizeOf(u32)) orelse continue;
                 const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
                     std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
                     continue;
                 };
+
+                const initialOffset = @sizeOf(u32) + @sizeOf(u8);
+                var sizeOfMessageStart: u8 = initialOffset;
+                switch (id) {
+                    .choke,
+                    .unchoke,
+                    .interested,
+                    .not_interested,
+                    .bitfield => {},
+                    .have => sizeOfMessageStart += @sizeOf(u32),
+                    .piece => sizeOfMessageStart += @sizeOf(u32) * 2,
+                    .request, .cancel => sizeOfMessageStart += @sizeOf(u32) * 3,
+                    .port => sizeOfMessageStart += @sizeOf(u16),
+                }
+
+                const messageStartBytes = try peer.read(alloc,  sizeOfMessageStart) orelse continue;
+                defer alloc.free(messageStartBytes);
+
+                const bytes = messageStartBytes[initialOffset..];
 
                 const message: proto.Message = switch (id) {
                     .choke => .choke,
                     .unchoke => .unchoke,
                     .interested => .interested,
                     .not_interested => .not_interested,
-                    .have => .{ .have = try peer.readInt(u32) },
+                    .have => .{ .have = std.mem.readInt(u32, bytes[0..4], .big) },
                     .bitfield => .{ .bitfield = len - 1 },
                     .piece => .{ .piece = .{
-                        .index = try peer.readInt(u32),
-                        .begin = try peer.readInt(u32),
+                        .index = std.mem.readInt(u32, bytes[0..4], .big),
+                        .begin = std.mem.readInt(u32, bytes[4..8], .big),
                         .len = len - 9,
                     } },
                     .request => blk: {
-                        const index = try peer.readInt(u32);
-                        const begin = try peer.readInt(u32);
-                        const rLen = try peer.readInt(u32);
+                        const index = std.mem.readInt(u32, bytes[0..4], .big);
+                        const begin = std.mem.readInt(u32, bytes[4..8], .big);
+                        const rLen = std.mem.readInt(u32, bytes[8..12], .big);
 
                         if (rLen > Torrent.BLOCK_SIZE) {
                             std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
@@ -282,9 +305,9 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         } };
                     },
                     .cancel => blk: {
-                        const index = try peer.readInt(u32);
-                        const begin = try peer.readInt(u32);
-                        const cLen = try peer.readInt(u32);
+                        const index = std.mem.readInt(u32, bytes[0..4], .big);
+                        const begin = std.mem.readInt(u32, bytes[4..8], .big);
+                        const cLen = std.mem.readInt(u32, bytes[8..12], .big);
 
                         if (cLen > Torrent.BLOCK_SIZE) {
                             std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
@@ -298,7 +321,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                             .len = cLen,
                         } };
                     },
-                    .port => .{ .port = try peer.readInt(u16) },
+                    .port => .{ .port = std.mem.readInt(u16, bytes[0..2], .big) },
                 };
 
                 peer.state = .{ .message = message };
@@ -338,7 +361,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     peer.state = .messageStart;
 
                     const bytes = try peer.read(alloc, len) orelse continue;
-                    defer peer.readBuf.clearRetainingCapacity();
+                    defer alloc.free(bytes);
 
                     try peer.setBitfield(alloc, bytes);
 
@@ -349,14 +372,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 },
                 .piece => |piece| {
                     const chunkBytes = try peer.read(alloc, piece.len) orelse continue;
-                    defer peer.readBuf.clearRetainingCapacity();
+                    defer alloc.free(chunkBytes);
 
                     peer.state = .messageStart;
                     peer.bytesReceived += chunkBytes.len;
 
                     if (piece.index > totalPieces) {
                         @branchHint(.unlikely);
-                        std.log.err("peer {d} sen't unknown piece massage: {d}", .{
+                        std.log.err("peer {d} sent unknown piece message: {d}", .{
                             peer.socket,
                             piece.index,
                         });
@@ -415,6 +438,17 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     if (peer.requestsPerTick > 5 or !peer.isInterested or !peer.isUnchoked) {
                         continue;
                     }
+
+                    if (request.index > totalPieces) {
+                        @branchHint(.unlikely);
+                        std.log.err("peer {d} sent unknown request message: {d}", .{
+                            peer.socket,
+                            request.index,
+                        });
+                        peer.state = .dead;
+                        break :sw;
+                    }
+
 
                     peer.requestsPerTick += 1;
 
