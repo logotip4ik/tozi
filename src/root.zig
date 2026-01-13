@@ -356,6 +356,11 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     };
 
                     bitfield.set(piece);
+
+                    if (pieces.hasInterestingPiece(peer.bitfield.?)) {
+                        try peer.addMessage(.interested, &.{});
+                        try kq.enable(peer.socket, .write, event.udata);
+                    }
                 },
                 .bitfield => |len| {
                     peer.state = .messageStart;
