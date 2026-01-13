@@ -70,27 +70,10 @@ pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void 
     }
 }
 
-pub fn readInt(p: *Peer, comptime T: type) !T {
-    const n = @divExact(@typeInfo(T).int.bits, 8);
-    var buf: [n]u8 = undefined;
-
-    var total: usize = 0;
-    while (total != n) {
-        const count = std.posix.read(p.socket, buf[total..n]) catch |err| switch (err) {
-            error.WouldBlock => 0,
-            else => return err,
-        };
-
-        total += count;
-    }
-
-    return std.mem.readInt(T, &buf, .big);
-}
-
 pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     utils.assert(size < Torrent.BLOCK_SIZE * 2);
 
-    if (p.readBuf.writer.end > size) {
+    if (p.readBuf.writer.end >= size) {
         return;
     }
 
@@ -104,6 +87,10 @@ pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
         error.WouldBlock => return null,
         else => |e| return e,
     };
+
+    if (count == 0) {
+        return error.EndOfStream;
+    }
 
     list.items.len += count;
 

@@ -212,7 +212,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         if (event.kind == .read and !isDead) sw: switch (peer.state) {
             .writeHandshake, .dead => {},
             .readHandshake => {
-                const bytes = try peer.read(alloc, proto.TCP_HANDSHAKE_LEN) orelse continue;
+                const bytes = peer.read(alloc, proto.TCP_HANDSHAKE_LEN) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        peer.state = .dead;
+                        break :sw;
+                    },
+                    else => |e| return e,
+                } orelse continue;
                 defer alloc.free(bytes);
 
                 const received: *proto.TcpHandshake = @ptrCast(bytes);
@@ -232,7 +238,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 try kq.enable(peer.socket, .write, event.udata);
             },
             .messageStart => {
-                const len = try peer.peekInt(alloc, u32, 0) orelse continue;
+                const len = peer.peekInt(alloc, u32, 0) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        peer.state = .dead;
+                        break :sw;
+                    },
+                    else => |e| return e,
+                } orelse continue;
+
                 if (len == 0) {
                     _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
@@ -250,7 +263,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     break :sw;
                 }
 
-                const idInt = try peer.peekInt(alloc, u8, @sizeOf(u32)) orelse continue;
+                const idInt = peer.peekInt(alloc, u8, @sizeOf(u32)) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        peer.state = .dead;
+                        break :sw;
+                    },
+                    else => |e| return e,
+                } orelse continue;
+
                 const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
                     std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
                     continue;
@@ -259,18 +279,20 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 const initialOffset = @sizeOf(u32) + @sizeOf(u8);
                 var sizeOfMessageStart: u8 = initialOffset;
                 switch (id) {
-                    .choke,
-                    .unchoke,
-                    .interested,
-                    .not_interested,
-                    .bitfield => {},
+                    .choke, .unchoke, .interested, .not_interested, .bitfield => {},
                     .have => sizeOfMessageStart += @sizeOf(u32),
                     .piece => sizeOfMessageStart += @sizeOf(u32) * 2,
                     .request, .cancel => sizeOfMessageStart += @sizeOf(u32) * 3,
                     .port => sizeOfMessageStart += @sizeOf(u16),
                 }
 
-                const messageStartBytes = try peer.read(alloc,  sizeOfMessageStart) orelse continue;
+                const messageStartBytes = peer.read(alloc, sizeOfMessageStart) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        peer.state = .dead;
+                        break :sw;
+                    },
+                    else => |e| return e,
+                } orelse continue;
                 defer alloc.free(messageStartBytes);
 
                 const bytes = messageStartBytes[initialOffset..];
@@ -357,7 +379,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     bitfield.set(piece);
 
-                    if (pieces.hasInterestingPiece(peer.bitfield.?)) {
+                    if (pieces.hasInterestingPiece(bitfield)) {
                         try peer.addMessage(.interested, &.{});
                         try kq.enable(peer.socket, .write, event.udata);
                     }
@@ -365,7 +387,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                 .bitfield => |len| {
                     peer.state = .messageStart;
 
-                    const bytes = try peer.read(alloc, len) orelse continue;
+                    const bytes = peer.read(alloc, len) catch |err| switch (err) {
+                        error.EndOfStream => {
+                            peer.state = .dead;
+                            break :sw;
+                        },
+                        else => |e| return e,
+                    } orelse continue;
                     defer alloc.free(bytes);
 
                     try peer.setBitfield(alloc, bytes);
@@ -376,7 +404,13 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     }
                 },
                 .piece => |piece| {
-                    const chunkBytes = try peer.read(alloc, piece.len) orelse continue;
+                    const chunkBytes = peer.read(alloc, piece.len) catch |err| switch (err) {
+                        error.EndOfStream => {
+                            peer.state = .dead;
+                            break :sw;
+                        },
+                        else => |e| return e,
+                    } orelse continue;
                     defer alloc.free(chunkBytes);
 
                     peer.state = .messageStart;
@@ -453,7 +487,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         peer.state = .dead;
                         break :sw;
                     }
-
 
                     peer.requestsPerTick += 1;
 
