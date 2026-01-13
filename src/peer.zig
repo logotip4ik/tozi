@@ -138,10 +138,13 @@ pub fn send(p: *Peer) !bool {
     return stillBuffered.len == 0;
 }
 
-pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !void {
+/// returns `true` when all data was written to socket
+pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !bool {
     utils.assert(p.state == .messageStart or p.state == .message);
 
     try message.writeMessage(&p.writeBuf.writer, data);
+
+    return try p.send();
 }
 
 /// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
@@ -183,11 +186,9 @@ pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) !bo
     return false;
 }
 
-/// returns `true` when there is data to be written
+/// returns `true` when all data was written to socket
 pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) !bool {
-    var count: u16 = 0;
-
-    while (p.inFlight.count < p.inFlight.size) : (count += 1) {
+    while (p.inFlight.count < p.inFlight.size) {
         const piece = p.getNextWorkingPiece(pieces) orelse break;
         const len = torrent.getPieceSize(piece);
 
@@ -196,7 +197,7 @@ pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: 
         }
     }
 
-    return count > 0;
+    return try p.send();
 }
 
 pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
