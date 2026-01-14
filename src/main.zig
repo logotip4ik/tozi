@@ -38,12 +38,13 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
-    if (args.len < 2) {
-        std.log.err("provide path to torrent as first arg", .{});
+    if (args.len < 3) {
+        std.log.err("provide command to run `download` or `info` + path to torrent file", .{});
         return;
     }
 
-    const torrentPath = args[1];
+    const command = args[1];
+    const torrentPath = args[2];
     const file = std.fs.cwd().openFile(torrentPath, .{}) catch {
         std.log.err("failed openning {s} file", .{torrentPath});
         return;
@@ -58,7 +59,11 @@ pub fn main() !void {
     var torrent: tozi.Torrent = try .fromSlice(alloc, fileContents);
     defer torrent.deinit(alloc);
 
-    const peerId = tozi.HttpTracker.generatePeerId();
+    if (std.mem.eql(u8, command, "download")) {
+        const peerId = tozi.HttpTracker.generatePeerId();
 
-    try tozi.downloadTorrent(alloc, peerId, torrent);
+        try tozi.downloadTorrent(alloc, peerId, torrent);
+    } else if (std.mem.eql(u8, command, "info")) {
+        torrent.value.dump();
+    }
 }

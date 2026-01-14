@@ -1,8 +1,11 @@
 const std = @import("std");
 
 const Torrent = @import("torrent.zig");
+const proto = @import("proto.zig");
 
 pub const FileRef = struct {
+    /// was created right now, or existed in fs before, useful for `collectPieces` function
+    new: bool,
     handle: std.fs.File,
     size: usize,
     start: usize,
@@ -10,17 +13,16 @@ pub const FileRef = struct {
 
 const Self = @This();
 
-alloc: std.mem.Allocator,
 files: []FileRef,
-pieceLen: u32,
+totalSize: usize,
 
-pub fn init(alloc: std.mem.Allocator, torrent: Torrent) !Self {
-    var refs = try alloc.alloc(FileRef, torrent.files.items.len);
+pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Self {
+    var refs = try alloc.alloc(FileRef, files.len);
     var currentPos: usize = 0;
 
     const cwd = std.fs.cwd();
 
-    for (torrent.files.items, 0..) |file, i| {
+    for (files, 0..) |file, i| {
         const path = try std.fs.path.join(alloc, file.path);
         defer alloc.free(path);
 
@@ -28,12 +30,16 @@ pub fn init(alloc: std.mem.Allocator, torrent: Torrent) !Self {
             try cwd.makePath(dir);
         }
 
-        const handle = try cwd.createFile(path, .{ .read = true });
+        const handle, const new = if (cwd.openFile(path, .{ .mode = .read_write })) |h|
+            .{ h, false }
+        else |_|
+            .{ try cwd.createFile(path, .{ .read = true }), true };
         errdefer handle.close();
 
         try handle.setEndPos(file.len);
 
         refs[i] = .{
+            .new = new,
             .handle = handle,
             .size = file.len,
             .start = currentPos,
@@ -43,22 +49,75 @@ pub fn init(alloc: std.mem.Allocator, torrent: Torrent) !Self {
     }
 
     return .{
-        .alloc = alloc,
         .files = refs,
-        .pieceLen = torrent.pieceLen,
+        .totalSize = currentPos,
     };
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     for (self.files) |f| f.handle.close();
-    self.alloc.free(self.files);
+    alloc.free(self.files);
 }
 
-pub fn readPiece(self: *Self, alloc: std.mem.Allocator, index: u32, begin: u32, len: u32) ![]u8 {
-    const buf = try alloc.alloc(u8, len);
-    errdefer alloc.free(buf);
+pub fn collectPieces(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    pieces: []const u8,
+    pieceLen: u32,
+) !std.bit_set.DynamicBitSetUnmanaged {
+    const numberOfPieces = pieces.len / 20;
+    var bitset: std.bit_set.DynamicBitSetUnmanaged = .initEmpty(alloc, numberOfPieces);
+    errdefer bitset.deinit(alloc);
 
-    var globalOffset = @as(usize, index) * self.pieceLen + begin;
+    const pieceBuf = try alloc.alloc(u8, pieceLen);
+    defer alloc.free(pieceBuf);
+
+    var hash: [20]u8 = undefined;
+
+    var fileIdx: u32 = 0;
+    var index: u32 = 0;
+
+    var iter = std.mem.window(u8, pieces, 20, 20);
+    outer: while (iter.next()) |expected| : (index += 1) {
+        const pieceStart = @as(usize, index) * pieceLen;
+        const pieceSize = if (pieceStart + pieceLen > self.totalSize)
+            self.totalSize - pieceStart
+        else
+            pieceLen;
+        const pieceEnd = pieceStart + pieceSize;
+
+        for (self.files[fileIdx..]) |file| {
+            // If the file ends before the piece starts, it's permanently behind us.
+            // We increment the persistent fileIdx so the next piece skips it instantly.
+            if (file.start + file.size <= pieceStart) {
+                fileIdx += 1;
+                continue;
+            }
+
+            // If the file starts after the piece ends, we've gone past the overlap zone.
+            // We stop checking files for THIS piece.
+            if (file.start >= pieceEnd) break;
+
+            // If we are here, the file and piece overlap.
+            // If any part of the piece is in a 'new' file, skip hashing.
+            if (file.new) continue :outer;
+        }
+
+        const activeBuf = pieceBuf[0..pieceSize];
+        self.readPieceBuf(activeBuf, index, 0, pieceLen) catch continue;
+
+        std.crypto.hash.Sha1.hash(activeBuf, hash[0..20], .{});
+
+        if (std.mem.eql(u8, hash[0..20], expected[0..20])) {
+            bitset.set(index);
+        }
+    }
+
+    return bitset;
+}
+
+pub fn readPieceBuf(self: *Self, buf: []u8, index: u32, begin: u32, pieceLen: u32) !void {
+    var globalOffset = @as(usize, index) * pieceLen + begin;
     var bufOffset: usize = 0;
 
     for (self.files) |file| {
@@ -71,23 +130,36 @@ pub fn readPiece(self: *Self, alloc: std.mem.Allocator, index: u32, begin: u32, 
             0;
 
         const avail = file.size - readStart;
-        const rem = len - bufOffset;
+        const rem = buf.len - bufOffset;
         const toRead = @min(avail, rem);
 
-         _ = try file.handle.preadAll(buf[bufOffset..][0..toRead], readStart);
+        _ = try file.handle.preadAll(buf[bufOffset .. bufOffset + toRead], readStart);
 
         bufOffset += toRead;
         globalOffset += toRead;
 
-        if (bufOffset >= len) break;
+        if (bufOffset >= buf.len) break;
     }
 
-    if (bufOffset < len) return error.UnexpectedEof;
+    if (bufOffset < buf.len) return error.UnexpectedEof;
+}
+
+pub fn readPieceData(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    piece: proto.Piece,
+    pieceLen: u32,
+) ![]const u8 {
+    const buf = try alloc.alloc(u8, piece.len);
+    errdefer alloc.free(buf);
+
+    try self.readPieceBuf(buf, piece.index, piece.begin, pieceLen);
+
     return buf;
 }
 
-pub fn writePiece(self: Self, index: u32, data: []const u8) !void {
-    var globalOffset = @as(usize, index) * self.pieceLen;
+pub fn writePieceData(self: Self, index: u32, pieceLen: u32, data: []const u8) !void {
+    var globalOffset = @as(usize, index) * pieceLen;
     var dataOffset: usize = 0;
 
     for (self.files) |file| {

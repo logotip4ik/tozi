@@ -16,8 +16,8 @@ comptime {
 }
 
 pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !void {
-    var files: Files = try .init(alloc, torrent);
-    defer files.deinit();
+    var files: Files = try .init(alloc, torrent.files.items);
+    defer files.deinit(alloc);
 
     var tracker: HttpTracker = .{
         .peerId = peerId,
@@ -42,9 +42,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         }
     }
 
-    const numberOfPieces = torrent.pieces.len / 20;
-
-    var pieces: PieceManager = try .init(alloc, numberOfPieces);
+    var pieces: PieceManager = try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
 
     var kq: KQ = try .init(alloc);
@@ -447,7 +445,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         continue;
                     };
 
-                    try files.writePiece(piece.index, completed.bytes);
+                    try files.writePieceData(piece.index, pieceLen, completed.bytes);
                     peer.workingOn.?.unset(piece.index);
 
                     completedCount += 1;
@@ -497,8 +495,10 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
                     peer.requestsPerTick += 1;
 
+                    const pieceLen = torrent.getPieceSize(request.index);
+
                     std.log.info("peer: {d} sending {any}", .{ peer.socket, request });
-                    const data = try files.readPiece(alloc, request.index, request.begin, request.len);
+                    const data = try files.readPieceData(alloc, request, pieceLen);
                     defer alloc.free(data);
 
                     const m: proto.Message = .{ .piece = request };

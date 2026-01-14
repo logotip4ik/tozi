@@ -37,11 +37,13 @@ const PieceBuf = struct {
     }
 };
 
-pub fn init(alloc: std.mem.Allocator, numberOfPieces: usize) !Self {
-    const pieces = try alloc.alloc(State, numberOfPieces);
-    for (pieces) |*piece| piece.* = .missing;
+pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
+    const numberOfPieces = pieces.len / 20;
 
-    return .{ .pieces = pieces };
+    const arr = try alloc.alloc(State, numberOfPieces);
+    for (arr) |*piece| piece.* = .missing;
+
+    return .{ .pieces = arr };
 }
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
