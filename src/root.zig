@@ -29,12 +29,14 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
     defer tracker.deinit(alloc);
 
     for (torrent.announceList) |announce| {
-        if (!std.mem.startsWith(u8, announce, "http")) {
+        if (!std.mem.startsWith(u8, announce, "http://")) {
             continue;
         }
 
         std.log.info("adding tracker url {s}", .{announce});
-        try tracker.addTracker(alloc, announce);
+        // these really should not be blocking the loop...
+        tracker.addTracker(alloc, announce) catch continue;
+
         if (tracker.newAddrs.items.len > 0) {
             break;
         }
@@ -82,7 +84,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         tracker.numWant += HttpTracker.defaultNumWant;
                     }
 
-                    const nextKeepAlive = try tracker.keepAlive(alloc);
+                    const nextKeepAlive = tracker.keepAlive(alloc);
 
                     std.log.info("setting timer to next: {d}", .{nextKeepAlive});
                     try kq.addTimer(@intFromEnum(Timer.tracker), nextKeepAlive, .{ .periodic = false });

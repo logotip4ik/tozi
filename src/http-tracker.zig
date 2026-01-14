@@ -174,7 +174,7 @@ pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void 
     });
 }
 
-pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
+pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) usize {
     var now: usize = @intCast(std.time.milliTimestamp());
 
     for (self.trackers.items) |*tracker| {
@@ -182,7 +182,11 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
             continue;
         }
 
-        const interval = try self.announce(alloc, tracker.url);
+        const interval = self.announce(alloc, tracker.url) catch |err| {
+            std.log.warn("failed sending announce request to {s} with {t}", .{tracker.url, err});
+            continue;
+        };
+
         const intervalInMs = interval * std.time.ms_per_s;
 
         tracker.interval = intervalInMs;
