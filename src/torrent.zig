@@ -81,20 +81,20 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     var announces: std.array_list.Aligned([]const u8, null) = .empty;
 
     if (dict.get("announce-list")) |v| {
-        const list = v.inner.list.items[0].inner.list;
-
         if (announce) |a| {
             try announces.append(alloc, a);
         }
 
-        outer: for (list.items) |item| {
-            for (announces.items) |existing| {
-                if (std.mem.eql(u8, existing, item.inner.string)) {
-                    continue :outer;
+        for (v.inner.list.items) |list| {
+            outer: for (list.inner.list.items) |item| {
+                for (announces.items) |existing| {
+                    if (std.mem.eql(u8, existing, item.inner.string)) {
+                        continue :outer;
+                    }
                 }
-            }
 
-            try announces.append(alloc, item.inner.string);
+                try announces.append(alloc, item.inner.string);
+            }
         }
     } else if (announce) |x| {
         try announces.append(alloc, x);
