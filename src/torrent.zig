@@ -2,6 +2,7 @@ const std = @import("std");
 const bencode = @import("bencode.zig");
 
 pub const File = struct {
+    /// should include `dirname` from torrent if there was one
     path: []const []const u8,
     len: usize,
 };
@@ -12,7 +13,6 @@ const Torrent = @This();
 value: bencode.Value,
 
 files: Files,
-dirname: ?[]const u8 = null,
 pieces: []const u8,
 pieceLen: u32,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
@@ -110,12 +110,10 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     errdefer files.deinit(alloc);
 
     var totalLen: usize = 0;
-    var dirname: ?[]const u8 = null;
 
     if (info.inner.dict.get("files")) |infoFiles| {
         const dirnameValue = info.inner.dict.get("name") orelse return error.NoDirName;
-
-        dirname = dirnameValue.inner.string;
+        const dirname = dirnameValue.inner.string;
 
         for (infoFiles.inner.list.items) |file| {
             const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
@@ -123,9 +121,10 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
             totalLen += len.inner.int;
 
-            const path = try alloc.alloc([]const u8, chunks.inner.list.items.len);
+            const path = try alloc.alloc([]const u8, chunks.inner.list.items.len + 1);
 
-            for (chunks.inner.list.items, 0..) |filename, i| {
+            path[0] = dirname;
+            for (chunks.inner.list.items, 1..) |filename, i| {
                 path[i] = filename.inner.string;
             }
 
@@ -161,7 +160,6 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         .created_by = null,
         .creation_date = null,
         .files = files,
-        .dirname = dirname,
         .pieces = pieces.inner.string,
         .pieceLen = @intCast(pieceLen.inner.int),
         .infoHash = infoHash,

@@ -33,7 +33,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             continue;
         }
 
-        std.log.debug("adding tracker url {s}", .{announce});
+        std.log.info("adding tracker url {s}", .{announce});
         try tracker.addTracker(alloc, announce);
         if (tracker.newAddrs.items.len > 0) {
             break;

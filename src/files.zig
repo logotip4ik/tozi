@@ -18,11 +18,7 @@ pub fn init(alloc: std.mem.Allocator, torrent: Torrent) !Self {
     var refs = try alloc.alloc(FileRef, torrent.files.items.len);
     var currentPos: usize = 0;
 
-    var cwd = if (torrent.dirname) |name|
-        try std.fs.cwd().makeOpenPath(name, .{})
-    else
-        std.fs.cwd();
-    defer if (torrent.dirname) |_| cwd.close();
+    const cwd = std.fs.cwd();
 
     for (torrent.files.items, 0..) |file, i| {
         const path = try std.fs.path.join(alloc, file.path);
