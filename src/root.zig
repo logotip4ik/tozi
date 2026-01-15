@@ -445,7 +445,7 @@ pub fn downloadTorrent(
                         continue;
                     };
 
-                    try files.writePieceData(piece.index, pieceLen, completed.bytes);
+                    try files.writePieceData(piece.index, torrent.pieceLen, completed.bytes);
                     peer.workingOn.?.unset(piece.index);
 
                     completedCount += 1;
@@ -495,10 +495,8 @@ pub fn downloadTorrent(
 
                     peer.requestsPerTick += 1;
 
-                    const pieceLen = torrent.getPieceSize(request.index);
-
                     std.log.info("peer: {d} sending {any}", .{ peer.socket, request });
-                    const data = try files.readPieceData(alloc, request, pieceLen);
+                    const data = try files.readPieceData(alloc, request, torrent.pieceLen);
                     defer alloc.free(data);
 
                     const m: proto.Message = .{ .piece = request };

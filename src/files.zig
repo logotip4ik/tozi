@@ -63,13 +63,13 @@ pub fn collectPieces(
     self: *Self,
     alloc: std.mem.Allocator,
     pieces: []const u8,
-    pieceLen: u32,
+    torrentPieceLen: u32,
 ) !std.bit_set.DynamicBitSetUnmanaged {
     const numberOfPieces = pieces.len / 20;
     var bitset: std.bit_set.DynamicBitSetUnmanaged = try .initEmpty(alloc, numberOfPieces);
     errdefer bitset.deinit(alloc);
 
-    const pieceBuf = try alloc.alloc(u8, pieceLen);
+    const pieceBuf = try alloc.alloc(u8, torrentPieceLen);
     defer alloc.free(pieceBuf);
 
     var hash: [20]u8 = undefined;
@@ -79,11 +79,11 @@ pub fn collectPieces(
 
     var iter = std.mem.window(u8, pieces, 20, 20);
     outer: while (iter.next()) |expected| : (index += 1) {
-        const pieceStart = @as(usize, index) * pieceLen;
-        const pieceSize = if (pieceStart + pieceLen > self.totalSize)
+        const pieceStart = @as(usize, index) * torrentPieceLen;
+        const pieceSize = if (pieceStart + torrentPieceLen > self.totalSize)
             self.totalSize - pieceStart
         else
-            pieceLen;
+            torrentPieceLen;
         const pieceEnd = pieceStart + pieceSize;
 
         for (self.files[fileIdx..]) |file| {
@@ -104,7 +104,7 @@ pub fn collectPieces(
         }
 
         const activeBuf = pieceBuf[0..pieceSize];
-        self.readPieceBuf(activeBuf, index, 0, pieceLen) catch continue;
+        self.readPieceBuf(activeBuf, index, 0, torrentPieceLen) catch continue;
 
         std.crypto.hash.Sha1.hash(activeBuf, hash[0..20], .{});
 
@@ -116,8 +116,14 @@ pub fn collectPieces(
     return bitset;
 }
 
-pub fn readPieceBuf(self: *Self, buf: []u8, index: u32, begin: u32, pieceLen: u32) !void {
-    var globalOffset = @as(usize, index) * pieceLen + begin;
+pub fn readPieceBuf(
+    self: *Self,
+    buf: []u8,
+    index: u32,
+    begin: u32,
+    torrentPieceLen: u32,
+) !void {
+    var globalOffset = @as(usize, index) * torrentPieceLen + begin;
     var bufOffset: usize = 0;
 
     for (self.files) |file| {
@@ -148,18 +154,23 @@ pub fn readPieceData(
     self: *Self,
     alloc: std.mem.Allocator,
     piece: proto.Piece,
-    pieceLen: u32,
+    torrentPieceLen: u32,
 ) ![]const u8 {
     const buf = try alloc.alloc(u8, piece.len);
     errdefer alloc.free(buf);
 
-    try self.readPieceBuf(buf, piece.index, piece.begin, pieceLen);
+    try self.readPieceBuf(buf, piece.index, piece.begin, torrentPieceLen);
 
     return buf;
 }
 
-pub fn writePieceData(self: Self, index: u32, pieceLen: u32, data: []const u8) !void {
-    var globalOffset = @as(usize, index) * pieceLen;
+pub fn writePieceData(
+    self: Self,
+    index: u32,
+    torrentPieceLen: u32,
+    data: []const u8
+) !void {
+    var globalOffset = @as(usize, index) * torrentPieceLen;
     var dataOffset: usize = 0;
 
     for (self.files) |file| {
