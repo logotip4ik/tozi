@@ -15,10 +15,13 @@ comptime {
     utils.assert(builtin.os.tag == .macos);
 }
 
-pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torrent) !void {
-    var files: Files = try .init(alloc, torrent.files.items);
-    defer files.deinit(alloc);
-
+pub fn downloadTorrent(
+    alloc: std.mem.Allocator,
+    peerId: [20]u8,
+    torrent: Torrent,
+    files: *Files,
+    pieces: *PieceManager,
+) !void {
     var tracker: HttpTracker = .{
         .peerId = peerId,
         .infoHash = torrent.infoHash,
@@ -41,9 +44,6 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
             break;
         }
     }
-
-    var pieces: PieceManager = try .init(alloc, torrent.pieces);
-    defer pieces.deinit(alloc);
 
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
@@ -76,7 +76,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
 
             switch (timer) {
                 .tracker => {
-                    updateTracker(&tracker, pieces, torrent);
+                    updateTracker(&tracker, pieces.*, torrent);
 
                     if (peers.items.len < 10 and tracker.newAddrs.items.len < 10) {
                         tracker.numWant += HttpTracker.defaultNumWant;
@@ -250,7 +250,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
                     if (!peer.choked) {
-                        const ready = try peer.fillRqPool(alloc, torrent, &pieces);
+                        const ready = try peer.fillRqPool(alloc, torrent, pieces);
                         if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     }
 
@@ -366,7 +366,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                         peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
                     }
 
-                    const ready = try peer.fillRqPool(alloc, torrent, &pieces);
+                    const ready = try peer.fillRqPool(alloc, torrent, pieces);
                     if (!ready) try kq.enable(peer.socket, .write, event.udata);
                 },
                 .have => |piece| {
@@ -430,7 +430,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
                     if (!peer.choked) {
                         @branchHint(.likely);
 
-                        const ready = try peer.fillRqPool(alloc, torrent, &pieces);
+                        const ready = try peer.fillRqPool(alloc, torrent, pieces);
                         if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     }
 
@@ -533,7 +533,7 @@ pub fn downloadTorrent(alloc: std.mem.Allocator, peerId: [20]u8, torrent: Torren
         }
     }
 
-    updateTracker(&tracker, pieces, torrent);
+    updateTracker(&tracker, pieces.*, torrent);
     for (tracker.trackers.items) |t| {
         tracker.sendAnnounce(alloc, t.url, null, .stopped) catch {};
     }

@@ -66,7 +66,7 @@ pub fn collectPieces(
     pieceLen: u32,
 ) !std.bit_set.DynamicBitSetUnmanaged {
     const numberOfPieces = pieces.len / 20;
-    var bitset: std.bit_set.DynamicBitSetUnmanaged = .initEmpty(alloc, numberOfPieces);
+    var bitset: std.bit_set.DynamicBitSetUnmanaged = try .initEmpty(alloc, numberOfPieces);
     errdefer bitset.deinit(alloc);
 
     const pieceBuf = try alloc.alloc(u8, pieceLen);

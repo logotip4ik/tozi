@@ -39,7 +39,7 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     if (args.len < 3) {
-        std.log.err("provide command to run `download` or `info` + path to torrent file", .{});
+        std.log.err("provide command to run `download`, `continue` or `info` + path to torrent file", .{});
         return;
     }
 
@@ -59,11 +59,30 @@ pub fn main() !void {
     var torrent: tozi.Torrent = try .fromSlice(alloc, fileContents);
     defer torrent.deinit(alloc);
 
-    if (std.mem.eql(u8, command, "download")) {
-        const peerId = tozi.HttpTracker.generatePeerId();
-
-        try tozi.downloadTorrent(alloc, peerId, torrent);
-    } else if (std.mem.eql(u8, command, "info")) {
+    if (std.mem.eql(u8, command, "info")) {
         torrent.value.dump();
+        return;
     }
+
+    const peerId = tozi.HttpTracker.generatePeerId();
+
+    var files: tozi.Files = try .init(alloc, torrent.files.items);
+    defer files.deinit(alloc);
+
+    var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue")) blk: {
+        var pieces = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
+        defer pieces.deinit(alloc);
+
+        var iter = pieces.iterator(.{ .kind = .unset });
+        while (iter.next()) |entry| {
+            std.log.debug("is unset: {any}", .{entry});
+        }
+
+        if (true) return error.help;
+
+        break :blk try .fromBitset(alloc, pieces);
+    } else try .init(alloc, torrent.pieces);
+    defer pieces.deinit(alloc);
+
+    try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);
 }

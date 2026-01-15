@@ -46,6 +46,17 @@ pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
     return .{ .pieces = arr };
 }
 
+pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !Self {
+    const numberOfPieces = bitset.bit_length;
+
+    const arr = try alloc.alloc(State, numberOfPieces);
+    for (arr, 0..) |*piece, i| {
+        piece.* = if (bitset.isSet(i)) .have else .missing;
+    }
+
+    return .{ .pieces = arr };
+}
+
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     alloc.free(self.pieces);
 
