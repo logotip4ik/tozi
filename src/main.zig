@@ -73,13 +73,6 @@ pub fn main() !void {
         var pieces = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
         defer pieces.deinit(alloc);
 
-        var iter = pieces.iterator(.{ .kind = .unset });
-        while (iter.next()) |entry| {
-            std.log.debug("is unset: {any}", .{entry});
-        }
-
-        if (true) return error.help;
-
         break :blk try .fromBitset(alloc, pieces);
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
