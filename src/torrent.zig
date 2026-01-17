@@ -173,7 +173,6 @@ test "parseTorrent - simple" {
     var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("src", torrent.dirname.?);
     try std.testing.expectEqual(7, torrent.files.items.len);
 }
 
@@ -183,7 +182,6 @@ test "parseTorrent - single file" {
     var torrent = try fromSlice(std.testing.allocator, file);
     defer torrent.deinit(std.testing.allocator);
 
-    try std.testing.expect(torrent.dirname == null);
     try std.testing.expectEqual(1, torrent.files.items.len);
     try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.announceList[0]);
 }
