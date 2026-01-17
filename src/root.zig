@@ -567,10 +567,5 @@ fn updateTracker(tracker: *HttpTracker, pieces: PieceManager, torrent: Torrent) 
 }
 
 test {
-    _ = @import("torrent.zig");
-    _ = @import("piece-manager.zig");
-    _ = @import("files.zig");
-    _ = @import("http-tracker.zig");
-    _ = @import("peer.zig");
-    _ = @import("utils.zig");
+    std.testing.refAllDecls(@This());
 }
