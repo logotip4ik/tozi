@@ -174,8 +174,8 @@ pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void 
     });
 }
 
-pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) usize {
-    var now: usize = @intCast(std.time.milliTimestamp());
+pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) void {
+    const now: usize = @intCast(std.time.milliTimestamp());
 
     for (self.trackers.items) |*tracker| {
         if (tracker.checkinAt > now and self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
@@ -192,10 +192,12 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) usize {
         tracker.interval = intervalInMs;
         tracker.checkinAt = now + intervalInMs;
     }
+}
 
+pub fn nextCheckinAt(self: Self) usize {
     if (self.trackers.items.len == 0) return 1800 * 1000;
 
-    now = @intCast(std.time.milliTimestamp());
+    const now: usize = @intCast(std.time.milliTimestamp());
 
     var soonest = self.trackers.items[0].checkinAt;
     for (self.trackers.items[1..]) |tracker| {

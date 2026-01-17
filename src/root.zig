@@ -71,6 +71,35 @@ pub fn downloadTorrent(
     const handshakeBytes = std.mem.asBytes(&handshake);
 
     loop: while (try kq.next()) |event| {
+        while (tracker.nextNewPeer()) |addr| {
+            const peer = try alloc.create(Peer);
+            errdefer alloc.destroy(peer);
+
+            const fd = try std.posix.socket(
+                std.posix.AF.INET,
+                std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+                std.posix.IPPROTO.TCP,
+            );
+            errdefer std.posix.close(fd);
+
+            std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+                error.WouldBlock => {},
+                else => return err,
+            };
+
+            peer.* = Peer.init(alloc, fd) catch |err| {
+                std.log.err("failed connecting to {f} with {t}", .{ addr, err });
+                alloc.destroy(peer);
+                continue;
+            };
+            errdefer peer.deinit(alloc);
+
+            try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
+            errdefer kq.killPeer(peer.socket);
+
+            try peers.append(alloc, peer);
+        }
+
         if (event.kind == .timer) {
             const timer = std.enums.fromInt(Timer, event.ident) orelse continue;
 
@@ -78,43 +107,24 @@ pub fn downloadTorrent(
                 .tracker => {
                     updateTracker(&tracker, pieces.*, torrent);
 
-                    if (peers.items.len < 10 and tracker.newAddrs.items.len < 10) {
+                    if (peers.items.len < 10 and tracker.newAddrs.items.len < 10 and tracker.oldAddrs.items.len != 0) {
                         tracker.numWant += HttpTracker.defaultNumWant;
                     }
 
-                    const nextKeepAlive = tracker.keepAlive(alloc);
+                    if (tracker.oldAddrs.items.len == 0) {
+                        tracker.keepAlive(alloc);
+                    } else {
+                        const thread = try std.Thread.spawn(
+                            .{ .allocator = alloc },
+                            HttpTracker.keepAlive,
+                            .{ &tracker, alloc },
+                        );
+                        thread.detach();
+                    }
 
+                    const nextKeepAlive = tracker.nextCheckinAt();
                     std.log.info("setting timer to next: {d}", .{nextKeepAlive});
                     try kq.addTimer(@intFromEnum(Timer.tracker), nextKeepAlive, .{ .periodic = false });
-
-                    while (tracker.nextNewPeer()) |addr| {
-                        const peer = try alloc.create(Peer);
-                        errdefer alloc.destroy(peer);
-
-                        const fd = try std.posix.socket(
-                            std.posix.AF.INET,
-                            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-                            std.posix.IPPROTO.TCP,
-                        );
-                        errdefer std.posix.close(fd);
-
-                        std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-                            error.WouldBlock => {},
-                            else => return err,
-                        };
-
-                        peer.* = Peer.init(alloc, fd) catch |err| {
-                            std.log.err("failed connecting to {f} with {t}", .{ addr, err });
-                            alloc.destroy(peer);
-                            continue;
-                        };
-                        errdefer peer.deinit(alloc);
-
-                        try kq.subscribe(peer.socket, .write, @intFromPtr(peer));
-                        errdefer kq.killPeer(peer.socket);
-
-                        try peers.append(alloc, peer);
-                    }
 
                     if (peers.items.len == 0) {
                         return error.AllStreamsDead;
