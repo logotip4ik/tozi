@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const opts = std.Build.ExecutableOptions{
+    const exeOpts = std.Build.ExecutableOptions{
         .name = "tozi",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -34,10 +34,10 @@ pub fn build(b: *std.Build) void {
         }),
     };
 
-    const exe = b.addExecutable(opts);
+    const exe = b.addExecutable(exeOpts);
     b.installArtifact(exe);
 
-    const checkExe = b.addExecutable(opts);
+    const checkExe = b.addExecutable(exeOpts);
     const checkMod = b.addLibrary(.{
         .name = "libtozi",
         .root_module = toziMod,

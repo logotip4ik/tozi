@@ -148,7 +148,6 @@ const NextError = error{
 } || std.posix.KEventError;
 
 const CustomEvent = struct {
-    // kevent: KEvent,
     ident : usize,
     udata: usize,
     kind: Kind,

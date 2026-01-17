@@ -11,10 +11,6 @@ pub const HttpTracker = @import("http-tracker.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
-comptime {
-    utils.assert(builtin.os.tag == .macos);
-}
-
 pub fn downloadTorrent(
     alloc: std.mem.Allocator,
     peerId: [20]u8,
