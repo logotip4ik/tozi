@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Peer = @import("peer.zig");
 const utils = @import("utils.zig");
 
 alloc: std.mem.Allocator,
