@@ -2,8 +2,8 @@ const std = @import("std");
 
 const Torrent = @import("torrent.zig");
 
-pub const TCP_HANDSHAKE_LEN = 68;
-pub const TcpHandshake = extern struct {
+pub const HANDSHAKE_LEN = 68;
+pub const Handshake = extern struct {
     pstrlen: u8 = 19,
     pstr: [19]u8 = "BitTorrent protocol".*,
     reserved: [8]u8 = [_]u8{0} ** 8,
@@ -12,7 +12,7 @@ pub const TcpHandshake = extern struct {
 
     const ValidateError = error{ InvalidPstrLen, InvalidPstr, InvalidInfoHash };
 
-    pub fn validate(self: TcpHandshake, other: TcpHandshake) ValidateError!void {
+    pub fn validate(self: Handshake, other: Handshake) ValidateError!void {
         if (self.pstrlen != other.pstrlen) {
             return error.InvalidPstrLen;
         }
@@ -25,13 +25,24 @@ pub const TcpHandshake = extern struct {
             return error.InvalidInfoHash;
         }
     }
+
+    pub fn new(peerId: [20]u8, infoHash: [20]u8) Handshake {
+        return .{
+            .peerId = peerId,
+            .infoHash = infoHash,
+        };
+    }
 };
 
 comptime {
-    if (@sizeOf(TcpHandshake) != TCP_HANDSHAKE_LEN) @compileError("TcpHandshake has invalid size");
+    if (@sizeOf(Handshake) != HANDSHAKE_LEN) @compileError("TcpHandshake has invalid size");
 }
 
-pub const Piece = struct { index: u32, begin: u32, len: u32 };
+pub const Piece = struct {
+    index: u32,
+    begin: u32,
+    len: u32,
+};
 
 pub const MessageId = enum(u8) {
     choke = 0,

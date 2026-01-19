@@ -63,9 +63,6 @@ pub fn downloadTorrent(
     const totalPieces = torrent.pieces.len / 20;
     var completedCount: usize = 0;
 
-    const handshake: proto.TcpHandshake = .{ .infoHash = torrent.infoHash, .peerId = peerId };
-    const handshakeBytes = std.mem.asBytes(&handshake);
-
     loop: while (try kq.next()) |event| {
         while (tracker.nextNewPeer()) |addr| {
             const peer = try alloc.create(Peer);
@@ -188,7 +185,8 @@ pub fn downloadTorrent(
             .readHandshake, .dead => {},
             .writeHandshake => {
                 if (peer.writeBuf.written().len == 0) {
-                    try peer.writeBuf.writer.writeAll(handshakeBytes);
+                    const handshake = proto.Handshake.new(peerId, torrent.infoHash);
+                    try peer.writeBuf.writer.writeAll(std.mem.asBytes(&handshake));
                 }
 
                 const ready = peer.send() catch {
@@ -228,7 +226,7 @@ pub fn downloadTorrent(
             while (peer.readBuf.writer.end > 0) switch (peer.state) {
                 .writeHandshake, .dead => {},
                 .readHandshake => {
-                    const bytes = peer.read(alloc, proto.TCP_HANDSHAKE_LEN) catch |err| switch (err) {
+                    const bytes = peer.read(alloc, proto.HANDSHAKE_LEN) catch |err| switch (err) {
                         error.EndOfStream => {
                             peer.state = .dead;
                             break :readblk;
@@ -237,9 +235,10 @@ pub fn downloadTorrent(
                     } orelse break :readblk;
                     defer alloc.free(bytes);
 
-                    const received: *proto.TcpHandshake = @ptrCast(bytes);
+                    const received: *proto.Handshake = @ptrCast(bytes);
+                    const expected = proto.Handshake.new(peerId, torrent.infoHash);
 
-                    handshake.validate(received.*) catch |err| {
+                    expected.validate(received.*) catch |err| {
                         std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
                         peer.state = .dead;
                         break :readblk;
