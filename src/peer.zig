@@ -27,7 +27,7 @@ workingOn: ?std.DynamicBitSetUnmanaged = null,
 
 workingPiece: ?u32 = null,
 workingPieceOffset: u32 = 0,
-inFlight: utils.RqPool(32) = .{},
+inFlight: utils.RqPool,
 
 pub const State = union(enum) {
     readHandshake,
@@ -38,7 +38,12 @@ pub const State = union(enum) {
 };
 
 pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
-    return .{ .socket = fd, .readBuf = .init(alloc), .writeBuf = .init(alloc) };
+    return .{
+        .socket = fd,
+        .readBuf = .init(alloc),
+        .writeBuf = .init(alloc),
+        .inFlight = try .init(alloc, 32),
+    };
 }
 
 pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
@@ -46,6 +51,7 @@ pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
 
     p.readBuf.deinit();
     p.writeBuf.deinit();
+    p.inFlight.deinit(alloc);
 
     if (p.bitfield) |*x| x.deinit(alloc);
     if (p.workingOn) |*x| x.deinit(alloc);
@@ -164,7 +170,7 @@ pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) !bo
     const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
 
     p.inFlight.push(.{
-        .pieceIndex = piece,
+        .index = piece,
         .begin = p.workingPieceOffset,
     }) catch return true;
 

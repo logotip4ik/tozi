@@ -4,52 +4,60 @@ pub inline fn assert(ok: bool) void {
     if (!ok) unreachable;
 }
 
-pub fn RqPool(comptime Size: usize) type {
-    return struct {
-        buf: [Size]Chunk = undefined,
-        count: usize = 0,
-        size: usize = Size,
+pub const RqPool = struct {
+    buf: []Piece,
+    count: usize = 0,
+    size: usize,
 
-        const Self = @This();
-        pub const Chunk = packed struct { pieceIndex: u32, begin: u32 };
+    const Self = @This();
+    pub const Piece = packed struct { index: u32, begin: u32 };
 
-        pub fn push(self: *Self, r: Chunk) !void {
-            if (self.count == Size) {
-                return error.Full;
-            }
+    /// usually initial size is 32 "in-flight" requests
+    pub fn init(alloc: std.mem.Allocator, initialSize: usize) !RqPool {
+        const buf = try alloc.alloc(Piece, initialSize);
+        return .{ .buf = buf, .size = initialSize };
+    }
 
-            self.buf[self.count] = r;
-            self.count += 1;
+    pub fn deinit(self: *RqPool, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+
+    pub fn push(self: *Self, r: Piece) !void {
+        if (self.count == self.size) {
+            return error.Full;
         }
 
-        pub fn receive(self: *Self, r: Chunk) !void {
-            for (0..self.count) |i| {
-                const req = self.buf[i];
+        self.buf[self.count] = r;
+        self.count += 1;
+    }
 
-                if (req.pieceIndex != r.pieceIndex or req.begin != r.begin) {
-                    continue;
-                }
+    pub fn receive(self: *Self, r: Piece) !void {
+        for (0..self.count) |i| {
+            const req = self.buf[i];
 
-                self.buf[i] = self.buf[self.count - 1];
-                self.count -= 1;
-
-                return;
+            if (req.index != r.index or req.begin != r.begin) {
+                continue;
             }
 
-            return error.UnknownChunk;
+            self.buf[i] = self.buf[self.count - 1];
+            self.count -= 1;
+
+            return;
         }
 
-        pub fn format(self: Self, w: *std.Io.Writer) !void {
-            for (self.buf[0..self.count], 0..) |r, i| {
-                try w.print("(piece: {d} + {d})", .{ r.pieceIndex, r.begin });
+        return error.UnknownChunk;
+    }
 
-                if (i != self.count - 1) {
-                    try w.writeAll(", ");
-                }
+    pub fn format(self: Self, w: *std.Io.Writer) !void {
+        for (self.buf[0..self.count], 0..) |r, i| {
+            try w.print("(piece: {d} + {d})", .{ r.index, r.begin });
+
+            if (i != self.count - 1) {
+                try w.writeAll(", ");
             }
         }
-    };
-}
+    }
+};
 
 pub fn Queue(comptime T: type, comptime Size: usize) type {
     assert(Size > 0);
