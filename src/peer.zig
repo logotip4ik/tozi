@@ -4,6 +4,7 @@ const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
+const Handshake = @import("handshake.zig");
 
 const Peer = @This();
 
@@ -28,6 +29,8 @@ workingOn: ?std.DynamicBitSetUnmanaged = null,
 workingPiece: ?u32 = null,
 workingPieceOffset: u32 = 0,
 inFlight: utils.RqPool,
+
+extensions: Handshake.Extensions = .{},
 
 pub const State = union(enum) {
     readHandshake,

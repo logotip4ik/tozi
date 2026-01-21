@@ -7,9 +7,12 @@ pub const Files = @import("files.zig");
 pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
 pub const HttpTracker = @import("http-tracker.zig");
+pub const Handshake = @import("handshake.zig");
 
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
+
+const ENABLE_FAST_EXT = false;
 
 pub fn downloadTorrent(
     alloc: std.mem.Allocator,
@@ -58,6 +61,10 @@ pub fn downloadTorrent(
     const Timer = enum { tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
     try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
+
+    const handshake = Handshake.init(peerId, torrent.infoHash, .{
+        .fast = ENABLE_FAST_EXT,
+    });
 
     const downloadStart = std.time.milliTimestamp();
     const totalPieces = torrent.pieces.len / 20;
@@ -185,8 +192,7 @@ pub fn downloadTorrent(
             .readHandshake, .dead => {},
             .writeHandshake => {
                 if (peer.writeBuf.written().len == 0) {
-                    const handshake = proto.Handshake.new(peerId, torrent.infoHash);
-                    try peer.writeBuf.writer.writeAll(std.mem.asBytes(&handshake));
+                    try peer.writeBuf.writer.writeAll(&handshake.asBytes());
                 }
 
                 const ready = peer.send() catch {
@@ -226,7 +232,7 @@ pub fn downloadTorrent(
             while (peer.readBuf.writer.end > 0) switch (peer.state) {
                 .writeHandshake, .dead => {},
                 .readHandshake => {
-                    const bytes = peer.read(alloc, proto.HANDSHAKE_LEN) catch |err| switch (err) {
+                    const bytes = peer.read(alloc, Handshake.HANDSHAKE_LEN) catch |err| switch (err) {
                         error.EndOfStream => {
                             peer.state = .dead;
                             break :readblk;
@@ -235,16 +241,14 @@ pub fn downloadTorrent(
                     } orelse break :readblk;
                     defer alloc.free(bytes);
 
-                    const received: *proto.Handshake = @ptrCast(bytes);
-                    const expected = proto.Handshake.new(peerId, torrent.infoHash);
-
-                    expected.validate(received.*) catch |err| {
+                    const matched = handshake.matchExtensions(bytes) catch |err| {
                         std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
                         peer.state = .dead;
                         break :readblk;
                     };
 
                     peer.state = .messageStart;
+                    peer.extensions.fast = matched.fast;
 
                     const bitfield = try pieces.torrentBitfieldBytes(alloc);
                     defer alloc.free(bitfield);
@@ -292,16 +296,7 @@ pub fn downloadTorrent(
                         break :readblk;
                     };
 
-                    const initialOffset = @sizeOf(u32) + @sizeOf(u8);
-                    var sizeOfMessageStart: u8 = initialOffset;
-                    switch (id) {
-                        .choke, .unchoke, .interested, .not_interested, .bitfield => {},
-                        .have => sizeOfMessageStart += @sizeOf(u32),
-                        .piece => sizeOfMessageStart += @sizeOf(u32) * 2,
-                        .request, .cancel => sizeOfMessageStart += @sizeOf(u32) * 3,
-                        .port => sizeOfMessageStart += @sizeOf(u16),
-                    }
-
+                    const sizeOfMessageStart = id.messageStartLen();
                     const messageStartBytes = peer.read(alloc, sizeOfMessageStart) catch |err| switch (err) {
                         error.EndOfStream => {
                             peer.state = .dead;
@@ -311,55 +306,61 @@ pub fn downloadTorrent(
                     } orelse break :readblk;
                     defer alloc.free(messageStartBytes);
 
-                    const bytes = messageStartBytes[initialOffset..];
+                    var reader: std.Io.Reader = .fixed(messageStartBytes);
+                    reader.toss(@sizeOf(u32) + @sizeOf(u8));
 
                     const message: proto.Message = switch (id) {
                         .choke => .choke,
                         .unchoke => .unchoke,
                         .interested => .interested,
-                        .not_interested => .not_interested,
-                        .have => .{ .have = std.mem.readInt(u32, bytes[0..4], .big) },
+                        .notInterested => .notInterested,
+                        .haveAll => .haveAll,
+                        .haveNone => .haveNone,
+
+                        .have => .{ .have = reader.takeInt(u32, .big) catch unreachable },
                         .bitfield => .{ .bitfield = len - 1 },
+
+                        .suggestPiece => .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable },
+                        .allowedFast => .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable },
+
                         .piece => .{ .piece = .{
-                            .index = std.mem.readInt(u32, bytes[0..4], .big),
-                            .begin = std.mem.readInt(u32, bytes[4..8], .big),
+                            .index = reader.takeInt(u32, .big) catch unreachable,
+                            .begin = reader.takeInt(u32, .big) catch unreachable,
                             .len = len - 9,
                         } },
-                        .request => blk: {
-                            const index = std.mem.readInt(u32, bytes[0..4], .big);
-                            const begin = std.mem.readInt(u32, bytes[4..8], .big);
-                            const rLen = std.mem.readInt(u32, bytes[8..12], .big);
 
-                            if (rLen > Torrent.BLOCK_SIZE) {
+                        .request, .cancel, .rejectRequest => blk: {
+                            const index = reader.takeInt(u32, .big) catch unreachable;
+                            const begin = reader.takeInt(u32, .big) catch unreachable;
+                            const mLen = reader.takeInt(u32, .big) catch unreachable;
+
+                            if (mLen > Torrent.BLOCK_SIZE) {
                                 std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
                                 peer.state = .dead;
                                 break :readblk;
                             }
 
-                            break :blk .{ .request = .{
-                                .index = index,
-                                .begin = begin,
-                                .len = rLen,
-                            } };
-                        },
-                        .cancel => blk: {
-                            const index = std.mem.readInt(u32, bytes[0..4], .big);
-                            const begin = std.mem.readInt(u32, bytes[4..8], .big);
-                            const cLen = std.mem.readInt(u32, bytes[8..12], .big);
-
-                            if (cLen > Torrent.BLOCK_SIZE) {
-                                std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                                peer.state = .dead;
-                                break :readblk;
+                            if (id == .request) {
+                                break :blk .{ .request = .{
+                                    .index = index,
+                                    .begin = begin,
+                                    .len = mLen,
+                                } };
+                            } else if (id == .cancel) {
+                                break :blk .{ .cancel = .{
+                                    .index = index,
+                                    .begin = begin,
+                                    .len = mLen,
+                                } };
+                            } else {
+                                break :blk .{ .rejectRequest = .{
+                                    .index = index,
+                                    .begin = begin,
+                                    .len = mLen,
+                                } };
                             }
-
-                            break :blk .{ .cancel = .{
-                                .index = index,
-                                .begin = begin,
-                                .len = cLen,
-                            } };
                         },
-                        .port => .{ .port = std.mem.readInt(u16, bytes[0..2], .big) },
+                        .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
                     };
 
                     peer.state = .{ .message = message };
@@ -391,7 +392,7 @@ pub fn downloadTorrent(
 
                         var bitfield = peer.bitfield orelse {
                             std.log.err("unexpected empty bitfield with have message", .{});
-                            break :readblk;
+                            continue;
                         };
 
                         bitfield.set(piece);
@@ -401,7 +402,37 @@ pub fn downloadTorrent(
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
                     },
+                    .haveAll => {
+                        peer.state = .messageStart;
+
+                        if (peer.bitfield != null) {
+                            continue;
+                        }
+
+                        peer.bitfield = try .initFull(alloc, pieces.pieces.len);
+                        if (!peer.choked and pieces.hasInterestingPiece(peer.bitfield.?)) {
+                            const ready = try peer.addMessage(.interested, &.{});
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        }
+                    },
+                    .haveNone => {
+                        peer.state = .messageStart;
+
+                        if (peer.bitfield != null) {
+                            continue;
+                        }
+
+                        peer.bitfield = try .initEmpty(alloc, pieces.pieces.len);
+                    },
                     .bitfield => |len| {
+                        if (peer.extensions.fast and peer.bitfield != null) {
+                            peer.state = .dead;
+                            std.log.warn("peer: {d} received bitfield message while already received `have` messages", .{
+                                peer.socket,
+                            });
+                            break :readblk;
+                        }
+
                         peer.state = .messageStart;
 
                         const bytes = peer.read(alloc, len) catch |err| switch (err) {
@@ -415,10 +446,22 @@ pub fn downloadTorrent(
 
                         try peer.setBitfield(alloc, bytes);
 
-                        if (pieces.hasInterestingPiece(peer.bitfield.?)) {
+                        if (!peer.choked and pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
+                    },
+                    .allowedFast => |index| {
+                        _ = index;
+                        unreachable;
+                    },
+                    .suggestPiece => |index| {
+                        _ = index;
+                        unreachable;
+                    },
+                    .rejectRequest => |piece| {
+                        _ = piece;
+                        unreachable;
                     },
                     .piece => |piece| {
                         const chunkBytes = peer.read(alloc, piece.len) catch |err| switch (err) {
@@ -488,7 +531,7 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
                         std.log.info("peer: {d} is interested", .{peer.socket});
                     },
-                    .not_interested => {
+                    .notInterested => {
                         peer.isInterested = false;
                         peer.state = .messageStart;
                         std.log.info("peer: {d} is not interested", .{peer.socket});
