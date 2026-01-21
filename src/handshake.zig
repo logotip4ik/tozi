@@ -65,7 +65,6 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Extens
 
     const reservedBytes = reader.take(8) catch return ValidateError.InvalidBuffer;
     const reserved = std.mem.bytesToValue(Reserved, reservedBytes[0..8]);
-    std.log.debug("{any}", .{reserved});
 
     const infoHash = reader.take(20) catch return ValidateError.InvalidBuffer;
     if (!std.mem.eql(u8, self.infoHash[0..20], infoHash[0..20])) {
