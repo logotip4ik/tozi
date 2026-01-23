@@ -75,6 +75,10 @@ pub fn main() !void {
         var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
         defer bitset.deinit(alloc);
 
+        if (bitset.findLastSet()) |last| if (last == bitset.bit_length - 1) {
+            std.log.info("whole torrent is downloaded.", .{});
+        };
+
         break :blk try .fromBitset(alloc, bitset);
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);

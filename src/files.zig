@@ -78,11 +78,6 @@ const SReader = struct {
     }
 
     pub fn next(self: *SReader, len: usize, files: []const FileRef) ![]const u8 {
-        if (len == 0) {
-            @branchHint(.cold);
-            return &.{};
-        }
-
         const mptr = try self.ensureMapped(files);
 
         const currentFileSize = files[self.currentFileIdx].size;
@@ -217,7 +212,7 @@ pub fn collectPieces(
     const duration = @as(f64, @floatFromInt(t.read())) / std.time.ns_per_s;
     const mb = @as(f64, @floatFromInt(self.totalSize)) / (1024.0 * 1024.0);
 
-    std.log.info("Verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)\n", .{
+    std.log.info("verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)", .{
         mb,
         duration,
         mb / duration,
