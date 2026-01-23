@@ -69,13 +69,18 @@ pub fn main() !void {
     var files: tozi.Files = try .init(alloc, torrent.files.items);
     defer files.deinit(alloc);
 
-    var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue")) blk: {
-        var pieces = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
-        defer pieces.deinit(alloc);
+    const isverify = std.mem.eql(u8, command, "verify");
 
-        break :blk try .fromBitset(alloc, pieces);
+    var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue") or isverify) blk: {
+        var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
+        defer bitset.deinit(alloc);
+
+        break :blk try .fromBitset(alloc, bitset);
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
+
+
+    if (isverify) return;
 
     try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);
 }

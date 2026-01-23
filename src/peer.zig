@@ -80,7 +80,7 @@ pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void 
 }
 
 pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
-    // utils.assert(size <= Torrent.BLOCK_SIZE * 2);
+    utils.assert(size <= Torrent.BLOCK_SIZE * 10);
 
     if (p.readBuf.writer.end >= size) {
         return;

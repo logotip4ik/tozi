@@ -59,6 +59,124 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     alloc.free(self.files);
 }
 
+const SReader = struct {
+    currentFileIdx: usize = 0,
+    currentFileOffset: usize = 0,
+    mptr: ?[]align(std.heap.page_size_min) u8 = null,
+
+    scratchBuf: []u8,
+
+    pub fn init(alloc: std.mem.Allocator, torrentPieceLen: usize) !SReader {
+        return SReader{
+            .scratchBuf = try alloc.alloc(u8, torrentPieceLen),
+        };
+    }
+
+    pub fn deinit(self: *SReader, alloc: std.mem.Allocator) void {
+        self.unmapCurrent();
+        alloc.free(self.scratchBuf);
+    }
+
+    pub fn next(self: *SReader, len: usize, files: []const FileRef) ![]const u8 {
+        if (len == 0) {
+            @branchHint(.cold);
+            return &.{};
+        }
+
+        const mptr = try self.ensureMapped(files);
+
+        const currentFileSize = files[self.currentFileIdx].size;
+        const available = currentFileSize - self.currentFileOffset;
+
+        if (len <= available) {
+            const slice = mptr[self.currentFileOffset .. self.currentFileOffset + len];
+
+            self.currentFileOffset += len;
+
+            return slice;
+        }
+
+        var destOffset: usize = 0;
+        var remaining = len;
+
+        while (remaining > 0) {
+            const nextMptr = try self.ensureMapped(files);
+
+            const fileSize = files[self.currentFileIdx].size;
+            const fileAvail = fileSize - self.currentFileOffset;
+
+            const toCopy = @min(remaining, fileAvail);
+
+            if (toCopy > 0) {
+                @branchHint(.unlikely);
+                const src = nextMptr[self.currentFileOffset .. self.currentFileOffset + toCopy];
+                @memcpy(self.scratchBuf[destOffset .. destOffset + toCopy], src);
+
+                destOffset += toCopy;
+                remaining -= toCopy;
+                self.currentFileOffset += toCopy;
+            }
+
+            if (self.currentFileOffset == fileSize) {
+                self.advanceFile();
+            }
+        }
+
+        return self.scratchBuf[0..len];
+    }
+
+    fn advanceFile(self: *SReader) void {
+        self.unmapCurrent();
+        self.currentFileIdx += 1;
+        self.currentFileOffset = 0;
+    }
+
+    fn unmapCurrent(self: *SReader) void {
+        if (self.mptr) |ptr| {
+            @branchHint(.likely);
+            std.posix.munmap(ptr);
+            self.mptr = null;
+        }
+    }
+
+    fn ensureMapped(self: *SReader, files: []const FileRef) ![]align(std.heap.page_size_min) u8 {
+        if (self.mptr) |mptr| {
+            @branchHint(.likely);
+            return mptr;
+        }
+
+        if (self.currentFileIdx >= files.len) {
+            @branchHint(.cold);
+            return error.EndOfStream;
+        }
+
+        const file = files[self.currentFileIdx];
+
+        if (file.size == 0) {
+            @branchHint(.cold);
+            self.currentFileIdx += 1;
+            self.currentFileOffset = 0;
+            return self.ensureMapped(files);
+        }
+
+        const ptr = try std.posix.mmap(
+            null,
+            file.size,
+            std.posix.PROT.READ,
+            .{ .TYPE = .PRIVATE },
+            file.handle.handle,
+            0,
+        );
+
+        // Essential optimization
+        _ = std.posix.madvise(ptr.ptr, file.size, std.posix.MADV.SEQUENTIAL) catch {};
+
+        self.mptr = ptr;
+
+        return ptr;
+    }
+};
+
 pub fn collectPieces(
     self: *Self,
     alloc: std.mem.Allocator,
@@ -74,44 +192,36 @@ pub fn collectPieces(
 
     var hash: [20]u8 = undefined;
 
-    var fileIdx: u32 = 0;
-    var index: u32 = 0;
+    var sreader: SReader = try .init(alloc, torrentPieceLen);
+    defer sreader.deinit(alloc);
 
-    var iter = std.mem.window(u8, pieces, 20, 20);
-    outer: while (iter.next()) |expected| : (index += 1) {
-        const pieceStart = @as(usize, index) * torrentPieceLen;
-        const pieceSize = if (pieceStart + torrentPieceLen > self.totalSize)
-            self.totalSize - pieceStart
-        else
-            torrentPieceLen;
-        const pieceEnd = pieceStart + pieceSize;
+    var t = std.time.Timer.start() catch unreachable;
 
-        for (self.files[fileIdx..]) |file| {
-            // If the file ends before the piece starts, it's permanently behind us.
-            // We increment the persistent fileIdx so the next piece skips it instantly.
-            if (file.start + file.size <= pieceStart) {
-                fileIdx += 1;
-                continue;
-            }
+    var i: usize = 0;
+    while (i < numberOfPieces) : (i += 1) {
+        const remainingTotal = self.totalSize - (i * torrentPieceLen);
+        const toread = @min(remainingTotal, torrentPieceLen);
 
-            // If the file starts after the piece ends, we've gone past the overlap zone.
-            // We stop checking files for THIS piece.
-            if (file.start >= pieceEnd) break;
+        const piece = try sreader.next(toread, self.files);
 
-            // If we are here, the file and piece overlap.
-            // If any part of the piece is in a 'new' file, skip hashing.
-            if (file.new) continue :outer;
-        }
+        std.crypto.hash.Sha1.hash(piece, &hash, .{});
 
-        const activeBuf = pieceBuf[0..pieceSize];
-        self.readPieceBuf(activeBuf, index, 0, torrentPieceLen) catch continue;
+        const hashVec: @Vector(20, u8) = hash;
+        const expectedVec: @Vector(20, u8) = pieces[i * 20 .. i * 20 + 20][0..20].*;
 
-        std.crypto.hash.Sha1.hash(activeBuf, hash[0..20], .{});
-
-        if (std.mem.eql(u8, hash[0..20], expected[0..20])) {
-            bitset.set(index);
+        if (@reduce(.And, hashVec == expectedVec)) {
+            bitset.set(i);
         }
     }
+
+    const duration = @as(f64, @floatFromInt(t.read())) / std.time.ns_per_s;
+    const mb = @as(f64, @floatFromInt(self.totalSize)) / (1024.0 * 1024.0);
+
+    std.log.info("Verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)\n", .{
+        mb,
+        duration,
+        mb / duration,
+    });
 
     return bitset;
 }
@@ -164,12 +274,7 @@ pub fn readPieceData(
     return buf;
 }
 
-pub fn writePieceData(
-    self: Self,
-    index: u32,
-    torrentPieceLen: u32,
-    data: []const u8
-) !void {
+pub fn writePieceData(self: Self, index: u32, torrentPieceLen: u32, data: []const u8) !void {
     var globalOffset = @as(usize, index) * torrentPieceLen;
     var dataOffset: usize = 0;
 

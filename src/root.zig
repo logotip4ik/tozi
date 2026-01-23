@@ -227,7 +227,6 @@ pub fn downloadTorrent(
                 },
                 else => |e| return e,
             } orelse {};
-            // std.log.debug("filling buffer", .{});
 
             while (peer.readBuf.writer.end > 0) switch (peer.state) {
                 .writeHandshake, .dead => {},
@@ -364,7 +363,6 @@ pub fn downloadTorrent(
                     };
 
                     peer.state = .{ .message = message };
-                    // std.log.debug("message: {any}", .{message});
                 },
                 .message => |message| switch (message) {
                     .choke => {
