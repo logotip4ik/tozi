@@ -60,25 +60,6 @@ pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     if (p.workingOn) |*x| x.deinit(alloc);
 }
 
-pub fn setBitfield(p: *Peer, alloc: std.mem.Allocator, bytes: []const u8) !void {
-    var bitfield: std.DynamicBitSetUnmanaged = try .initEmpty(alloc, bytes.len * 8);
-    defer p.bitfield = bitfield;
-
-    for (bytes, 0..) |byte, i| {
-        for (0..8) |bit_idx| {
-            // Check if bit is set (MSB first), thank you gemini, but i don't get what this does
-            const is_set = (byte >> @intCast(7 - bit_idx)) & 1 != 0;
-
-            // Calculate absolute piece index
-            const piece_index = (i * 8) + bit_idx;
-
-            if (piece_index < bitfield.capacity() and is_set) {
-                bitfield.set(piece_index);
-            }
-        }
-    }
-}
-
 pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     utils.assert(size <= Torrent.BLOCK_SIZE * 10);
 

@@ -95,14 +95,8 @@ pub fn downloadTorrent(
 
             switch (timer) {
                 .tracker => {
-                    const downloaded = pieces.countDownloaded(&torrent);
-
-                    tracker.downloaded = downloaded;
-                    tracker.left = torrent.totalLen - downloaded;
-
-                    if (peers.items.len == 0 and tracker.newAddrs.items.len < 10 and tracker.oldAddrs.items.len != 0) {
-                        tracker.numWant += Tracker.defaultNumWant;
-                    }
+                    tracker.downloaded = pieces.countDownloaded(&torrent);
+                    tracker.left = torrent.totalLen - tracker.downloaded;
 
                     const nextKeepAlive = tracker.keepAlive(alloc) catch |err| {
                         std.log.err("failed keeping alive with {t}", .{err});
@@ -395,7 +389,7 @@ pub fn downloadTorrent(
                         }
 
                         peer.bitfield = try .initFull(alloc, pieces.pieces.len);
-                        if (!peer.choked and pieces.hasInterestingPiece(peer.bitfield.?)) {
+                        if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
@@ -429,9 +423,13 @@ pub fn downloadTorrent(
                         } orelse break :readblk;
                         defer alloc.free(bytes);
 
-                        try peer.setBitfield(alloc, bytes);
+                        peer.bitfield = pieces.bytesToBitfield(alloc, bytes) catch |err| {
+                            std.log.err("corruupt bitifield ?{t}", .{err});
+                            peer.state = .dead;
+                            break :readblk;
+                        };
 
-                        if (!peer.choked and pieces.hasInterestingPiece(peer.bitfield.?)) {
+                        if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }

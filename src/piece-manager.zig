@@ -222,6 +222,29 @@ pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
     return bytes;
 }
 
+pub fn bytesToBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8) !std.bit_set.DynamicBitSetUnmanaged {
+    // Round up pieces.len to the nearest byte
+    const expectedBytes = (self.pieces.len + 7) / 8;
+
+    if (bytes.len != expectedBytes) return error.CorruptBitfield;
+
+    var bitfield: std.bit_set.DynamicBitSetUnmanaged = try .initEmpty(alloc, self.pieces.len);
+
+    for (0..self.pieces.len) |i| {
+        const byte_idx = i / 8;
+        const bit_within_byte: u3 = @intCast(i % 8);
+
+        // BitTorrent Spec: Index 0 is the high bit (0x80) of the first byte.
+        // So we shift by (7 - bit_index).
+        const shift_amount = 7 - bit_within_byte;
+        const is_set = (bytes[byte_idx] >> shift_amount) & 1 != 0;
+
+        bitfield.setValue(i, is_set);
+    }
+
+    return bitfield;
+}
+
 pub fn countDownloaded(self: *const Self, torrent: *const Torrent) usize {
     var downloaded: usize = 0;
 
