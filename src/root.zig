@@ -21,19 +21,6 @@ pub fn downloadTorrent(
     files: *Files,
     pieces: *PieceManager,
 ) !void {
-    var tracker: Tracker = .init(
-        peerId,
-        torrent.infoHash,
-        pieces.countDownloaded(&torrent),
-        torrent.totalLen,
-    );
-    defer tracker.deinit(alloc);
-
-    tracker.addTrackers(alloc, &torrent.announceList) catch |err| {
-        std.log.err("failed adding trackers with {t}", .{err});
-        return;
-    };
-
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
@@ -48,15 +35,29 @@ pub fn downloadTorrent(
         peers.deinit(alloc);
     }
 
+    var tracker: Tracker = try .init(
+        alloc,
+        peerId,
+        torrent.infoHash,
+        pieces.countDownloaded(&torrent),
+        &torrent,
+    );
+    defer tracker.deinit(alloc);
+
+    const trackerTick = tracker.keepAlive(alloc) catch |err| {
+        std.log.err("failed keeping alive with {t}", .{err});
+        return;
+    };
+
     const Timer = enum { tracker, tick };
-    try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
+    try kq.addTimer(@intFromEnum(Timer.tracker), trackerTick, .{ .periodic = false });
     try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
+    try kq.addTimer(@intFromEnum(Timer.tick), 0, .{ .periodic = false }); // kick off the loop
 
     const handshake = Handshake.init(peerId, torrent.infoHash, .{
         .fast = ENABLE_FAST_EXT,
     });
 
-    const downloadStart = std.time.milliTimestamp();
     const totalPieces = torrent.pieces.len / 20;
 
     loop: while (try kq.next()) |event| {
@@ -102,10 +103,9 @@ pub fn downloadTorrent(
                         return;
                     };
 
-                    std.log.info("setting timer to next: {d}", .{nextKeepAlive});
                     try kq.addTimer(@intFromEnum(Timer.tracker), nextKeepAlive, .{ .periodic = false });
 
-                    if (peers.items.len == 0) {
+                    if (peers.items.len == 0 and tracker.newAddrs.items.len == 0) {
                         std.log.info("no pending or alive peers left", .{});
                         return;
                     }
@@ -603,16 +603,6 @@ pub fn downloadTorrent(
     tracker.downloaded = pieces.countDownloaded(&torrent);
     tracker.left = torrent.totalLen - tracker.downloaded;
     tracker.finalizeSource(alloc);
-
-    const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
-    const minutes = @as(f64, @floatFromInt(delta)) / std.time.ms_per_min;
-
-    if (minutes < 60) {
-        std.log.info("downloaded in: {d:.2} minutes", .{minutes});
-    } else {
-        const hours = minutes / 60;
-        std.log.info("downloaded in: {d:.2} hours", .{hours});
-    }
 }
 
 test {

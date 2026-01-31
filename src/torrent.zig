@@ -10,6 +10,11 @@ const Files = std.array_list.Aligned(File, null);
 
 const Torrent = @This();
 
+pub const BLOCK_SIZE = 1024 * 16;
+
+pub const Announces = std.array_list.Aligned([]const u8, null);
+pub const Tiers = std.array_list.Aligned(Announces, null);
+
 value: bencode.Value,
 
 files: Files,
@@ -18,18 +23,18 @@ pieceLen: u32,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
 totalLen: usize,
 
-announceList: []const []const u8,
+tiers: std.array_list.Aligned(Announces, null),
+
 creation_date: ?usize,
 created_by: ?[]const u8,
 
-pub const BLOCK_SIZE = 1024 * 16;
-
 pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
-    for (self.files.items) |file| {
-        alloc.free(file.path);
-    }
+    for (self.files.items) |file| alloc.free(file.path);
     self.files.deinit(alloc);
-    alloc.free(self.announceList);
+
+    for (self.tiers.items) |*x| x.deinit(alloc);
+    self.tiers.deinit(alloc);
+
     self.value.deinit(alloc);
 }
 
@@ -69,33 +74,27 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
     const dict = value.inner.dict;
 
-    const announce = if (dict.get("announce")) |v|
-        v.inner.string
-    else
-        null;
+    var tiers: Tiers = .empty;
+    errdefer {
+        for (tiers.items) |*urls| urls.deinit(alloc);
+        tiers.deinit(alloc);
+    }
 
-    var announces: std.array_list.Aligned([]const u8, null) = .empty;
+    if (dict.get("announce-list")) |tiersV| {
+        for (tiersV.inner.list.items) |tierV| {
+            var announces = try tiers.addOne(alloc);
+            announces.* = .empty;
 
-    if (dict.get("announce-list")) |v| {
-        if (announce) |a| {
-            try announces.append(alloc, a);
-        }
-
-        for (v.inner.list.items) |list| {
-            outer: for (list.inner.list.items) |item| {
-                for (announces.items) |existing| {
-                    if (std.mem.eql(u8, existing, item.inner.string)) {
-                        continue :outer;
-                    }
-                }
-
-                try announces.append(alloc, item.inner.string);
+            for (tierV.inner.list.items) |urlV| {
+                try announces.append(alloc, urlV.inner.string);
             }
         }
-    } else if (announce) |x| {
-        try announces.append(alloc, x);
-    } else return error.NoAnnounceUrls;
-    defer announces.deinit(alloc);
+    } else if (dict.get("announce")) |v| {
+        var announces = try tiers.addOne(alloc);
+        try announces.append(alloc, v.inner.string);
+    } else {
+        return error.NoAnnounceUrls;
+    }
 
     const info = if (dict.get("info")) |v| v else {
         std.log.err("expected 'info' property to exists in torrent", .{});
@@ -152,7 +151,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
     return Torrent{
         .value = value,
-        .announceList = try announces.toOwnedSlice(alloc),
+        .tiers = tiers,
         .created_by = null,
         .creation_date = null,
         .files = files,

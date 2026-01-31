@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Peer = @import("peer.zig");
+const Torrent = @import("torrent.zig");
 const bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
 
@@ -25,12 +26,11 @@ http: ?std.http.Client = null,
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 
-sources: std.array_list.Aligned([]const u8, null) = .empty,
+tiers: Torrent.Tiers,
 
 initialized: ?Source = null,
 
 const Source = struct {
-    url: []const u8,
     interval: usize,
     checkinAt: usize,
 };
@@ -38,17 +38,36 @@ const Source = struct {
 pub const defaultNumWant = 20;
 
 pub fn init(
+    alloc: std.mem.Allocator,
     peerId: [20]u8,
     infoHash: [20]u8,
     downloaded: u64,
-    totalLen: u64,
-) Self {
+    torrent: *const Torrent,
+) !Self {
+    var cloned: Torrent.Tiers = try .initCapacity(alloc, torrent.tiers.items.len);
+    errdefer {
+        for (cloned.items) |*x| x.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var random = rand.random();
+
+    for (torrent.tiers.items) |urls| {
+        const urlsCloned = try urls.clone(alloc);
+
+        random.shuffle([]const u8, urlsCloned.items);
+
+        cloned.appendAssumeCapacity(urlsCloned);
+    }
+
     return .{
         .peerId = peerId,
         .infoHash = infoHash,
         .downloaded = downloaded,
         .uploaded = 0,
-        .left = totalLen - downloaded,
+        .left = torrent.totalLen - downloaded,
+        .tiers = cloned,
     };
 }
 
@@ -56,10 +75,9 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.oldAddrs.deinit(alloc);
     self.newAddrs.deinit(alloc);
 
-    for (self.sources.items) |url| alloc.free(url);
-    self.sources.deinit(alloc);
+    for (self.tiers.items) |*x| x.deinit(alloc);
+    self.tiers.deinit(alloc);
 
-    if (self.initialized) |x| alloc.free(x.url);
     if (self.http) |*x| x.deinit();
 }
 
@@ -168,17 +186,10 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
         try self.newAddrs.append(alloc, peerString[0..6].*);
     }
 
+    std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
     try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
 
     return interval.inner.int;
-}
-
-pub fn addTrackers(self: *Self, alloc: std.mem.Allocator, urls: *const []const []const u8) !void {
-    for (urls.*) |url| {
-        try self.sources.append(alloc, try alloc.dupe(u8, url));
-    }
-
-    self.initialized = try self.initializeSource(alloc);
 }
 
 pub fn initializeSource(self: *Self, alloc: std.mem.Allocator) !?Source {
@@ -198,7 +209,6 @@ pub fn initializeSource(self: *Self, alloc: std.mem.Allocator) !?Source {
         const now: usize = @intCast(std.time.milliTimestamp());
 
         return .{
-            .url = source,
             .interval = intervalInMs,
             .checkinAt = now + intervalInMs,
         };
@@ -208,42 +218,55 @@ pub fn initializeSource(self: *Self, alloc: std.mem.Allocator) !?Source {
 }
 
 pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
-    const source = self.initialized orelse return;
+    for (self.tiers.items) |urls| {
+        for (urls.items, 0..) |url, i| {
+            self.sendAnnounce(alloc, url, null, .stopped) catch |err| {
+                std.log.warn("failed announcing to {s} with {t}", .{ url, err });
+                continue;
+            };
 
-    self.sendAnnounce(alloc, source.url, null, .stopped) catch {};
+            if (i != 0) {
+                std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
+            }
+
+            return;
+        }
+    }
 }
 
 pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
-    if (self.initialized) |*source| {
+    if (self.initialized) |source| {
         const now: usize = @intCast(std.time.milliTimestamp());
 
         if (now < source.checkinAt) {
             return source.checkinAt - now;
         }
-
-        // TODO: add retries
-        const interval = self.announce(alloc, source.url) catch |err| {
-            std.log.warn("failed announcing to {s} with {t}", .{ source.url, err });
-            alloc.free(source.url);
-
-            const new = try self.initializeSource(alloc) orelse return error.NoSourceAvailable;
-            self.initialized = new;
-
-            return new.interval;
-        };
-
-        const intervalInMs = interval * std.time.ms_per_s;
-
-        source.interval = intervalInMs;
-        source.checkinAt = now + intervalInMs;
-
-        return intervalInMs;
     }
 
-    const source = try self.initializeSource(alloc) orelse return error.NoSourceAvailable;
-    self.initialized = source;
+    for (self.tiers.items) |urls| {
+        for (urls.items, 0..) |url, i| {
+            const interval = self.announce(alloc, url) catch |err| {
+                std.log.warn("failed announcing to {s} with {t}", .{ url, err });
+                continue;
+            };
 
-    return source.interval;
+            const now: usize = @intCast(std.time.milliTimestamp());
+            const intervalInMs = interval * std.time.ms_per_s;
+
+            self.initialized = .{
+                .interval = intervalInMs,
+                .checkinAt = now + intervalInMs,
+            };
+
+            if (i != 0) {
+                std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
+            }
+
+            return intervalInMs;
+        }
+    }
+
+    return error.NoSourceAvailable;
 }
 
 pub fn nextNewPeer(self: *Self) ?std.net.Address {

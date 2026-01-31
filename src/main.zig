@@ -85,5 +85,17 @@ pub fn main() !void {
 
     if (isverify) return;
 
+    const downloadStart = std.time.milliTimestamp();
+
     try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);
+
+    const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
+    const minutes = @as(f64, @floatFromInt(delta)) / std.time.ms_per_min;
+
+    if (minutes < 60) {
+        std.log.info("downloaded in: {d:.2} minutes", .{minutes});
+    } else {
+        const hours = minutes / 60;
+        std.log.info("downloaded in: {d:.2} hours", .{hours});
+    }
 }
