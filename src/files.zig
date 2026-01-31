@@ -202,7 +202,7 @@ pub fn collectPieces(
         std.crypto.hash.Sha1.hash(piece, &hash, .{});
 
         const hashVec: @Vector(20, u8) = hash;
-        const expectedVec: @Vector(20, u8) = pieces[i * 20 .. i * 20 + 20][0..20].*;
+        const expectedVec: @Vector(20, u8) = pieces[i * 20 ..][0..20].*;
 
         if (@reduce(.And, hashVec == expectedVec)) {
             bitset.set(i);

@@ -69,18 +69,14 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
 }
 
 pub fn validatePiece(
-    self: *Self,
-    index: u32,
-    noalias bytes: []const u8,
-    noalias expectedHash: []const u8,
+    _: *Self,
+    noalias bytes: *const []const u8,
+    noalias expectedHash: *const []const u8,
 ) !void {
-    const computedHash = hasher.hash(bytes) catch {
-        self.reset(index);
-        return error.HashingFailed;
-    };
+    const computedHash = hasher.hash(bytes) catch return error.HashingFailed;
 
     if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
-        self.reset(index);
+        @branchHint(.unlikely);
         return error.CorruptPiece;
     }
 }

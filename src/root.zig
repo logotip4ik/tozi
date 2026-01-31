@@ -375,7 +375,7 @@ pub fn downloadTorrent(
 
                         const bitfield = peer.bitfield orelse {
                             std.log.warn("received unchoke message but no bitfield was set", .{});
-                            break :readblk;
+                            continue;
                         };
 
                         if (peer.workingOn == null) {
@@ -500,7 +500,8 @@ pub fn downloadTorrent(
                         pieces.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
-                            break :readblk;
+                            pieces.reset(piece.index);
+                            continue;
                         };
 
                         try files.writePieceData(piece.index, torrent.pieceLen, completed.bytes);
@@ -538,7 +539,7 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
 
                         if (peer.requestsPerTick > 5 or !peer.isInterested or !peer.isUnchoked) {
-                            break :readblk;
+                            continue;
                         }
 
                         if (request.index > totalPieces) {
