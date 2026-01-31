@@ -154,3 +154,88 @@ test "Queue complex use case" {
     try std.testing.expectEqual(8, q.remove().?);
     try std.testing.expectEqual(9, q.remove().?);
 }
+
+pub const QueryValue = union(enum) {
+    string: []const u8,
+    int: usize,
+    skip,
+};
+
+pub const QueryParam = struct { []const u8, QueryValue };
+
+pub fn appendQuery(
+    alloc: std.mem.Allocator,
+    url: std.Uri,
+    queries: []const QueryParam,
+) !std.array_list.Aligned(u8, null) {
+    var w: std.Io.Writer.Allocating = .init(alloc);
+    errdefer w.deinit();
+
+    var writer = &w.writer;
+
+    if (url.query) |query| {
+        try query.formatRaw(writer);
+
+        if (writer.buffer[writer.end - 1] != '&') {
+            try writer.writeByte('&');
+        }
+    }
+
+    for (queries, 0..) |query, i| {
+        const key, const val = query;
+
+        switch (val) {
+            .int => |int| {
+                try writer.print("{s}=", .{key});
+                try writer.print("{d}", .{int});
+            },
+
+            // default zig's query escaping is not enough...
+            .string => |string| {
+                try writer.print("{s}=", .{key});
+                const valComp: std.Uri.Component = .{ .raw = string };
+                try valComp.formatEscaped(writer);
+            },
+
+            .skip => continue,
+        }
+
+        if (i != queries.len - 1) {
+            try writer.writeByte('&');
+        }
+    }
+
+    return w.toArrayList();
+}
+
+test "appendQuery" {
+    const url1 = try std.Uri.parse("https://toloka.ua/something?else=true");
+
+    var query1 = try appendQuery(std.testing.allocator, url1, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
+    });
+    defer query1.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("else=true&port=456&compact=1", query1.items);
+
+    const url2 = try std.Uri.parse("https://toloka.ua/something");
+
+    var query2 = try appendQuery(std.testing.allocator, url2, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
+    });
+    defer query2.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("port=456&compact=1", query2.items);
+
+    const url3 = try std.Uri.parse("https://toloka.ua/something?testing&");
+
+    var query3 = try appendQuery(std.testing.allocator, url3, &.{
+        .{ "port", .{ .int = 456 } },
+        .{ "compact", .{ .string = "1" } },
+    });
+    defer query3.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("testing&port=456&compact=1", query3.items);
+}

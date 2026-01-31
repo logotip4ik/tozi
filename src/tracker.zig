@@ -25,9 +25,11 @@ http: ?std.http.Client = null,
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 
-trackers: std.array_list.Aligned(Tracker, null) = .empty,
+sources: std.array_list.Aligned([]const u8, null) = .empty,
 
-const Tracker = struct {
+initialized: ?Source = null,
+
+const Source = struct {
     url: []const u8,
     interval: usize,
     checkinAt: usize,
@@ -35,15 +37,29 @@ const Tracker = struct {
 
 pub const defaultNumWant = 20;
 
+pub fn init(
+    peerId: [20]u8,
+    infoHash: [20]u8,
+    downloaded: u64,
+    totalLen: u64,
+) Self {
+    return .{
+        .peerId = peerId,
+        .infoHash = infoHash,
+        .downloaded = downloaded,
+        .uploaded = 0,
+        .left = totalLen - downloaded,
+    };
+}
+
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.oldAddrs.deinit(alloc);
     self.newAddrs.deinit(alloc);
 
-    for (self.trackers.items) |tracker| {
-        alloc.free(tracker.url);
-    }
-    self.trackers.deinit(alloc);
+    for (self.sources.items) |url| alloc.free(url);
+    self.sources.deinit(alloc);
 
+    if (self.initialized) |x| alloc.free(x.url);
     if (self.http) |*x| x.deinit();
 }
 
@@ -71,7 +87,7 @@ pub fn sendAnnounce(
 
     var uri: std.Uri = try .parse(url);
 
-    var newQuery = try appendQuery(alloc, uri, &[_]QueryParam{
+    var newQuery = try utils.appendQuery(alloc, uri, &[_]utils.QueryParam{
         .{ "info_hash", .{ .string = self.infoHash[0..20] } },
         .{ "peer_id", .{ .string = self.peerId[0..20] } },
         .{ "port", .{ .int = self.port } },
@@ -133,10 +149,6 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
             continue;
         }
 
-        if (self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
-            break;
-        }
-
         if (peerString[0] == 0 or peerString[0] == 255) {
             continue;
         }
@@ -161,54 +173,77 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     return interval.inner.int;
 }
 
-pub fn addTracker(self: *Self, alloc: std.mem.Allocator, url: []const u8) !void {
-    const interval = try self.announce(alloc, url);
-    const intervalInMs = interval * std.time.ms_per_s;
+pub fn addTrackers(self: *Self, alloc: std.mem.Allocator, urls: *const []const []const u8) !void {
+    for (urls.*) |url| {
+        try self.sources.append(alloc, try alloc.dupe(u8, url));
+    }
 
-    const now: usize = @intCast(std.time.milliTimestamp());
-
-    try self.trackers.append(alloc, .{
-        .url = try alloc.dupe(u8, url),
-        .interval = intervalInMs,
-        .checkinAt = now + intervalInMs,
-    });
+    self.initialized = try self.initializeSource(alloc);
 }
 
-pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) void {
-    const now: usize = @intCast(std.time.milliTimestamp());
+pub fn initializeSource(self: *Self, alloc: std.mem.Allocator) !?Source {
+    while (self.sources.items.len > 0) {
+        const source = self.sources.pop() orelse unreachable;
 
-    for (self.trackers.items) |*tracker| {
-        if (tracker.checkinAt > now and self.newAddrs.items.len + self.oldAddrs.items.len >= self.numWant) {
-            continue;
-        }
+        const interval = self.announce(alloc, source) catch |err| {
+            @branchHint(.unlikely);
 
-        const interval = self.announce(alloc, tracker.url) catch |err| {
-            std.log.warn("failed sending announce request to {s} with {t}", .{tracker.url, err});
+            std.log.warn("failed announcing to {s} with {t}", .{ source, err });
+            alloc.free(source);
+
             continue;
         };
 
         const intervalInMs = interval * std.time.ms_per_s;
+        const now: usize = @intCast(std.time.milliTimestamp());
 
-        tracker.interval = intervalInMs;
-        tracker.checkinAt = now + intervalInMs;
+        return .{
+            .url = source,
+            .interval = intervalInMs,
+            .checkinAt = now + intervalInMs,
+        };
     }
+
+    return null;
 }
 
-pub fn nextCheckinAt(self: Self) usize {
-    if (self.trackers.items.len == 0) return 1800 * 1000;
+pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
+    const source = self.initialized orelse return;
 
-    const now: usize = @intCast(std.time.milliTimestamp());
+    self.sendAnnounce(alloc, source.url, null, .stopped) catch {};
+}
 
-    var soonest = self.trackers.items[0].checkinAt;
-    for (self.trackers.items[1..]) |tracker| {
-        if (soonest > tracker.checkinAt) {
-            soonest = tracker.checkinAt;
+pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
+    if (self.initialized) |*source| {
+        const now: usize = @intCast(std.time.milliTimestamp());
+
+        if (now < source.checkinAt) {
+            return source.checkinAt - now;
         }
+
+        // TODO: add retries
+        const interval = self.announce(alloc, source.url) catch |err| {
+            std.log.warn("failed announcing to {s} with {t}", .{ source.url, err });
+            alloc.free(source.url);
+
+            const new = try self.initializeSource(alloc) orelse return error.NoSourceAvailable;
+            self.initialized = new;
+
+            return new.interval;
+        };
+
+        const intervalInMs = interval * std.time.ms_per_s;
+
+        source.interval = intervalInMs;
+        source.checkinAt = now + intervalInMs;
+
+        return intervalInMs;
     }
 
-    if (soonest <= now) return 0;
+    const source = try self.initializeSource(alloc) orelse return error.NoSourceAvailable;
+    self.initialized = source;
 
-    return soonest - now;
+    return source.interval;
 }
 
 pub fn nextNewPeer(self: *Self) ?std.net.Address {
@@ -219,91 +254,6 @@ pub fn nextNewPeer(self: *Self) ?std.net.Address {
     const port = std.mem.readInt(u16, newPeer[4..6], .big);
 
     return std.net.Address.initIp4(newPeer[0..4].*, port);
-}
-
-const QueryValue = union(enum) {
-    string: []const u8,
-    int: usize,
-    skip,
-};
-
-const QueryParam = struct { []const u8, QueryValue };
-
-fn appendQuery(
-    alloc: std.mem.Allocator,
-    url: std.Uri,
-    queries: []const QueryParam,
-) !std.array_list.Aligned(u8, null) {
-    var w: std.Io.Writer.Allocating = .init(alloc);
-    errdefer w.deinit();
-
-    var writer = &w.writer;
-
-    if (url.query) |query| {
-        try query.formatRaw(writer);
-
-        if (writer.buffer[writer.end - 1] != '&') {
-            try writer.writeByte('&');
-        }
-    }
-
-    for (queries, 0..) |query, i| {
-        const key, const val = query;
-
-        switch (val) {
-            .int => |int| {
-                try writer.print("{s}=", .{key});
-                try writer.print("{d}", .{int});
-            },
-
-            // default zig's query escaping is not enough...
-            .string => |string| {
-                try writer.print("{s}=", .{key});
-                const valComp: std.Uri.Component = .{ .raw = string };
-                try valComp.formatEscaped(writer);
-            },
-
-            .skip => continue,
-        }
-
-        if (i != queries.len - 1) {
-            try writer.writeByte('&');
-        }
-    }
-
-    return w.toArrayList();
-}
-
-test "appendQuery" {
-    const url1 = try std.Uri.parse("https://toloka.ua/something?else=true");
-
-    var query1 = try appendQuery(std.testing.allocator, url1, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query1.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("else=true&port=456&compact=1", query1.items);
-
-    const url2 = try std.Uri.parse("https://toloka.ua/something");
-
-    var query2 = try appendQuery(std.testing.allocator, url2, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query2.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("port=456&compact=1", query2.items);
-
-    const url3 = try std.Uri.parse("https://toloka.ua/something?testing&");
-
-    var query3 = try appendQuery(std.testing.allocator, url3, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query3.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("testing&port=456&compact=1", query3.items);
 }
 
 pub fn generatePeerId() [20]u8 {

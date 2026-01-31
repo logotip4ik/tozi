@@ -6,7 +6,7 @@ pub const PieceManager = @import("piece-manager.zig");
 pub const Files = @import("files.zig");
 pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
-pub const HttpTracker = @import("http-tracker.zig");
+pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
 
 const proto = @import("proto.zig");
@@ -21,28 +21,18 @@ pub fn downloadTorrent(
     files: *Files,
     pieces: *PieceManager,
 ) !void {
-    var tracker: HttpTracker = .{
-        .peerId = peerId,
-        .infoHash = torrent.infoHash,
-        .downloaded = 0,
-        .uploaded = 0,
-        .left = torrent.totalLen,
-    };
+    var tracker: Tracker = .init(
+        peerId,
+        torrent.infoHash,
+        pieces.countDownloaded(&torrent),
+        torrent.totalLen,
+    );
     defer tracker.deinit(alloc);
 
-    for (torrent.announceList) |announce| {
-        if (!std.mem.startsWith(u8, announce, "http://")) {
-            continue;
-        }
-
-        std.log.info("adding tracker url {s}", .{announce});
-        // these really should not be blocking the loop...
-        tracker.addTracker(alloc, announce) catch continue;
-
-        if (tracker.newAddrs.items.len > 0) {
-            break;
-        }
-    }
+    tracker.addTrackers(alloc, &torrent.announceList) catch |err| {
+        std.log.err("failed adding trackers with {t}", .{err});
+        return;
+    };
 
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
@@ -105,29 +95,26 @@ pub fn downloadTorrent(
 
             switch (timer) {
                 .tracker => {
-                    updateTracker(&tracker, pieces.*, torrent);
+                    const downloaded = pieces.countDownloaded(&torrent);
 
-                    if (peers.items.len < 10 and tracker.newAddrs.items.len < 10 and tracker.oldAddrs.items.len != 0) {
-                        tracker.numWant += HttpTracker.defaultNumWant;
+                    tracker.downloaded = downloaded;
+                    tracker.left = torrent.totalLen - downloaded;
+
+                    if (peers.items.len == 0 and tracker.newAddrs.items.len < 10 and tracker.oldAddrs.items.len != 0) {
+                        tracker.numWant += Tracker.defaultNumWant;
                     }
 
-                    if (tracker.oldAddrs.items.len == 0) {
-                        tracker.keepAlive(alloc);
-                    } else {
-                        const thread = try std.Thread.spawn(
-                            .{ .allocator = alloc },
-                            HttpTracker.keepAlive,
-                            .{ &tracker, alloc },
-                        );
-                        thread.detach();
-                    }
+                    const nextKeepAlive = tracker.keepAlive(alloc) catch |err| {
+                        std.log.err("failed keeping alive with {t}", .{err});
+                        return;
+                    };
 
-                    const nextKeepAlive = tracker.nextCheckinAt();
                     std.log.info("setting timer to next: {d}", .{nextKeepAlive});
                     try kq.addTimer(@intFromEnum(Timer.tracker), nextKeepAlive, .{ .periodic = false });
 
                     if (peers.items.len == 0) {
-                        return error.AllStreamsDead;
+                        std.log.info("no pending or alive peers left", .{});
+                        return;
                     }
                 },
                 .tick => {
@@ -496,8 +483,8 @@ pub fn downloadTorrent(
                         const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
                         defer completed.deinit(alloc);
 
-                        const expectedHash = torrent.pieces[piece.index * 20 ..];
-                        pieces.validatePiece(piece.index, completed.bytes, expectedHash[0..20]) catch {
+                        const expectedHash = torrent.pieces[piece.index * 20 ..][0..20];
+                        pieces.validatePiece(completed.bytes, expectedHash) catch {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
                             pieces.reset(piece.index);
@@ -591,10 +578,9 @@ pub fn downloadTorrent(
         }
     }
 
-    updateTracker(&tracker, pieces.*, torrent);
-    for (tracker.trackers.items) |t| {
-        tracker.sendAnnounce(alloc, t.url, null, .stopped) catch {};
-    }
+    tracker.downloaded = pieces.countDownloaded(&torrent);
+    tracker.left = torrent.totalLen - tracker.downloaded;
+    tracker.finalizeSource(alloc);
 
     const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
     const minutes = @as(f64, @floatFromInt(delta)) / std.time.ms_per_min;
@@ -605,19 +591,6 @@ pub fn downloadTorrent(
         const hours = minutes / 60;
         std.log.info("downloaded in: {d:.2} hours", .{hours});
     }
-}
-
-fn updateTracker(tracker: *HttpTracker, pieces: PieceManager, torrent: Torrent) void {
-    var downloaded: u64 = 0;
-
-    for (pieces.pieces, 0..) |state, i| {
-        if (state == .have) {
-            downloaded += torrent.getPieceSize(i);
-        }
-    }
-
-    tracker.downloaded = downloaded;
-    tracker.left = torrent.totalLen - downloaded;
 }
 
 test {

@@ -34,14 +34,10 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
 }
 
 pub fn getPieceSize(self: Torrent, index: usize) u32 {
-    const numberOfPieces = (self.totalLen + self.pieceLen - 1) / self.pieceLen;
+    const offset = @as(u64, index) * self.pieceLen;
+    const remaining = self.totalLen - offset;
 
-    if (index < numberOfPieces - 1) {
-        @branchHint(.likely);
-        return @intCast(self.pieceLen);
-    }
-
-    return @intCast(self.totalLen - (index * self.pieceLen));
+    return @intCast(@min(@as(u64, self.pieceLen), remaining));
 }
 
 pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {

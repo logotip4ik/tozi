@@ -64,7 +64,7 @@ pub fn main() !void {
         return;
     }
 
-    const peerId = tozi.HttpTracker.generatePeerId();
+    const peerId = tozi.Tracker.generatePeerId();
 
     var files: tozi.Files = try .init(alloc, torrent.files.items);
     defer files.deinit(alloc);

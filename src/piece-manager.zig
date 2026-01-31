@@ -70,8 +70,8 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
 
 pub fn validatePiece(
     _: *Self,
-    noalias bytes: *const []const u8,
-    noalias expectedHash: *const []const u8,
+    noalias bytes: []const u8,
+    noalias expectedHash: []const u8,
 ) !void {
     const computedHash = hasher.hash(bytes) catch return error.HashingFailed;
 
@@ -220,4 +220,17 @@ pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
     }
 
     return bytes;
+}
+
+pub fn countDownloaded(self: *const Self, torrent: *const Torrent) usize {
+    var downloaded: usize = 0;
+
+    for (self.pieces, 0..) |piece, i| switch (piece) {
+        .have => {
+            downloaded += torrent.getPieceSize(i);
+        },
+        else => continue,
+    };
+
+    return downloaded;
 }
