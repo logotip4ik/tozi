@@ -7,11 +7,16 @@ const utils = @import("utils.zig");
 
 pieces: []State,
 
+/// used to track if isEndgame
+missingCount: usize,
+
+completedCount: usize,
+
 buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
 
 const Self = @This();
 
-const State = enum {
+const State = enum(u2) {
     missing,
     downloading,
     have,
@@ -43,18 +48,27 @@ pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
     const arr = try alloc.alloc(State, numberOfPieces);
     for (arr) |*piece| piece.* = .missing;
 
-    return .{ .pieces = arr };
+    return .{ .pieces = arr, .missingCount = numberOfPieces, .completedCount = 0 };
 }
 
 pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !Self {
     const numberOfPieces = bitset.bit_length;
 
     const arr = try alloc.alloc(State, numberOfPieces);
+    var missingCount: usize = 0;
+    var completedCount: usize = 0;
+
     for (arr, 0..) |*piece, i| {
-        piece.* = if (bitset.isSet(i)) .have else .missing;
+        if (bitset.isSet(i)) {
+            piece.* = .have;
+            completedCount += 1;
+        } else {
+            piece.* = .missing;
+            missingCount += 1;
+        }
     }
 
-    return .{ .pieces = arr };
+    return .{ .pieces = arr, .missingCount = missingCount, .completedCount = completedCount };
 }
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
@@ -129,29 +143,27 @@ pub fn getPieceBuf(
     return res.value_ptr;
 }
 
-pub fn getWorkingPiece(self: *Self, peerBitfield: std.DynamicBitSetUnmanaged) ?u32 {
-    for (self.pieces, 0..) |*piece, index| {
-        if (piece.* == .missing and peerBitfield.isSet(index)) {
-            piece.* = .downloading;
-            return @intCast(index);
-        }
+pub fn isEndgame(self: *const Self) bool {
+    return self.missingCount == 0;
+}
+
+pub fn canFetch(self: *Self, index: usize) bool {
+    switch (self.pieces[index]) {
+        .missing => {
+            self.missingCount -= 1;
+            self.pieces[index] = .downloading;
+
+            return true;
+        },
+
+        .have => {
+            return false;
+        },
+
+        .downloading => {
+            return self.isEndgame();
+        },
     }
-
-    const isEndgame = blk: for (self.pieces) |piece| {
-        if (piece == .missing) break :blk false;
-    } else true;
-
-    if (!isEndgame or self.isDownloadComplete()) {
-        return null;
-    }
-
-    for (self.pieces, 0..) |*piece, index| {
-        if (piece.* == .downloading and peerBitfield.isSet(index)) {
-            return @intCast(index);
-        }
-    }
-
-    return null;
 }
 
 pub fn isDownloadComplete(self: Self) bool {
@@ -160,6 +172,8 @@ pub fn isDownloadComplete(self: Self) bool {
 
 pub fn reset(self: *Self, index: u32) void {
     self.pieces[index] = .missing;
+    self.missingCount += 1;
+
     const buf = self.buffers.getPtr(index) orelse return;
     buf.fetched = 0;
     buf.received = .initEmpty();
@@ -169,6 +183,7 @@ pub fn complete(self: *Self, index: u32) !PieceBuf {
     const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
 
     self.pieces[index] = .have;
+    self.completedCount += 1;
 
     return kv.value;
 }

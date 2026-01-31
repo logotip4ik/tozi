@@ -32,6 +32,8 @@ inFlight: utils.RqPool,
 
 extensions: Handshake.Extensions = .{},
 
+allowedFast: std.array_list.Aligned(u32, null),
+
 pub const State = union(enum) {
     readHandshake,
     writeHandshake,
@@ -46,6 +48,7 @@ pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
         .readBuf = .init(alloc),
         .writeBuf = .init(alloc),
         .inFlight = try .init(alloc, 32),
+        .allowedFast = try .initCapacity(alloc, 10)
     };
 }
 
@@ -55,6 +58,7 @@ pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
     p.readBuf.deinit();
     p.writeBuf.deinit();
     p.inFlight.deinit(alloc);
+    p.allowedFast.deinit(alloc);
 
     if (p.bitfield) |*x| x.deinit(alloc);
     if (p.workingOn) |*x| x.deinit(alloc);
@@ -137,26 +141,38 @@ pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !bool {
     return try p.send();
 }
 
-/// this is highly coupled with `addRequest`. This function expects to clear `workingPiece` when
-/// needed
-pub fn getNextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
-    const piece = p.workingPiece orelse blk: {
-        p.workingPieceOffset = 0;
-        p.workingPiece = pieces.getWorkingPiece(p.bitfield orelse return null) orelse return null;
-        break :blk p.workingPiece.?;
+pub fn nextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
+    if (p.choked) {
+        for (p.allowedFast.items) |index| {
+            if (pieces.canFetch(index)) {
+                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{p.socket, index});
+                return @intCast(index);
+            }
+        }
+    } else if (p.bitfield) |bitfield| if (p.workingOn) |workingOn| {
+        var iter = bitfield.iterator(.{ .direction = .forward, .kind = .set });
+        while (iter.next()) |index| {
+            if (pieces.canFetch(index)) {
+                if (pieces.isEndgame() and workingOn.isSet(index)) {
+                    continue;
+                }
+
+                return @intCast(index);
+            }
+        }
     };
-    if (p.workingOn) |*x| x.set(piece);
-    return piece;
+
+    return null;
 }
 
 // returns true if pipeline is full
-pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) !bool {
-    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
-
+pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) !enum { full, finishedPiece, next } {
     p.inFlight.push(.{
         .index = piece,
         .begin = p.workingPieceOffset,
-    }) catch return true;
+    }) catch return .full;
+
+    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
 
     const m: proto.Message = .{ .request = .{
         .index = piece,
@@ -169,21 +185,34 @@ pub fn addRequest(p: *Peer, _: std.mem.Allocator, piece: u32, pieceLen: u32) !bo
     p.workingPieceOffset += chunkLen;
 
     if (p.workingPieceOffset >= pieceLen) {
-        p.workingPiece = null;
-        p.workingPieceOffset = 0;
+        return .finishedPiece;
     }
 
-    return false;
+    return .next;
 }
 
 /// returns `true` when all data was written to socket
-pub fn fillRqPool(p: *Peer, alloc: std.mem.Allocator, torrent: Torrent, pieces: *PieceManager) !bool {
+pub fn fillRqPool(p: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pieces: *PieceManager) !bool {
     while (p.inFlight.count < p.inFlight.size) {
-        const piece = p.getNextWorkingPiece(pieces) orelse break;
-        const len = torrent.getPieceSize(piece);
+        const piece = p.workingPiece orelse blk: {
+            p.workingPieceOffset = 0;
+            p.workingPiece = p.nextWorkingPiece(pieces) orelse break;
 
-        if (try p.addRequest(alloc, piece, len)) {
-            break;
+            if (p.workingOn) |*workingOn| {
+                workingOn.set(p.workingPiece.?);
+            }
+
+            break :blk p.workingPiece.?;
+        };
+
+        const len = torrent.getPieceSize(piece);
+        switch (try p.addRequest(piece, len)) {
+            .full => break,
+            .next => {},
+            .finishedPiece => {
+                p.workingPiece = null;
+                p.workingPieceOffset = 0;
+            },
         }
     }
 

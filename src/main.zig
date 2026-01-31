@@ -83,7 +83,6 @@ pub fn main() !void {
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
 
-
     if (isverify) return;
 
     try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);

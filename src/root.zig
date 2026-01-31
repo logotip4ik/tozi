@@ -12,7 +12,7 @@ pub const Handshake = @import("handshake.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
-const ENABLE_FAST_EXT = false;
+const ENABLE_FAST_EXT = true;
 
 pub fn downloadTorrent(
     alloc: std.mem.Allocator,
@@ -58,7 +58,6 @@ pub fn downloadTorrent(
 
     const downloadStart = std.time.milliTimestamp();
     const totalPieces = torrent.pieces.len / 20;
-    var completedCount: usize = 0;
 
     loop: while (try kq.next()) |event| {
         while (tracker.nextNewPeer()) |addr| {
@@ -144,12 +143,12 @@ pub fn downloadTorrent(
                         activePeers += if (peer.bytesReceived > 0) 1 else 0;
                     }
 
-                    const percent = (completedCount * 100) / totalPieces;
+                    const percent = (pieces.completedCount * 100) / totalPieces;
                     const bytesPerSecond = bytesPerTick / 3;
 
-                    std.log.info("progress: {d:3}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
+                    std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
                         percent,
-                        completedCount,
+                        pieces.completedCount,
                         totalPieces,
                         activePeers,
                         bytesPerSecond,
@@ -230,11 +229,18 @@ pub fn downloadTorrent(
                     peer.state = .messageStart;
                     peer.extensions.fast = matched.fast;
 
-                    const bitfield = try pieces.torrentBitfieldBytes(alloc);
-                    defer alloc.free(bitfield);
+                    if (matched.fast and pieces.countDownloaded(&torrent) == 0) {
+                        const ready = try peer.addMessage(.haveNone, &.{});
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
 
-                    const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
-                    if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        std.log.debug("peer: {d} sent 'haveNone' message", .{peer.socket});
+                    } else {
+                        const bitfield = try pieces.torrentBitfieldBytes(alloc);
+                        defer alloc.free(bitfield);
+
+                        const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                    }
                 },
                 .messageStart => {
                     const len = peer.peekInt(alloc, u32, 0) catch |err| switch (err) {
@@ -249,7 +255,7 @@ pub fn downloadTorrent(
                         _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
                         if (!peer.choked) {
-                            const ready = try peer.fillRqPool(alloc, torrent, pieces);
+                            const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
 
@@ -354,17 +360,10 @@ pub fn downloadTorrent(
                         peer.choked = false;
                         peer.state = .messageStart;
 
-                        const bitfield = peer.bitfield orelse {
-                            std.log.warn("received unchoke message but no bitfield was set", .{});
-                            continue;
-                        };
-
-                        if (peer.workingOn == null) {
-                            peer.workingOn = try .initEmpty(alloc, bitfield.bit_length);
-                        }
-
-                        const ready = try peer.fillRqPool(alloc, torrent, pieces);
+                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                         if (!ready) try kq.enable(peer.socket, .write, event.udata);
+
+                        std.log.debug("peer: {d}, received unchoke message", .{peer.socket});
                     },
                     .have => |piece| {
                         peer.state = .messageStart;
@@ -388,10 +387,16 @@ pub fn downloadTorrent(
                             continue;
                         }
 
+                        std.log.debug("peer: {d} receied 'haveAll' message", .{peer.socket});
+
                         peer.bitfield = try .initFull(alloc, pieces.pieces.len);
+                        peer.workingOn = try .initEmpty(alloc, pieces.pieces.len);
+
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
+
+                            std.log.debug("peer: {d} sent 'interested' message", .{peer.socket});
                         }
                     },
                     .haveNone => {
@@ -402,6 +407,7 @@ pub fn downloadTorrent(
                         }
 
                         peer.bitfield = try .initEmpty(alloc, pieces.pieces.len);
+                        peer.workingOn = try .initEmpty(alloc, pieces.pieces.len);
                     },
                     .bitfield => |len| {
                         if (peer.extensions.fast and peer.bitfield != null) {
@@ -412,8 +418,6 @@ pub fn downloadTorrent(
                             break :readblk;
                         }
 
-                        peer.state = .messageStart;
-
                         const bytes = peer.read(alloc, len) catch |err| switch (err) {
                             error.EndOfStream => {
                                 peer.state = .dead;
@@ -423,28 +427,50 @@ pub fn downloadTorrent(
                         } orelse break :readblk;
                         defer alloc.free(bytes);
 
+                        peer.state = .messageStart;
+
                         peer.bitfield = pieces.bytesToBitfield(alloc, bytes) catch |err| {
                             std.log.err("corruupt bitifield ?{t}", .{err});
                             peer.state = .dead;
                             break :readblk;
                         };
+                        peer.workingOn = try .initEmpty(alloc, pieces.pieces.len);
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
                     },
-                    .allowedFast => |index| {
-                        _ = index;
-                        unreachable;
+                    .allowedFast => |allowedFast| {
+                        peer.state = .messageStart;
+
+                        if (allowedFast >= pieces.pieces.len) {
+                            peer.state = .dead;
+                            break :readblk;
+                        }
+
+                        const alreadyInList = for (peer.allowedFast.items) |existing| {
+                            if (existing == allowedFast) break true;
+                        } else false;
+
+                        if (alreadyInList) continue;
+                        peer.allowedFast.appendBounded(allowedFast) catch continue;
+
+                        std.log.debug("peer: {d} received allowed fast for {d}", .{peer.socket, allowedFast});
+
+                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     },
                     .suggestPiece => |index| {
-                        _ = index;
-                        unreachable;
+                        peer.state = .messageStart;
+                        std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{peer.socket, index});
                     },
                     .rejectRequest => |piece| {
-                        _ = piece;
-                        unreachable;
+                        peer.state = .messageStart;
+                        peer.inFlight.receive(.{
+                            .index = piece.index,
+                            .begin = piece.begin,
+                        }) catch {};
                     },
                     .piece => |piece| {
                         const chunkBytes = peer.read(alloc, piece.len) catch |err| switch (err) {
@@ -473,7 +499,7 @@ pub fn downloadTorrent(
                         if (!peer.choked) {
                             @branchHint(.likely);
 
-                            const ready = try peer.fillRqPool(alloc, torrent, pieces);
+                            const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
 
@@ -491,8 +517,6 @@ pub fn downloadTorrent(
 
                         try files.writePieceData(piece.index, torrent.pieceLen, completed.bytes);
                         peer.workingOn.?.unset(piece.index);
-
-                        completedCount += 1;
 
                         if (pieces.isDownloadComplete()) {
                             @branchHint(.cold);
