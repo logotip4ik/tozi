@@ -8,6 +8,9 @@ const Handshake = @import("handshake.zig");
 
 const Peer = @This();
 
+const DEFAULT_IN_FLIGHT_REQUESTS = 50;
+const DEFAULT_ALLOWED_FAST = 10;
+
 socket: std.posix.fd_t,
 
 state: State = .writeHandshake,
@@ -47,8 +50,8 @@ pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
         .socket = fd,
         .readBuf = .init(alloc),
         .writeBuf = .init(alloc),
-        .inFlight = try .init(alloc, 32),
-        .allowedFast = try .initCapacity(alloc, 10)
+        .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
+        .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST)
     };
 }
 
