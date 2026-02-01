@@ -4,6 +4,8 @@ pub inline fn assert(ok: bool) void {
     if (!ok) unreachable;
 }
 
+const MAX_REQUEST_POOL_SIZE = 250;
+
 pub const RqPool = struct {
     buf: []Piece,
     count: usize = 0,
@@ -20,6 +22,20 @@ pub const RqPool = struct {
 
     pub fn deinit(self: *RqPool, alloc: std.mem.Allocator) void {
         alloc.free(self.buf);
+    }
+
+    /// currently only supports size increasing
+    pub fn resize(self: *RqPool, alloc: std.mem.Allocator, newSize: usize) !void {
+        if (newSize <= self.size) {
+            return;
+        }
+
+        const cappedSize = @min(newSize, MAX_REQUEST_POOL_SIZE);
+
+        self.buf = try alloc.realloc(self.buf, cappedSize);
+        self.size = cappedSize;
+
+        std.log.debug("resized pool to {d}", .{cappedSize});
     }
 
     pub fn push(self: *Self, r: Piece) !void {
@@ -48,7 +64,7 @@ pub const RqPool = struct {
         return error.UnknownChunk;
     }
 
-    pub fn format(self: Self, w: *std.Io.Writer) !void {
+    pub fn format(self: *const Self, w: *std.Io.Writer) !void {
         for (self.buf[0..self.count], 0..) |r, i| {
             try w.print("(piece: {d} + {d})", .{ r.index, r.begin });
 

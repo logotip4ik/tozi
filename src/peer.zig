@@ -33,7 +33,8 @@ workingPiece: ?u32 = null,
 workingPieceOffset: u32 = 0,
 inFlight: utils.RqPool,
 
-extensions: Handshake.Extensions = .{},
+protocols: Handshake.Protocols = .{},
+extended: ?Handshake.Extended = null,
 
 allowedFast: std.array_list.Aligned(u32, null),
 
@@ -65,6 +66,7 @@ pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
 
     if (p.bitfield) |*x| x.deinit(alloc);
     if (p.workingOn) |*x| x.deinit(alloc);
+    if (p.extended) |*x| x.deinit(alloc);
 }
 
 pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {

@@ -10,8 +10,10 @@ const Inner = union(enum) {
 };
 
 inner: Inner,
-start: usize,
-len: usize,
+
+/// only used during `decode` to later reference/get `info` section which is used for hashing
+start: usize = 0,
+len: usize = 0,
 
 pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
     switch (self.inner) {
@@ -150,6 +152,20 @@ pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize) !V
     }
 }
 
+fn parseString(alloc: std.mem.Allocator, reader: *std.Io.Reader) !struct { []const u8, usize } {
+    const keyLengthString = try reader.takeDelimiter(':') orelse {
+        std.log.err("expected key length to be present", .{});
+        return error.MissingColon;
+    };
+
+    const keyLength = try std.fmt.parseUnsigned(usize, keyLengthString, 10);
+
+    const key = try reader.readAlloc(alloc, keyLength);
+    const len = keyLengthString.len + 1 + keyLength;
+
+    return .{ key, len };
+}
+
 pub fn encode(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (self.inner) {
         .int => |int| try writer.print("i{d}e", .{int}),
@@ -173,6 +189,42 @@ pub fn encode(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!vo
             }
 
             try writer.writeByte('e');
+        },
+    }
+}
+
+pub fn format(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (self.inner) {
+        .int => |int| {
+            try writer.print("{d}", .{int});
+        },
+        .string => |string| {
+            if (string.len == 0) {
+                try writer.print("<empty string>", .{});
+            } else if (std.unicode.utf8ValidateSlice(string)) {
+                try writer.print("{s}", .{string});
+            } else {
+                try writer.print("<{d} bytes>", .{string.len});
+            }
+        },
+        .list => |list| {
+            try writer.writeAll("[\n");
+
+            for (list.items) |item| {
+                try writer.print("\t{f}\n", .{item});
+            }
+
+            try writer.writeAll("]");
+        },
+        .dict => |dict| {
+            try writer.writeAll("{\n");
+
+            var iter = dict.iterator();
+            while (iter.next()) |entry| {
+                try writer.print("\t{s}: {f}\n", .{entry.key_ptr.*, entry.value_ptr});
+            }
+
+            writer.writeAll("}") catch unreachable;
         },
     }
 }
@@ -230,21 +282,6 @@ pub fn dump(self: Value) void {
     out.print("======= VALUE DUMP =======\n", .{}) catch unreachable;
 
     self.dumpWithOptions(out, 0);
-}
-
-
-fn parseString(alloc: std.mem.Allocator, reader: *std.Io.Reader) !struct { []const u8, usize } {
-    const keyLengthString = try reader.takeDelimiter(':') orelse {
-        std.log.err("expected key length to be present", .{});
-        return error.MissingColon;
-    };
-
-    const keyLength = try std.fmt.parseUnsigned(usize, keyLengthString, 10);
-
-    const key = try reader.readAlloc(alloc, keyLength);
-    const len = keyLengthString.len + 1 + keyLength;
-
-    return .{ key, len };
 }
 
 test "parseValue string" {
@@ -325,21 +362,21 @@ test "value int encode" {
 
     {
         defer writer.clearRetainingCapacity();
-        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = 42 } };
+        const v = Value{ .inner = .{ .int = 42 } };
         try v.encode(&writer.writer);
         try std.testing.expectEqualStrings("i42e", writer.written());
     }
 
     {
         defer writer.clearRetainingCapacity();
-        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = -42 } };
+        const v = Value{ .inner = .{ .int = -42 } };
         try v.encode(&writer.writer);
         try std.testing.expectEqualStrings("i-42e", writer.written());
     }
 
     {
         defer writer.clearRetainingCapacity();
-        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = 0 } };
+        const v = Value{ .inner = .{ .int = 0 } };
         try v.encode(&writer.writer);
         try std.testing.expectEqualStrings("i0e", writer.written());
     }
@@ -349,7 +386,7 @@ test "value string encode" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
 
-    const v = Value{ .start = 0, .len = 0, .inner = .{ .string = "spam" } };
+    const v = Value{ .inner = .{ .string = "spam" } };
     try v.encode(&writer.writer);
     try std.testing.expectEqualStrings("4:spam", writer.written());
 }
@@ -359,11 +396,11 @@ test "value list encode" {
     defer writer.deinit();
 
     var list = [_]Value{
-        Value{ .len = 0, .start = 0, .inner = .{ .string = "spam" } },
-        Value{ .len = 0, .start = 0, .inner = .{ .int = 42 } },
+        Value{ .inner = .{ .string = "spam" } },
+        Value{ .inner = .{ .int = 42 } },
     };
 
-    const v = Value{ .start = 0, .len = 0, .inner = .{ .list = .fromOwnedSlice(&list) } };
+    const v = Value{ .inner = .{ .list = .fromOwnedSlice(&list) } };
     try v.encode(&writer.writer);
     try std.testing.expectEqualStrings("l4:spami42ee", writer.written());
 }
@@ -381,10 +418,10 @@ test "value dict encode" {
         defer writer.clearRetainingCapacity();
         defer map.clearRetainingCapacity();
 
-        map.putAssumeCapacityNoClobber("cow", .{ .len = 0, .start = 0, .inner = .{ .string = "moo" } });
-        map.putAssumeCapacityNoClobber("spam", .{ .len = 0, .start = 0, .inner = .{ .string = "eggs" } });
+        map.putAssumeCapacityNoClobber("cow", .{ .inner = .{ .string = "moo" } });
+        map.putAssumeCapacityNoClobber("spam", .{ .inner = .{ .string = "eggs" } });
 
-        const v = Value{ .inner = .{ .dict = map }, .len = 0, .start = 0 };
+        const v = Value{ .inner = .{ .dict = map } };
         try v.encode(&writer.writer);
         try std.testing.expectEqualStrings("d3:cow3:moo4:spam4:eggse", writer.written());
     }
@@ -394,13 +431,13 @@ test "value dict encode" {
         defer map.clearRetainingCapacity();
 
         var list = [_]Value{
-            Value{ .inner = .{ .string = "a" }, .len = 0, .start = 0 },
-            Value{ .inner = .{ .string = "b" }, .len = 0, .start = 0 },
+            Value{ .inner = .{ .string = "a" } },
+            Value{ .inner = .{ .string = "b" } },
         };
 
-        map.putAssumeCapacityNoClobber("spam", .{ .len = 0, .start = 0, .inner = .{ .list = .fromOwnedSlice(&list) } });
+        map.putAssumeCapacityNoClobber("spam", .{ .inner = .{ .list = .fromOwnedSlice(&list) } });
 
-        const v = Value{ .inner = .{ .dict = map }, .len = 0, .start = 0 };
+        const v = Value{ .inner = .{ .dict = map } };
         try v.encode(&writer.writer);
         try std.testing.expectEqualStrings("d4:spaml1:a1:bee", writer.written());
     }

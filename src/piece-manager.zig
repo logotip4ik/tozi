@@ -226,13 +226,14 @@ pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
 
     @memset(bytes, 0);
 
-    for (self.pieces, 0..) |p, i| {
-        if (p == .have) {
+    for (self.pieces, 0..) |p, i| switch (p) {
+        else => continue,
+        .have => {
             const byteIdx = i / 8;
             const bitPos: u3 = @intCast(7 - (i % 8));
             bytes[byteIdx] |= (@as(u8, 1) << bitPos);
-        }
-    }
+        },
+    };
 
     return bytes;
 }

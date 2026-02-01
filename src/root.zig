@@ -12,7 +12,8 @@ pub const Handshake = @import("handshake.zig");
 const proto = @import("proto.zig");
 const utils = @import("utils.zig");
 
-const ENABLE_FAST_EXT = true;
+const ENABLE_FAST = true;
+const ENABLE_EXTENSION = true;
 
 pub fn downloadTorrent(
     alloc: std.mem.Allocator,
@@ -49,13 +50,14 @@ pub fn downloadTorrent(
         return;
     };
 
-    const Timer = enum { tracker, tick };
+    const Timer = enum { start, tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), trackerTick, .{ .periodic = false });
     try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
-    try kq.addTimer(@intFromEnum(Timer.tick), 0, .{ .periodic = false }); // kick off the loop
+    try kq.addTimer(@intFromEnum(Timer.start), 0, .{ .periodic = false }); // kick off the loop
 
     const handshake = Handshake.init(peerId, torrent.infoHash, .{
-        .fast = ENABLE_FAST_EXT,
+        .fast = ENABLE_FAST,
+        .extended = ENABLE_EXTENSION,
     });
 
     const totalPieces = torrent.pieces.len / 20;
@@ -94,6 +96,7 @@ pub fn downloadTorrent(
             const timer = std.enums.fromInt(Timer, event.ident) orelse continue;
 
             switch (timer) {
+                .start => {},
                 .tracker => {
                     tracker.downloaded = pieces.countDownloaded(&torrent);
                     tracker.left = torrent.totalLen - tracker.downloaded;
@@ -227,7 +230,8 @@ pub fn downloadTorrent(
                     };
 
                     peer.state = .messageStart;
-                    peer.extensions.fast = matched.fast;
+                    peer.protocols.fast = matched.fast;
+                    peer.protocols.extended = matched.extended;
 
                     if (matched.fast and pieces.countDownloaded(&torrent) == 0) {
                         const ready = try peer.addMessage(.haveNone, &.{});
@@ -240,6 +244,22 @@ pub fn downloadTorrent(
 
                         const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
                         if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                    }
+
+                    if (matched.extended) {
+                        std.log.debug("peer: {d} sending extended handshake message", .{peer.socket});
+
+                        var extended: Handshake.Extended = .{};
+
+                        var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
+                        defer w.deinit();
+
+                        try extended.encode(alloc, &w.writer);
+
+                        const ready = try peer.addMessage(.{
+                            .extended = .{ .id = 0, .len = @intCast(w.written().len) },
+                        }, w.written());
+                        if (!ready) try kq.subscribe(peer.socket, .write, event.udata);
                     }
                 },
                 .messageStart => {
@@ -315,6 +335,11 @@ pub fn downloadTorrent(
                             .len = len - 9,
                         } },
 
+                        .extended => .{ .extended = .{
+                            .id = reader.takeByte() catch unreachable,
+                            .len = len - 2,
+                        } },
+
                         .request, .cancel, .rejectRequest => blk: {
                             const index = reader.takeInt(u32, .big) catch unreachable;
                             const begin = reader.takeInt(u32, .big) catch unreachable;
@@ -346,12 +371,35 @@ pub fn downloadTorrent(
                                 } };
                             }
                         },
+
                         .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
                     };
 
                     peer.state = .{ .message = message };
                 },
                 .message => |message| switch (message) {
+                    .extended => |extended| {
+                        const bytes = peer.read(alloc, extended.len) catch |err| switch (err) {
+                            error.EndOfStream => {
+                                peer.state = .dead;
+                                break :readblk;
+                            },
+                            else => |e| return e,
+                        } orelse break :readblk;
+                        defer alloc.free(bytes);
+
+                        peer.state = .messageStart;
+
+                        var reader: std.Io.Reader = .fixed(bytes);
+                        const e = Handshake.Extended.decode(alloc, &reader) catch {
+                            continue; // `while` read loop
+                        };
+                        peer.extended = e;
+
+                        std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket, e.v, e.reqq });
+
+                        if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
+                    },
                     .choke => {
                         peer.choked = true;
                         peer.state = .messageStart;
@@ -410,7 +458,7 @@ pub fn downloadTorrent(
                         peer.workingOn = try .initEmpty(alloc, pieces.pieces.len);
                     },
                     .bitfield => |len| {
-                        if (peer.extensions.fast and peer.bitfield != null) {
+                        if (peer.protocols.fast and peer.bitfield != null) {
                             peer.state = .dead;
                             std.log.warn("peer: {d} received bitfield message while already received `have` messages", .{
                                 peer.socket,
@@ -466,11 +514,15 @@ pub fn downloadTorrent(
                         std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{ peer.socket, index });
                     },
                     .rejectRequest => |piece| {
+                        _ = piece;
                         peer.state = .messageStart;
-                        peer.inFlight.receive(.{
-                            .index = piece.index,
-                            .begin = piece.begin,
-                        }) catch {};
+
+                        // TODO: we need to add this request back to queue, or reset the whole piece
+                        // and give it to another peer
+                        // peer.inFlight.receive(.{
+                        //     .index = piece.index,
+                        //     .begin = piece.begin,
+                        // }) catch {};
                     },
                     .piece => |piece| {
                         const chunkBytes = peer.read(alloc, piece.len) catch |err| switch (err) {

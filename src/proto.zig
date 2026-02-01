@@ -1,10 +1,15 @@
 const std = @import("std");
 
-const Torrent = @import("torrent.zig");
-
 pub const Piece = struct {
     index: u32,
     begin: u32,
+    len: u32,
+};
+
+pub const Extended = struct {
+    /// The extended message ID (0 for handshake, or as specified in the handshake)
+    id: u8,
+    /// Length of the extended payload
     len: u32,
 };
 
@@ -27,7 +32,10 @@ pub const MessageId = enum(u8) {
     rejectRequest = 16,
     allowedFast = 17,
 
-    pub fn messageStartLen(self: MessageId) usize {
+    // Extension Protocol (BEP 10)
+    extended = 20,
+
+    pub inline fn messageStartLen(self: MessageId) usize {
         const initialOffset = @sizeOf(u32) + @sizeOf(u8);
 
         const rest: usize = switch (self) {
@@ -36,6 +44,7 @@ pub const MessageId = enum(u8) {
             .piece => @sizeOf(u32) * 2,
             .request, .cancel, .rejectRequest => @sizeOf(u32) * 3,
             .port => @sizeOf(u16),
+            .extended => 1,
         };
 
         return initialOffset + rest;
@@ -61,10 +70,13 @@ pub const Message = union(MessageId) {
     rejectRequest: Piece,
     allowedFast: u32,
 
+    // Extension Protocol
+    extended: Extended,
+
     /// Length of the message defined by torrent protocol
     inline fn len(self: Message) u32 {
-        const id_size = 1;
-        const u32_size = @sizeOf(u32);
+        const idSize = 1;
+        const u32Size = @sizeOf(u32);
 
         return switch (self) {
             .choke,
@@ -73,21 +85,24 @@ pub const Message = union(MessageId) {
             .notInterested,
             .haveAll,
             .haveNone,
-            => id_size,
+            => idSize,
 
-            .port => id_size + @sizeOf(u16),
+            .port => idSize + @sizeOf(u16),
 
             // ID (1) + Index (4)
-            .have, .suggestPiece, .allowedFast => id_size + u32_size,
+            .have, .suggestPiece, .allowedFast => idSize + u32Size,
 
             // ID (1) + Raw bytes
-            .bitfield => |l| id_size + l,
+            .bitfield => |l| idSize + l,
 
             // ID (1) + Index (4) + Begin (4) + Length (4)
-            .request, .cancel, .rejectRequest => id_size + (u32_size * 3),
+            .request, .cancel, .rejectRequest => idSize + (u32Size * 3),
 
             // ID (1) + Index (4) + Begin (4) + Raw block data
-            .piece => |p| id_size + (u32_size * 2) + p.len,
+            .piece => |p| idSize + (u32Size * 2) + p.len,
+
+            // BEP 10: ID (1) + Extended ID (1) + Payload Len
+            .extended => |e| idSize + 1 + e.len,
         };
     }
 
@@ -125,6 +140,11 @@ pub const Message = union(MessageId) {
             .piece => |p| {
                 try w.writeInt(u32, p.index, .big);
                 try w.writeInt(u32, p.begin, .big);
+                try w.writeAll(data);
+            },
+
+            .extended => |e| {
+                try w.writeByte(e.id);
                 try w.writeAll(data);
             },
         }

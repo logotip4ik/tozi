@@ -1,4 +1,5 @@
 const std = @import("std");
+const Bencode = @import("bencode.zig");
 
 const Handshake = @This();
 
@@ -13,7 +14,7 @@ const Reserved = packed struct(u64) {
 
     // byte 5
     _pad_b5: u4 = 0,
-    extension: bool = false, // 0x10 (Bit 4): BEP 10
+    extended: bool = false, // 0x10 (Bit 4): BEP 10
     _pad_b5_high: u3 = 0,
 
     // byte 6
@@ -26,15 +27,24 @@ const Reserved = packed struct(u64) {
     _pad_b7: u5 = 0,
 };
 
-pub const Extensions = packed struct {
+pub const Protocols = packed struct {
     fast: bool = false,
+    extended: bool = false,
 };
 
-pub fn init(peerId: [20]u8, infoHash: [20]u8, extenstions: Extensions) Handshake {
+pub fn init(peerId: [20]u8, infoHash: [20]u8, protocols: Protocols) Handshake {
+    var reserved: Reserved = .{};
+
+    inline for (std.meta.fields(Protocols)) |field| {
+        if (@field(protocols, field.name)) {
+            @field(reserved, field.name) = true;
+        }
+    }
+
     return Handshake{
         .peerId = peerId,
         .infoHash = infoHash,
-        .reserved = .{ .fast = extenstions.fast },
+        .reserved = reserved,
     };
 }
 
@@ -61,7 +71,7 @@ const ValidateError = error{
     InvalidInfoHash,
 };
 
-pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Extensions {
+pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Protocols {
     var reader: std.Io.Reader = .fixed(buffer);
 
     const len = reader.takeByte() catch return ValidateError.InvalidBuffer;
@@ -80,14 +90,14 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Extens
         return ValidateError.InvalidInfoHash;
     }
 
-    return Extensions{
+    return Protocols{
         .fast = self.reserved.fast and reserved.fast,
     };
 }
 
 test "reserved byte positions" {
     const res = Reserved{
-        .extension = true,
+        .extended = true,
         .dht = true,
         .fast = true,
     };
@@ -99,3 +109,79 @@ test "reserved byte positions" {
     // BEP 5 & 6: reserved[7] & 0x01 and 0x04
     try std.testing.expectEqual(@as(u8, 0x05), bytes[7]);
 }
+
+test "reserved byte positions with 'asBytes'" {
+    const h: Handshake = .{
+        .reserved = .{ .extended = true, .dht = true, .fast = true },
+        .infoHash = undefined,
+        .peerId = undefined,
+    };
+
+    const bytes = h.asBytes();
+    const reservedBytes = bytes[20..28];
+
+    // BEP 10: reserved[5] & 0x10
+    try std.testing.expectEqual(@as(u8, 0x10), reservedBytes[5]);
+    // BEP 5 & 6: reserved[7] & 0x01 and 0x04
+    try std.testing.expectEqual(@as(u8, 0x05), reservedBytes[7]);
+}
+
+pub const Extended = struct {
+    m: ?struct {} = .{},
+    v: ?[]const u8 = "Tozi 0.1",
+    reqq: ?usize = null,
+
+    const MAX_V_LEN = 1024;
+
+    /// deinit is used when parsing `extended` message from other peers
+    pub fn deinit(self: *const Extended, alloc: std.mem.Allocator) void {
+        if (self.v) |v| alloc.free(v);
+    }
+
+    pub fn encode(
+        self: *const Extended,
+        alloc: std.mem.Allocator,
+        writer: *std.Io.Writer,
+    ) !void {
+        var root: std.StringHashMapUnmanaged(Bencode) = .empty;
+        defer root.deinit(alloc);
+
+        if (self.v) |v| {
+            try root.putNoClobber(alloc, "v", .{ .inner = .{ .string = v } });
+        }
+
+        const m: std.StringHashMapUnmanaged(Bencode) = .empty;
+        try root.putNoClobber(alloc, "m", .{ .inner = .{ .dict = m } });
+
+        var rootValue: Bencode = .{ .inner = .{ .dict = root } };
+        try rootValue.encode(writer);
+    }
+
+    pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader) !Extended {
+        var v: Bencode = try .decode(alloc, reader, 0);
+        defer v.deinit(alloc);
+
+        var extended = Extended{ .m = null, .v = null };
+
+        const dict = switch (v.inner) {
+            .dict => |d| d,
+            else => return error.InvalidExtendBencode,
+        };
+
+        if (dict.get("reqq")) |reqq| switch (reqq.inner) {
+            .int => |int| if (int > 0) {
+                extended.reqq = @intCast(int);
+            },
+            else => {},
+        };
+
+        if (dict.get("v")) |version| blk: switch (version.inner) {
+            .string => |string| if (string.len < MAX_V_LEN) {
+                extended.v = alloc.dupe(u8, string) catch break :blk;
+            },
+            else => {},
+        };
+
+        return extended;
+    }
+};
