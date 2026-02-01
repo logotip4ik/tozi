@@ -98,7 +98,7 @@ pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     }
 }
 
-pub fn peekInt(p: *Peer, alloc: std.mem.Allocator, comptime T: type, offset: usize) !?T {
+pub inline fn peekInt(p: *Peer, alloc: std.mem.Allocator, comptime T: type, offset: usize) !?T {
     const n = @divExact(@typeInfo(T).int.bits, 8);
 
     try p.fillReadBuffer(alloc, n + offset) orelse return null;

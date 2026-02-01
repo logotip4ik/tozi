@@ -195,6 +195,8 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
 pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |urls| {
         for (urls.items, 0..) |url, i| {
+            if (!std.mem.startsWith(u8, url, "http://")) continue;
+
             self.sendEvent(alloc, .stopped, url, null) catch |err| {
                 std.log.warn("failed announcing to {s} with {t}", .{ url, err });
                 continue;
@@ -220,6 +222,8 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
 
     for (self.tiers.items) |urls| {
         for (urls.items, 0..) |url, i| {
+            if (!std.mem.startsWith(u8, url, "http://")) continue;
+
             const interval = self.announce(alloc, url) catch |err| {
                 std.log.warn("failed announcing to {s} with {t}", .{ url, err });
                 continue;
