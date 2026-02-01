@@ -9,12 +9,21 @@ infoHash: [20]u8,
 peerId: [20]u8,
 
 const Reserved = packed struct(u64) {
-    _: u56 = 0,
+    _: u40 = 0,
+
+    // byte 5
+    _pad_b5: u4 = 0,
+    extension: bool = false, // 0x10 (Bit 4): BEP 10
+    _pad_b5_high: u3 = 0,
+
+    // byte 6
+    _pad_b6: u8 = 0,
+
     // byte 7
-    dht: bool = false, // 0x01: BEP 5
-    extensionProtocol: bool = false, // 0x02: BEP 10
-    fast: bool = false, // 0x04: BEP 6
-    __: u5 = 0,
+    dht: bool = false, // 0x01 (Bit 0): BEP 5
+    _azureus: bool = false, // 0x02 (Bit 1): BEP 9
+    fast: bool = false, // 0x04 (Bit 2): BEP 6
+    _pad_b7: u5 = 0,
 };
 
 pub const Extensions = packed struct {
@@ -36,8 +45,8 @@ pub fn asBytes(self: Handshake) [HANDSHAKE_LEN]u8 {
     writer.writeByte(19) catch unreachable;
     writer.writeAll("BitTorrent protocol") catch unreachable;
 
-    const reserved = std.mem.asBytes(&self.reserved);
-    writer.writeAll(reserved) catch unreachable;
+    const reserved: u64 = @bitCast(self.reserved);
+    writer.writeInt(u64, reserved, .little) catch unreachable;
 
     writer.writeAll(&self.infoHash) catch unreachable;
     writer.writeAll(&self.peerId) catch unreachable;
@@ -74,4 +83,19 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Extens
     return Extensions{
         .fast = self.reserved.fast and reserved.fast,
     };
+}
+
+test "reserved byte positions" {
+    const res = Reserved{
+        .extension = true,
+        .dht = true,
+        .fast = true,
+    };
+
+    const bytes = @as([8]u8, @bitCast(res));
+
+    // BEP 10: reserved[5] & 0x10
+    try std.testing.expectEqual(@as(u8, 0x10), bytes[5]);
+    // BEP 5 & 6: reserved[7] & 0x01 and 0x04
+    try std.testing.expectEqual(@as(u8, 0x05), bytes[7]);
 }
