@@ -390,15 +390,21 @@ pub fn downloadTorrent(
 
                         peer.state = .messageStart;
 
-                        var reader: std.Io.Reader = .fixed(bytes);
-                        const e = Handshake.Extended.decode(alloc, &reader) catch {
-                            continue; // `while` read loop
-                        };
-                        peer.extended = e;
+                        switch (extended.id) {
+                            // 0 - reserved as `handshake`
+                            0 => {
+                                var reader: std.Io.Reader = .fixed(bytes);
+                                const e = Handshake.Extended.decode(alloc, &reader) catch {
+                                    continue; // `while` read loop
+                                };
+                                peer.extended = e;
 
-                        std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket, e.v, e.reqq });
+                                std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket, e.v, e.reqq });
 
-                        if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
+                                if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
+                            },
+                            else => {},
+                        }
                     },
                     .choke => {
                         peer.choked = true;

@@ -29,3 +29,13 @@ zig build
 - there is no `seeding` capability, because almost nobody would have a server that is available to the public web. This means nobody can connect to you (unless you messed with your network setup, which I didn't do).
 - there is no linux support, because I didn't write `epoll` wrapper and I didn't use pre-built libraries
 - file read/writes are "blocking". I think i will change this with zig `0.16.0`. But to be honest, I didn't find it to be a bottleneck, because usually the network is saturated first.
+
+
+## Support
+
+- BEP-003: Core protocol (I'm not entierly sure this is 100% compliant, but it still downloads torrents)
+- BEP-006: Fast extension
+- BEP-010: Extension Protocol
+- BEP-012: Multiple trackers
+- BEP-020: Peer ID Conventions
+- BEP-023: Tracker Returns Compact Peer Lists
