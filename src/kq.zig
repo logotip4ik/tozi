@@ -86,7 +86,7 @@ pub fn delete(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
         }
     }
 
-    self.changeList.append(self.alloc, KEvent{
+    try self.changeList.append(self.alloc, KEvent{
         .ident = @intCast(ident),
         .filter = @intCast(filter),
         .flags = std.c.EV.DELETE,

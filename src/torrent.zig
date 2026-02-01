@@ -91,6 +91,8 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         }
     } else if (dict.get("announce")) |v| {
         var announces = try tiers.addOne(alloc);
+        announces.* = .empty;
+
         try announces.append(alloc, v.inner.string);
     } else {
         return error.NoAnnounceUrls;
@@ -178,7 +180,7 @@ test "parseTorrent - single file" {
     defer torrent.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(1, torrent.files.items.len);
-    try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.announceList[0]);
+    try std.testing.expectEqualStrings("http://localhost:9000/announce", torrent.tiers.items[0].items[0]);
 }
 
 test "parseTorrent - info hash for simple torrent" {

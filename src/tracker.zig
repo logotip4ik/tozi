@@ -94,12 +94,12 @@ fn getHttp(self: *Self, alloc: std.mem.Allocator) !std.http.Client {
     };
 }
 
-pub fn sendAnnounce(
+pub fn sendEvent(
     self: *Self,
     alloc: std.mem.Allocator,
+    event: ?enum { started, stopped, completed },
     url: []const u8,
     responseWriter: ?*std.Io.Writer,
-    event: ?enum { started, stopped, completed },
 ) !void {
     var http = try self.getHttp(alloc);
 
@@ -141,7 +141,7 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     var stream: std.Io.Writer.Allocating = .init(alloc);
     defer stream.deinit();
 
-    try self.sendAnnounce(alloc, url, &stream.writer, .started);
+    try self.sendEvent(alloc, .started, url, &stream.writer);
 
     var reader: std.Io.Reader = .fixed(stream.written());
 
@@ -192,35 +192,10 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     return interval.inner.int;
 }
 
-pub fn initializeSource(self: *Self, alloc: std.mem.Allocator) !?Source {
-    while (self.sources.items.len > 0) {
-        const source = self.sources.pop() orelse unreachable;
-
-        const interval = self.announce(alloc, source) catch |err| {
-            @branchHint(.unlikely);
-
-            std.log.warn("failed announcing to {s} with {t}", .{ source, err });
-            alloc.free(source);
-
-            continue;
-        };
-
-        const intervalInMs = interval * std.time.ms_per_s;
-        const now: usize = @intCast(std.time.milliTimestamp());
-
-        return .{
-            .interval = intervalInMs,
-            .checkinAt = now + intervalInMs,
-        };
-    }
-
-    return null;
-}
-
 pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |urls| {
         for (urls.items, 0..) |url, i| {
-            self.sendAnnounce(alloc, url, null, .stopped) catch |err| {
+            self.sendEvent(alloc, .stopped, url, null) catch |err| {
                 std.log.warn("failed announcing to {s} with {t}", .{ url, err });
                 continue;
             };

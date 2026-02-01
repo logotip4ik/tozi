@@ -456,14 +456,14 @@ pub fn downloadTorrent(
                         if (alreadyInList) continue;
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
 
-                        std.log.debug("peer: {d} received allowed fast for {d}", .{peer.socket, allowedFast});
+                        std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket, allowedFast });
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                         if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     },
                     .suggestPiece => |index| {
                         peer.state = .messageStart;
-                        std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{peer.socket, index});
+                        std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{ peer.socket, index });
                     },
                     .rejectRequest => |piece| {
                         peer.state = .messageStart;
