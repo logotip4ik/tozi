@@ -556,8 +556,8 @@ pub fn downloadTorrent(
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
-                        const completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
-                        defer completed.deinit(alloc);
+                        var completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
+                        defer pieces.consumePieceBuf(alloc, &completed);
 
                         const expectedHash = torrent.pieces[piece.index * 20 ..][0..20];
                         pieces.validatePiece(completed.bytes, expectedHash) catch {

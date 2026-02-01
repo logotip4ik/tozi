@@ -14,6 +14,8 @@ completedCount: usize,
 
 buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
 
+buffersPool: std.array_list.Aligned(PieceBuf, null),
+
 const Self = @This();
 
 const State = enum(u2) {
@@ -46,15 +48,24 @@ pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
     const numberOfPieces = pieces.len / 20;
 
     const arr = try alloc.alloc(State, numberOfPieces);
+    errdefer alloc.free(arr);
+
     for (arr) |*piece| piece.* = .missing;
 
-    return .{ .pieces = arr, .missingCount = numberOfPieces, .completedCount = 0 };
+    return .{
+        .pieces = arr,
+        .missingCount = numberOfPieces,
+        .completedCount = 0,
+        .buffersPool = try .initCapacity(alloc, 64), // 64 stale piece buffers, should be plenty right ?
+    };
 }
 
 pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !Self {
     const numberOfPieces = bitset.bit_length;
 
     const arr = try alloc.alloc(State, numberOfPieces);
+    errdefer alloc.free(arr);
+
     var missingCount: usize = 0;
     var completedCount: usize = 0;
 
@@ -68,7 +79,12 @@ pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnm
         }
     }
 
-    return .{ .pieces = arr, .missingCount = missingCount, .completedCount = completedCount };
+    return .{
+        .pieces = arr,
+        .missingCount = missingCount,
+        .completedCount = completedCount,
+        .buffersPool = try .initCapacity(alloc, 64), // 64 stale piece buffers, should be plenty right ?
+    };
 }
 
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
@@ -80,6 +96,9 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     }
 
     self.buffers.deinit(alloc);
+
+    for (self.buffersPool.items) |buf| buf.deinit(alloc);
+    self.buffersPool.deinit(alloc);
 }
 
 pub fn validatePiece(
@@ -133,7 +152,7 @@ pub fn getPieceBuf(
     const res = try self.buffers.getOrPut(alloc, index);
 
     if (!res.found_existing) {
-        res.value_ptr.* = .{
+        res.value_ptr.* = self.buffersPool.pop() orelse .{
             .bytes = try alloc.alloc(u8, len),
             .received = .initEmpty(),
             .fetched = 0,
@@ -141,6 +160,13 @@ pub fn getPieceBuf(
     }
 
     return res.value_ptr;
+}
+
+pub fn consumePieceBuf(self: *Self, alloc: std.mem.Allocator, piece: *PieceBuf) void {
+    piece.fetched = 0;
+    piece.received = .initEmpty();
+
+    self.buffersPool.appendBounded(piece.*) catch piece.deinit(alloc);
 }
 
 pub fn isEndgame(self: *const Self) bool {
