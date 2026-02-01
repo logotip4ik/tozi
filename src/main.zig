@@ -72,8 +72,19 @@ pub fn main() !void {
     const isverify = std.mem.eql(u8, command, "verify");
 
     var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue") or isverify) blk: {
+        var start = std.time.Timer.start() catch unreachable;
+
         var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
         defer bitset.deinit(alloc);
+
+        const duration = @as(f64, @floatFromInt(start.read())) / std.time.ns_per_s;
+        const mb = @as(f64, @floatFromInt(files.totalSize)) / (1024.0 * 1024.0);
+
+        std.log.info("verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)", .{
+            mb,
+            duration,
+            mb / duration,
+        });
 
         if (bitset.findLastSet()) |last| if (last == bitset.bit_length - 1) {
             std.log.info("whole torrent is downloaded.", .{});

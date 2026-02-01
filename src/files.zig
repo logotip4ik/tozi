@@ -190,8 +190,6 @@ pub fn collectPieces(
     var sreader: SReader = try .init(alloc, torrentPieceLen);
     defer sreader.deinit(alloc);
 
-    var t = std.time.Timer.start() catch unreachable;
-
     var i: usize = 0;
     while (i < numberOfPieces) : (i += 1) {
         const remainingTotal = self.totalSize - (i * torrentPieceLen);
@@ -208,15 +206,6 @@ pub fn collectPieces(
             bitset.set(i);
         }
     }
-
-    const duration = @as(f64, @floatFromInt(t.read())) / std.time.ns_per_s;
-    const mb = @as(f64, @floatFromInt(self.totalSize)) / (1024.0 * 1024.0);
-
-    std.log.info("verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)", .{
-        mb,
-        duration,
-        mb / duration,
-    });
 
     return bitset;
 }
