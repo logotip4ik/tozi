@@ -1,105 +1,38 @@
 const std = @import("std");
 
-pub const Value = struct {
-    inner: union(enum) {
-        int: usize,
-        string: []const u8,
-        list: std.array_list.Aligned(Value, null),
-        dict: std.StringHashMapUnmanaged(Value),
-    },
-    start: usize,
-    len: usize,
+const Value = @This();
 
-    pub fn dumpWithOptions(self: Value, writer: *std.Io.Writer, indent: u8) void {
-        switch (self.inner) {
-            .int => |int| {
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-                writer.print("{d}\n", .{int}) catch unreachable;
-            },
-            .string => |string| {
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-
-                if (string.len == 0) {
-                    writer.print("<empty string>\n", .{}) catch unreachable;
-                } else if (std.unicode.utf8ValidateSlice(string)) {
-                    writer.print("{s}\n", .{string}) catch unreachable;
-                } else {
-                    writer.print("<{d} bytes>\n", .{string.len}) catch unreachable;
-                }
-            },
-            .list => |list| {
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-                _ = writer.write("[\n") catch unreachable;
-
-                for (list.items) |item| {
-                    item.dumpWithOptions(writer, indent + 2);
-                }
-
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-                _ = writer.write("]\n") catch unreachable;
-            },
-            .dict => |dict| {
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-                _ = writer.write("{\n") catch unreachable;
-
-                var iter = dict.iterator();
-                while (iter.next()) |entry| {
-                    for (0..indent + 2) |_| writer.writeByte(' ') catch unreachable;
-                    writer.print("{s}\n", .{entry.key_ptr.*}) catch unreachable;
-                    entry.value_ptr.dumpWithOptions(writer, indent + 4);
-                }
-
-                for (0..indent) |_| writer.writeByte(' ') catch unreachable;
-                _ = writer.write("}\n") catch unreachable;
-            },
-        }
-    }
-
-    pub fn dump(self: Value) void {
-        var buf: [512]u8 = undefined;
-        const out = std.Progress.lockStderrWriter(&buf);
-        defer out.flush() catch {};
-
-        out.print("======= VALUE DUMP =======\n", .{}) catch unreachable;
-
-        self.dumpWithOptions(out, 0);
-    }
-
-    pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
-        switch (self.inner) {
-            .int => {},
-            .string => |string| alloc.free(string),
-            .list => |*list| {
-                for (list.items) |*item| item.deinit(alloc);
-                list.deinit(alloc);
-            },
-            .dict => |*dict| {
-                var iter = dict.iterator();
-                while (iter.next()) |*entry| {
-                    alloc.free(entry.key_ptr.*);
-                    entry.value_ptr.deinit(alloc);
-                }
-                dict.deinit(alloc);
-            },
-        }
-    }
+const Inner = union(enum) {
+    int: isize,
+    string: []const u8,
+    list: std.array_list.Aligned(Value, null),
+    dict: std.StringHashMapUnmanaged(Value),
 };
 
-fn parseString(alloc: std.mem.Allocator, reader: *std.Io.Reader) !struct { []const u8, usize } {
-    const keyLengthString = try reader.takeDelimiter(':') orelse {
-        std.log.err("expected key length to be present", .{});
-        return error.MissingColon;
-    };
+inner: Inner,
+start: usize,
+len: usize,
 
-    const keyLength = try std.fmt.parseUnsigned(usize, keyLengthString, 10);
-
-    const key = try reader.readAlloc(alloc, keyLength);
-    const len = keyLengthString.len + 1 + keyLength;
-
-    return .{ key, len };
+pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
+    switch (self.inner) {
+        .int => {},
+        .string => |string| alloc.free(string),
+        .list => |*list| {
+            for (list.items) |*item| item.deinit(alloc);
+            list.deinit(alloc);
+        },
+        .dict => |*dict| {
+            var iter = dict.iterator();
+            while (iter.next()) |*entry| {
+                alloc.free(entry.key_ptr.*);
+                entry.value_ptr.deinit(alloc);
+            }
+            dict.deinit(alloc);
+        },
+    }
 }
 
-pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize) !Value {
+pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize) !Value {
     const byte = try reader.peekByte();
 
     switch (byte) {
@@ -130,7 +63,7 @@ pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize
 
                 len += keyLen;
 
-                var value = try parseValue(alloc, reader, len);
+                var value = try Value.decode(alloc, reader, len);
                 errdefer value.deinit(alloc);
 
                 len += value.len;
@@ -166,7 +99,7 @@ pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize
                     break;
                 }
 
-                var value = try parseValue(alloc, reader, len);
+                var value = try Value.decode(alloc, reader, len);
                 errdefer value.deinit(alloc);
 
                 try ret.append(alloc, value);
@@ -197,7 +130,7 @@ pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize
 
             const numString = try reader.takeDelimiter('e') orelse return error.MissingNumEndMark;
 
-            const int = try std.fmt.parseInt(usize, numString, 10);
+            const int = try std.fmt.parseInt(isize, numString, 10);
             const len = 1 + numString.len + 1;
 
             return Value{
@@ -208,6 +141,7 @@ pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize
         },
 
         else => {
+            @branchHint(.unlikely);
             std.debug.print("unrecognized bencode: {s}", .{
                 reader.peek(20) catch reader.buffered(),
             });
@@ -216,15 +150,112 @@ pub fn parseValue(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize
     }
 }
 
+pub fn encode(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (self.inner) {
+        .int => |int| try writer.print("i{d}e", .{int}),
+        .string => |string| try writer.print("{d}:{s}", .{ string.len, string }),
+        .list => |list| {
+            try writer.writeByte('l');
+
+            for (list.items) |v| {
+                try v.encode(writer);
+            }
+
+            try writer.writeByte('e');
+        },
+        .dict => |dict| {
+            try writer.writeByte('d');
+
+            var iter = dict.iterator();
+            while (iter.next()) |entry| {
+                try writer.print("{d}:{s}", .{ entry.key_ptr.len, entry.key_ptr.* });
+                try entry.value_ptr.encode(writer);
+            }
+
+            try writer.writeByte('e');
+        },
+    }
+}
+
+pub fn dumpWithOptions(self: Value, writer: *std.Io.Writer, indent: u8) void {
+    switch (self.inner) {
+        .int => |int| {
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+            writer.print("{d}\n", .{int}) catch unreachable;
+        },
+        .string => |string| {
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+
+            if (string.len == 0) {
+                writer.print("<empty string>\n", .{}) catch unreachable;
+            } else if (std.unicode.utf8ValidateSlice(string)) {
+                writer.print("{s}\n", .{string}) catch unreachable;
+            } else {
+                writer.print("<{d} bytes>\n", .{string.len}) catch unreachable;
+            }
+        },
+        .list => |list| {
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+            _ = writer.write("[\n") catch unreachable;
+
+            for (list.items) |item| {
+                item.dumpWithOptions(writer, indent + 2);
+            }
+
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+            _ = writer.write("]\n") catch unreachable;
+        },
+        .dict => |dict| {
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+            _ = writer.write("{\n") catch unreachable;
+
+            var iter = dict.iterator();
+            while (iter.next()) |entry| {
+                for (0..indent + 2) |_| writer.writeByte(' ') catch unreachable;
+                writer.print("{s}\n", .{entry.key_ptr.*}) catch unreachable;
+                entry.value_ptr.dumpWithOptions(writer, indent + 4);
+            }
+
+            for (0..indent) |_| writer.writeByte(' ') catch unreachable;
+            _ = writer.write("}\n") catch unreachable;
+        },
+    }
+}
+
+pub fn dump(self: Value) void {
+    var buf: [512]u8 = undefined;
+    const out = std.Progress.lockStderrWriter(&buf);
+    defer out.flush() catch {};
+
+    out.print("======= VALUE DUMP =======\n", .{}) catch unreachable;
+
+    self.dumpWithOptions(out, 0);
+}
+
+
+fn parseString(alloc: std.mem.Allocator, reader: *std.Io.Reader) !struct { []const u8, usize } {
+    const keyLengthString = try reader.takeDelimiter(':') orelse {
+        std.log.err("expected key length to be present", .{});
+        return error.MissingColon;
+    };
+
+    const keyLength = try std.fmt.parseUnsigned(usize, keyLengthString, 10);
+
+    const key = try reader.readAlloc(alloc, keyLength);
+    const len = keyLengthString.len + 1 + keyLength;
+
+    return .{ key, len };
+}
+
 test "parseValue string" {
     var reader: std.Io.Reader = .fixed(
         \\8:announce
     );
 
-    var value = try parseValue(std.testing.allocator, &reader, 0);
-    defer value.deinit(std.testing.allocator);
+    var v: Value = try .decode(std.testing.allocator, &reader, 0);
+    defer v.deinit(std.testing.allocator);
 
-    switch (value.inner) {
+    switch (v.inner) {
         .string => |string| try std.testing.expectEqualStrings("announce", string),
         else => try std.testing.expect(false),
     }
@@ -235,10 +266,10 @@ test "parseValue digit" {
         \\i32e
     );
 
-    var value = try parseValue(std.testing.allocator, &reader, 0);
-    defer value.deinit(std.testing.allocator);
+    var v: Value = try .decode(std.testing.allocator, &reader, 0);
+    defer v.deinit(std.testing.allocator);
 
-    switch (value.inner) {
+    switch (v.inner) {
         .int => |int| try std.testing.expectEqual(32, int),
         else => try std.testing.expect(false),
     }
@@ -249,10 +280,10 @@ test "parseValue list" {
         \\l4:http4:http4:httpe
     );
 
-    var value = try parseValue(std.testing.allocator, &reader, 0);
-    defer value.deinit(std.testing.allocator);
+    var v: Value = try .decode(std.testing.allocator, &reader, 0);
+    defer v.deinit(std.testing.allocator);
 
-    switch (value.inner) {
+    switch (v.inner) {
         .list => |list| {
             try std.testing.expectEqual(3, list.items.len);
             try std.testing.expectEqualStrings("http", list.items[0].inner.string);
@@ -268,15 +299,15 @@ test "parseValue dict" {
         \\d4:httpl4:httpee
     );
 
-    var value = try parseValue(std.testing.allocator, &reader, 0);
-    defer value.deinit(std.testing.allocator);
+    var v: Value = try .decode(std.testing.allocator, &reader, 0);
+    defer v.deinit(std.testing.allocator);
 
-    switch (value.inner) {
+    switch (v.inner) {
         .dict => |dict| {
             try std.testing.expectEqual(1, dict.size);
 
-            const v = dict.get("http") orelse unreachable;
-            switch (v.inner) {
+            const dv = dict.get("http") orelse unreachable;
+            switch (dv.inner) {
                 .list => |l| {
                     try std.testing.expectEqual(1, l.items.len);
                     try std.testing.expectEqualStrings("http", l.items[0].inner.string);
@@ -288,3 +319,89 @@ test "parseValue dict" {
     }
 }
 
+test "value int encode" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    {
+        defer writer.clearRetainingCapacity();
+        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = 42 } };
+        try v.encode(&writer.writer);
+        try std.testing.expectEqualStrings("i42e", writer.written());
+    }
+
+    {
+        defer writer.clearRetainingCapacity();
+        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = -42 } };
+        try v.encode(&writer.writer);
+        try std.testing.expectEqualStrings("i-42e", writer.written());
+    }
+
+    {
+        defer writer.clearRetainingCapacity();
+        const v = Value{ .start = 0, .len = 0, .inner = .{ .int = 0 } };
+        try v.encode(&writer.writer);
+        try std.testing.expectEqualStrings("i0e", writer.written());
+    }
+}
+
+test "value string encode" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const v = Value{ .start = 0, .len = 0, .inner = .{ .string = "spam" } };
+    try v.encode(&writer.writer);
+    try std.testing.expectEqualStrings("4:spam", writer.written());
+}
+
+test "value list encode" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var list = [_]Value{
+        Value{ .len = 0, .start = 0, .inner = .{ .string = "spam" } },
+        Value{ .len = 0, .start = 0, .inner = .{ .int = 42 } },
+    };
+
+    const v = Value{ .start = 0, .len = 0, .inner = .{ .list = .fromOwnedSlice(&list) } };
+    try v.encode(&writer.writer);
+    try std.testing.expectEqualStrings("l4:spami42ee", writer.written());
+}
+
+test "value dict encode" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var map: std.StringHashMapUnmanaged(Value) = .empty;
+    defer map.deinit(std.testing.allocator);
+
+    try map.ensureTotalCapacity(std.testing.allocator, 2);
+
+    {
+        defer writer.clearRetainingCapacity();
+        defer map.clearRetainingCapacity();
+
+        map.putAssumeCapacityNoClobber("cow", .{ .len = 0, .start = 0, .inner = .{ .string = "moo" } });
+        map.putAssumeCapacityNoClobber("spam", .{ .len = 0, .start = 0, .inner = .{ .string = "eggs" } });
+
+        const v = Value{ .inner = .{ .dict = map }, .len = 0, .start = 0 };
+        try v.encode(&writer.writer);
+        try std.testing.expectEqualStrings("d3:cow3:moo4:spam4:eggse", writer.written());
+    }
+
+    {
+        defer writer.clearRetainingCapacity();
+        defer map.clearRetainingCapacity();
+
+        var list = [_]Value{
+            Value{ .inner = .{ .string = "a" }, .len = 0, .start = 0 },
+            Value{ .inner = .{ .string = "b" }, .len = 0, .start = 0 },
+        };
+
+        map.putAssumeCapacityNoClobber("spam", .{ .len = 0, .start = 0, .inner = .{ .list = .fromOwnedSlice(&list) } });
+
+        const v = Value{ .inner = .{ .dict = map }, .len = 0, .start = 0 };
+        try v.encode(&writer.writer);
+        try std.testing.expectEqualStrings("d4:spaml1:a1:bee", writer.written());
+    }
+}

@@ -1,5 +1,5 @@
 const std = @import("std");
-const bencode = @import("bencode.zig");
+const Bencode = @import("bencode.zig");
 
 pub const File = struct {
     /// should include `dirname` from torrent if there was one
@@ -15,7 +15,7 @@ pub const BLOCK_SIZE = 1024 * 16;
 pub const Announces = std.array_list.Aligned([]const u8, null);
 pub const Tiers = std.array_list.Aligned(Announces, null);
 
-value: bencode.Value,
+value: Bencode,
 
 files: Files,
 pieces: []const u8,
@@ -45,7 +45,7 @@ pub fn getPieceSize(self: Torrent, index: usize) u32 {
     return @intCast(@min(@as(u64, self.pieceLen), remaining));
 }
 
-pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {
+pub fn computeInfoHash(info: Bencode, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {
     _ = try reader.discardShort(info.start);
 
     var hash: std.crypto.hash.Sha1 = .init(.{});
@@ -69,7 +69,7 @@ pub fn computeInfoHash(info: bencode.Value, reader: *std.Io.Reader) ![std.crypto
 pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
     var reader: std.Io.Reader = .fixed(slice);
 
-    var value = try bencode.parseValue(alloc, &reader, 0);
+    var value: Bencode = try .decode(alloc, &reader, 0);
     errdefer value.deinit(alloc);
 
     const dict = value.inner.dict;
@@ -116,7 +116,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
             const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
             const len = file.inner.dict.get("length") orelse return error.NoFileLength;
 
-            totalLen += len.inner.int;
+            totalLen += @max(0, len.inner.int);
 
             const path = try alloc.alloc([]const u8, chunks.inner.list.items.len + 1);
 
@@ -127,21 +127,21 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
             try files.append(alloc, .{
                 .path = path,
-                .len = len.inner.int,
+                .len = @max(0, len.inner.int),
             });
         }
     } else {
         const filename = info.inner.dict.get("name") orelse return error.NoFileName;
         const len = info.inner.dict.get("length") orelse return error.NoFileLength;
 
-        totalLen += len.inner.int;
+        totalLen += @max(0, len.inner.int);
 
         const path = try alloc.alloc([]const u8, 1);
         path[0] = filename.inner.string;
 
         try files.append(alloc, .{
             .path = path,
-            .len = len.inner.int,
+            .len = @max(0, len.inner.int),
         });
     }
 

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
-const bencode = @import("bencode.zig");
+const Bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
 
 const Self = @This();
@@ -145,7 +145,7 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
 
     var reader: std.Io.Reader = .fixed(stream.written());
 
-    var value = try bencode.parseValue(alloc, &reader, 0);
+    var value: Bencode = try .decode(alloc, &reader, 0);
     defer value.deinit(alloc);
 
     if (value.inner.dict.get("failure reason")) |failureReason| {
@@ -157,7 +157,7 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     const peers = value.inner.dict.get("peers") orelse return error.MissinPeers;
 
     if (peers.inner.string.len < 6) {
-        return interval.inner.int;
+        return @max(0, interval.inner.int);
     }
 
     var window = std.mem.window(u8, peers.inner.string, 6, 6);
@@ -189,7 +189,7 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
     try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
 
-    return interval.inner.int;
+    return @max(0, interval.inner.int);
 }
 
 pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
