@@ -557,18 +557,19 @@ pub fn downloadTorrent(
 
                         const pieceLen = torrent.getPieceSize(piece.index);
                         var completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
+
                         defer pieces.consumePieceBuf(alloc, &completed);
+                        defer if (peer.workingOn) |*x| x.unset(piece.index);
 
                         const expectedHash = torrent.pieces[piece.index * 20 ..][0..20];
-                        pieces.validatePiece(completed.bytes, expectedHash) catch {
+                        pieces.validatePiece(completed.written(), expectedHash) catch {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
                             pieces.reset(piece.index);
                             continue;
                         };
 
-                        try files.writePieceData(piece.index, torrent.pieceLen, completed.bytes);
-                        peer.workingOn.?.unset(piece.index);
+                        try files.writePieceData(piece.index, torrent.pieceLen, completed.written());
 
                         if (pieces.isDownloadComplete()) {
                             @branchHint(.cold);

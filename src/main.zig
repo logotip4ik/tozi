@@ -39,7 +39,7 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     if (args.len < 3) {
-        std.log.err("provide command to run `download`, `continue` or `info` + path to torrent file", .{});
+        std.log.err("provide command to run `download`, `continue`, `verify` or `info` + path to torrent file", .{});
         return;
     }
 
@@ -77,13 +77,14 @@ pub fn main() !void {
         var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
         defer bitset.deinit(alloc);
 
-        const duration = @as(f64, @floatFromInt(start.read())) / std.time.ns_per_s;
+        const duration = start.read();
+        const durationInS = @as(f64, @floatFromInt(start.read())) / std.time.ns_per_s;
         const mb = @as(f64, @floatFromInt(files.totalSize)) / (1024.0 * 1024.0);
 
-        std.log.info("verified {d:.2} MB in {d:.2}s ({d:.2} MB/s)", .{
+        std.log.info("verified {d:.2} MB in {D} ({d:.2} MB/s)", .{
             mb,
             duration,
-            mb / duration,
+            mb / durationInS,
         });
 
         if (bitset.findLastSet()) |last| if (last == bitset.bit_length - 1) {
@@ -96,17 +97,9 @@ pub fn main() !void {
 
     if (isverify) return;
 
-    const downloadStart = std.time.milliTimestamp();
+    var start = std.time.Timer.start() catch unreachable;
 
     try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);
 
-    const delta: usize = @intCast(std.time.milliTimestamp() - downloadStart);
-    const minutes = @as(f64, @floatFromInt(delta)) / std.time.ms_per_min;
-
-    if (minutes < 60) {
-        std.log.info("downloaded in: {d:.2} minutes", .{minutes});
-    } else {
-        const hours = minutes / 60;
-        std.log.info("downloaded in: {d:.2} hours", .{hours});
-    }
+    std.log.info("downloaded in: {D}", .{start.read()});
 }

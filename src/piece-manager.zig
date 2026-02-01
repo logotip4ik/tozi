@@ -29,7 +29,13 @@ const PieceBuf = struct {
     received: std.bit_set.ArrayBitSet(usize, 2048),
     fetched: u32,
 
-    pub fn hasBlock(self: PieceBuf, begin: u32) bool {
+    /// last piece is almost always smaller than rest, this means if we use `bytes` directly to
+    /// write or verify piece, nothing will work. This function will return only what was downloaded
+    pub fn written(self: *const PieceBuf) []u8 {
+        return self.bytes[0..self.fetched];
+    }
+
+    pub fn hasBlock(self: *const PieceBuf, begin: u32) bool {
         const chunkIdx = begin / Torrent.BLOCK_SIZE;
         return self.received.isSet(chunkIdx);
     }
@@ -39,7 +45,7 @@ const PieceBuf = struct {
         self.received.set(chunkIdx);
     }
 
-    pub fn deinit(self: PieceBuf, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *const PieceBuf, alloc: std.mem.Allocator) void {
         alloc.free(self.bytes);
     }
 };
