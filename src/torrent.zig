@@ -22,6 +22,7 @@ pieces: []const u8,
 pieceLen: u32,
 infoHash: [std.crypto.hash.Sha1.digest_length]u8,
 totalLen: usize,
+private: bool,
 
 tiers: std.array_list.Aligned(Announces, null),
 
@@ -150,6 +151,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
 
     const pieces = info.inner.dict.get("pieces") orelse return error.NoPiencesField;
     const pieceLen = info.inner.dict.get("piece length") orelse return error.NoPieceLenField;
+    const private = if (info.inner.dict.get("private")) |p| p.inner.int == 1 else false;
 
     return Torrent{
         .value = value,
@@ -161,6 +163,7 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         .pieceLen = @intCast(pieceLen.inner.int),
         .infoHash = infoHash,
         .totalLen = totalLen,
+        .private = private,
     };
 }
 
