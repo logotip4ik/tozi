@@ -15,6 +15,10 @@ const utils = @import("utils.zig");
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
 
+/// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
+/// requests doesn't track when the request was done, so we don't have a way to check if this chunk
+/// is "stale" and all our download could be broken by one chunk that is "lost"...
+
 pub fn downloadTorrent(
     alloc: std.mem.Allocator,
     peerId: [20]u8,
@@ -646,15 +650,9 @@ pub fn downloadTorrent(
 
             for (peers.items, 0..) |item, i| {
                 if (item == peer) {
-                    _ = peers.swapRemove(i);
+                    alloc.destroy(peers.swapRemove(i));
                     break;
                 }
-            }
-
-            alloc.destroy(peer);
-
-            if (peers.items.len < 10) {
-                kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false }) catch {};
             }
         }
     }
