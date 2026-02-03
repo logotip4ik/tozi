@@ -255,3 +255,85 @@ test "appendQuery" {
 
     try std.testing.expectEqualStrings("testing&port=456&compact=1", query3.items);
 }
+
+pub fn TaggedPointer(comptime Union: type) type {
+    const unionFields = switch (@typeInfo(Union)) {
+        .@"union" => |x| x.fields,
+        else => @compileError("TaggedPointer requires a union type"),
+    };
+
+    // Calculate how many bits we need to store the "tag" (the enum index)
+    // 2 fields = 1 bit, 4 fields = 2 bits, 8 fields = 3 bits, etc.
+    const tagBits = std.math.log2_int_ceil(usize, unionFields.len);
+    const requiredAlignment = @as(usize, 1) << tagBits;
+
+    const tagMask = requiredAlignment - 1;
+    const ptrMask = ~tagMask;
+
+    for (unionFields) |field| {
+        if (@typeInfo(field.type) == .pointer) {
+            if (@typeInfo(field.type).pointer.alignment < requiredAlignment) {
+                @compileError("Field '" ++ field.name ++ "' does not have enough alignment for this TaggedPointer.");
+            }
+        }
+    }
+
+    const EnumFromU = std.meta.Tag(Union);
+
+    return struct {
+        pub fn pack(value: Union) usize {
+            switch (value) {
+                inline else => |ptr, tag| {
+                    const addr = @intFromPtr(ptr);
+
+                    assert(addr % requiredAlignment == 0);
+
+                    return addr | @intFromEnum(tag);
+                },
+            }
+        }
+
+        pub fn unpack(val: usize) Union {
+            const tagValue = val & tagMask;
+            const ptrValue = val & ptrMask;
+
+            assert(tagValue < unionFields.len);
+
+            const valueType: EnumFromU  = @enumFromInt(tagValue);
+
+            switch (valueType) {
+                inline else => |tag| {
+                    const field = @tagName(tag);
+                    const ptr: @FieldType(Union, field) = @ptrFromInt(ptrValue);
+                    return @unionInit(Union, field, ptr);
+                },
+            }
+        }
+    };
+}
+
+test "TaggedPointer" {
+    const A = struct { int: usize };
+    const B = struct { smaller: u32 };
+
+    const Ptrs = union(enum) { a: *A, b: *B };
+
+    const Tagged = TaggedPointer(Ptrs);
+
+    var a = A{ .int = 64 };
+    const aTagged = Tagged.pack(.{ .a = &a });
+
+    var b = B{ .smaller = 32 };
+    const bTagged = Tagged.pack(.{ .b = &b });
+
+    switch (Tagged.unpack(aTagged)) {
+        .a => |ptr| try std.testing.expectEqualDeep(&a, ptr),
+        else => try std.testing.expect(false),
+    }
+
+    switch (Tagged.unpack(bTagged)) {
+        .b => |ptr| try std.testing.expectEqualDeep(&b, ptr),
+        else => try std.testing.expect(false),
+    }
+
+}
