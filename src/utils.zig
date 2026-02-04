@@ -334,5 +334,4 @@ test "TaggedPointer" {
         .b => |ptr| try std.testing.expectEqualDeep(&b, ptr),
         else => try std.testing.expect(false),
     }
-
 }

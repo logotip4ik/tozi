@@ -1,9 +1,9 @@
 const std = @import("std");
 
+const utils = @import("utils");
 const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
-const utils = @import("utils.zig");
 
 const Tracker = @This();
 

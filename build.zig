@@ -12,12 +12,20 @@ pub fn build(b: *std.Build) void {
         .strip = true,
     });
 
+    const utilsMod = b.addModule("utils", .{
+        .root_source_file = b.path("src/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = true,
+    });
+
     const toziMod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "hasher", .module = hasherMod },
+            .{ .name = "utils", .module = utilsMod },
         },
     });
 
@@ -56,17 +64,12 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const mod_tests = b.addTest(.{
-        .root_module = toziMod,
-    });
+    const run_mod_tests = b.addRunArtifact(b.addTest(.{ .root_module = toziMod }));
 
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    const utils_tests = b.addRunArtifact(b.addTest(.{ .root_module = utilsMod }));
+    run_mod_tests.step.dependOn(&utils_tests.step);
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_exe_tests = b.addRunArtifact(b.addTest(.{ .root_module = exe.root_module }));
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);

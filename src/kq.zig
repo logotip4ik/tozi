@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils.zig");
+const utils = @import("utils");
 
 alloc: std.mem.Allocator,
 

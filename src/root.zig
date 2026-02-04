@@ -9,8 +9,8 @@ pub const Peer = @import("peer.zig");
 pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
 
+const utils = @import("utils");
 const proto = @import("proto.zig");
-const utils = @import("utils.zig");
 
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;

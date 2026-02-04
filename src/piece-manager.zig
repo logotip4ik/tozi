@@ -1,9 +1,9 @@
 const std = @import("std");
 const hasher = @import("hasher");
 
-const Torrent = @import("torrent.zig");
+const utils = @import("utils");
 const proto = @import("proto.zig");
-const utils = @import("utils.zig");
+const Torrent = @import("torrent.zig");
 
 pieces: []State,
 
