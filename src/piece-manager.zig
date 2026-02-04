@@ -16,7 +16,7 @@ buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
 
 buffersPool: std.array_list.Aligned(PieceBuf, null),
 
-const Self = @This();
+const PieceManager = @This();
 
 const State = enum(u2) {
     missing,
@@ -24,10 +24,12 @@ const State = enum(u2) {
     have,
 };
 
+const MAX_STALE_BUFFERS_COUNT = 64; // 64 stale piece buffers, should be plenty right ?
+
 const PieceBuf = struct {
-    bytes: []u8,
-    received: std.bit_set.ArrayBitSet(usize, 2048),
     fetched: u32,
+    received: std.bit_set.ArrayBitSet(usize, 2048),
+    bytes: []u8,
 
     /// last piece is almost always smaller than rest, this means if we use `bytes` directly to
     /// write or verify piece, nothing will work. This function will return only what was downloaded
@@ -50,7 +52,7 @@ const PieceBuf = struct {
     }
 };
 
-pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
+pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !PieceManager {
     const numberOfPieces = pieces.len / 20;
 
     const arr = try alloc.alloc(State, numberOfPieces);
@@ -62,11 +64,11 @@ pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !Self {
         .pieces = arr,
         .missingCount = numberOfPieces,
         .completedCount = 0,
-        .buffersPool = try .initCapacity(alloc, 64), // 64 stale piece buffers, should be plenty right ?
+        .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
 
-pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !Self {
+pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !PieceManager {
     const numberOfPieces = bitset.bit_length;
 
     const arr = try alloc.alloc(State, numberOfPieces);
@@ -89,11 +91,11 @@ pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnm
         .pieces = arr,
         .missingCount = missingCount,
         .completedCount = completedCount,
-        .buffersPool = try .initCapacity(alloc, 64), // 64 stale piece buffers, should be plenty right ?
+        .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+pub fn deinit(self: *PieceManager, alloc: std.mem.Allocator) void {
     alloc.free(self.pieces);
 
     var iter = self.buffers.valueIterator();
@@ -108,7 +110,7 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
 }
 
 pub fn validatePiece(
-    _: *Self,
+    _: *PieceManager,
     noalias bytes: []const u8,
     noalias expectedHash: []const u8,
 ) !void {
@@ -121,7 +123,7 @@ pub fn validatePiece(
 }
 
 pub fn writePiece(
-    self: *Self,
+    self: *PieceManager,
     alloc: std.mem.Allocator,
     piece: proto.Piece,
     pieceLen: u32,
@@ -150,7 +152,7 @@ pub fn writePiece(
 }
 
 pub fn getPieceBuf(
-    self: *Self,
+    self: *PieceManager,
     alloc: std.mem.Allocator,
     index: u32,
     len: u32,
@@ -168,18 +170,18 @@ pub fn getPieceBuf(
     return res.value_ptr;
 }
 
-pub fn consumePieceBuf(self: *Self, alloc: std.mem.Allocator, piece: *PieceBuf) void {
+pub fn consumePieceBuf(self: *PieceManager, alloc: std.mem.Allocator, piece: *PieceBuf) void {
     piece.fetched = 0;
     piece.received = .initEmpty();
 
     self.buffersPool.appendBounded(piece.*) catch piece.deinit(alloc);
 }
 
-pub fn isEndgame(self: *const Self) bool {
+pub fn isEndgame(self: *const PieceManager) bool {
     return self.missingCount == 0;
 }
 
-pub fn canFetch(self: *Self, index: usize) bool {
+pub fn canFetch(self: *PieceManager, index: usize) bool {
     switch (self.pieces[index]) {
         .missing => {
             self.missingCount -= 1;
@@ -198,11 +200,11 @@ pub fn canFetch(self: *Self, index: usize) bool {
     }
 }
 
-pub fn isDownloadComplete(self: Self) bool {
+pub fn isDownloadComplete(self: PieceManager) bool {
     return std.mem.allEqual(State, self.pieces, .have);
 }
 
-pub fn reset(self: *Self, index: u32) void {
+pub fn reset(self: *PieceManager, index: u32) void {
     self.pieces[index] = .missing;
     self.missingCount += 1;
 
@@ -211,7 +213,7 @@ pub fn reset(self: *Self, index: u32) void {
     buf.received = .initEmpty();
 }
 
-pub fn complete(self: *Self, index: u32) !PieceBuf {
+pub fn complete(self: *PieceManager, index: u32) !PieceBuf {
     const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
 
     self.pieces[index] = .have;
@@ -220,7 +222,7 @@ pub fn complete(self: *Self, index: u32) !PieceBuf {
     return kv.value;
 }
 
-pub fn killPeer(self: *Self, workingOn: ?std.DynamicBitSetUnmanaged) void {
+pub fn killPeer(self: *PieceManager, workingOn: ?std.DynamicBitSetUnmanaged) void {
     const bitfield = workingOn orelse return;
 
     var iter = bitfield.iterator(.{
@@ -233,7 +235,7 @@ pub fn killPeer(self: *Self, workingOn: ?std.DynamicBitSetUnmanaged) void {
     }
 }
 
-pub fn hasInterestingPiece(self: *Self, bitfield: std.DynamicBitSetUnmanaged) bool {
+pub fn hasInterestingPiece(self: *PieceManager, bitfield: std.DynamicBitSetUnmanaged) bool {
     var iterator = bitfield.iterator(.{
         .direction = .forward,
         .kind = .set,
@@ -250,7 +252,7 @@ pub fn hasInterestingPiece(self: *Self, bitfield: std.DynamicBitSetUnmanaged) bo
     return false;
 }
 
-pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
+pub fn torrentBitfieldBytes(self: *PieceManager, alloc: std.mem.Allocator) ![]u8 {
     const byteLen = (self.pieces.len + 7) / 8;
 
     const bytes = try alloc.alloc(u8, byteLen);
@@ -270,7 +272,7 @@ pub fn torrentBitfieldBytes(self: *Self, alloc: std.mem.Allocator) ![]u8 {
     return bytes;
 }
 
-pub fn bytesToBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8) !std.bit_set.DynamicBitSetUnmanaged {
+pub fn bytesToBitfield(self: *PieceManager, alloc: std.mem.Allocator, bytes: []const u8) !std.bit_set.DynamicBitSetUnmanaged {
     // Round up pieces.len to the nearest byte
     const expectedBytes = (self.pieces.len + 7) / 8;
 
@@ -293,7 +295,7 @@ pub fn bytesToBitfield(self: *Self, alloc: std.mem.Allocator, bytes: []const u8)
     return bitfield;
 }
 
-pub fn countDownloaded(self: *const Self, torrent: *const Torrent) usize {
+pub fn countDownloaded(self: *const PieceManager, torrent: *const Torrent) usize {
     var downloaded: usize = 0;
 
     for (self.pieces, 0..) |piece, i| switch (piece) {

@@ -11,12 +11,12 @@ pub const FileRef = struct {
     start: usize,
 };
 
-const Self = @This();
+const Files = @This();
 
 files: []FileRef,
 totalSize: usize,
 
-pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Self {
+pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Files {
     var refs = try alloc.alloc(FileRef, files.len);
     var currentPos: usize = 0;
 
@@ -54,7 +54,7 @@ pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Self {
     };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+pub fn deinit(self: *Files, alloc: std.mem.Allocator) void {
     for (self.files) |f| f.handle.close();
     alloc.free(self.files);
 }
@@ -173,7 +173,7 @@ const SReader = struct {
 };
 
 pub fn collectPieces(
-    self: *Self,
+    self: *Files,
     alloc: std.mem.Allocator,
     pieces: []const u8,
     torrentPieceLen: u32,
@@ -211,7 +211,7 @@ pub fn collectPieces(
 }
 
 pub fn readPieceBuf(
-    self: *Self,
+    self: *Files,
     buf: []u8,
     index: u32,
     begin: u32,
@@ -245,7 +245,7 @@ pub fn readPieceBuf(
 }
 
 pub fn readPieceData(
-    self: *Self,
+    self: *Files,
     alloc: std.mem.Allocator,
     piece: proto.Piece,
     torrentPieceLen: u32,
@@ -258,7 +258,7 @@ pub fn readPieceData(
     return buf;
 }
 
-pub fn writePieceData(self: Self, index: u32, torrentPieceLen: u32, data: []const u8) !void {
+pub fn writePieceData(self: Files, index: u32, torrentPieceLen: u32, data: []const u8) !void {
     var globalOffset = @as(usize, index) * torrentPieceLen;
     var dataOffset: usize = 0;
 

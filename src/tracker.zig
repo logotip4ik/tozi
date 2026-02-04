@@ -5,7 +5,7 @@ const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
 
-const Self = @This();
+const Tracker = @This();
 
 peerId: [20]u8,
 
@@ -43,7 +43,7 @@ pub fn init(
     infoHash: [20]u8,
     downloaded: u64,
     torrent: *const Torrent,
-) !Self {
+) !Tracker {
     var cloned: Torrent.Tiers = try .initCapacity(alloc, torrent.tiers.items.len);
     errdefer {
         for (cloned.items) |*x| x.deinit(alloc);
@@ -71,7 +71,7 @@ pub fn init(
     };
 }
 
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.oldAddrs.deinit(alloc);
     self.newAddrs.deinit(alloc);
 
@@ -81,7 +81,7 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     if (self.http) |*x| x.deinit();
 }
 
-fn getHttp(self: *Self, alloc: std.mem.Allocator) !std.http.Client {
+fn getHttp(self: *Tracker, alloc: std.mem.Allocator) !std.http.Client {
     return self.http orelse blk: {
         var client: std.http.Client = .{ .allocator = alloc };
         errdefer client.deinit();
@@ -95,7 +95,7 @@ fn getHttp(self: *Self, alloc: std.mem.Allocator) !std.http.Client {
 }
 
 pub fn sendEvent(
-    self: *Self,
+    self: *Tracker,
     alloc: std.mem.Allocator,
     event: ?enum { started, stopped, completed },
     url: []const u8,
@@ -137,7 +137,7 @@ pub fn sendEvent(
 }
 
 /// returns tracker interval, peers are appended to `newPeers`
-pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
+pub fn announce(self: *Tracker, alloc: std.mem.Allocator, url: []const u8) !usize {
     var stream: std.Io.Writer.Allocating = .init(alloc);
     defer stream.deinit();
 
@@ -192,7 +192,7 @@ pub fn announce(self: *Self, alloc: std.mem.Allocator, url: []const u8) !usize {
     return @max(0, interval.inner.int);
 }
 
-pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
+pub fn finalizeSource(self: *Tracker, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |urls| {
         for (urls.items, 0..) |url, i| {
             if (!std.mem.startsWith(u8, url, "http://")) continue;
@@ -211,7 +211,7 @@ pub fn finalizeSource(self: *Self, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
+pub fn keepAlive(self: *Tracker, alloc: std.mem.Allocator) !usize {
     if (self.initialized) |source| {
         const now: usize = @intCast(std.time.milliTimestamp());
 
@@ -248,7 +248,7 @@ pub fn keepAlive(self: *Self, alloc: std.mem.Allocator) !usize {
     return error.NoSourceAvailable;
 }
 
-pub fn nextNewPeer(self: *Self) ?std.net.Address {
+pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
     const newPeer = self.newAddrs.pop() orelse return null;
 
     self.oldAddrs.appendAssumeCapacity(newPeer);

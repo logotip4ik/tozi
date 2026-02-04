@@ -499,7 +499,7 @@ pub fn downloadTorrent(
                             if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
                     },
-                    .allowedFast => |allowedFast| {
+                    .allowedFast => |allowedFast| blk: {
                         peer.state = .messageStart;
 
                         if (allowedFast >= pieces.pieces.len) {
@@ -507,11 +507,10 @@ pub fn downloadTorrent(
                             break :readblk;
                         }
 
-                        const alreadyInList = for (peer.allowedFast.items) |existing| {
-                            if (existing == allowedFast) break true;
-                        } else false;
+                        for (peer.allowedFast.items) |existing| {
+                            if (existing == allowedFast) break :blk;
+                        }
 
-                        if (alreadyInList) continue;
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
 
                         std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket, allowedFast });

@@ -11,7 +11,7 @@ evs: utils.Queue(KEvent, MAX_EVENTS) = .{},
 
 changeList: std.array_list.Aligned(KEvent, null) = .empty,
 
-const Self = @This();
+const KQ = @This();
 
 const KEvent = std.posix.Kevent;
 
@@ -19,7 +19,7 @@ pub const Kind = enum(u2) { timer, read, write };
 
 const MAX_EVENTS = 512;
 
-pub fn init(alloc: std.mem.Allocator) !Self {
+pub fn init(alloc: std.mem.Allocator) !KQ {
     comptime utils.assert(builtin.os.tag == .macos);
 
     const kqueue = try std.posix.kqueue();
@@ -28,13 +28,13 @@ pub fn init(alloc: std.mem.Allocator) !Self {
     return .{ .alloc = alloc, .fd = kqueue };
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *KQ) void {
     std.posix.close(self.fd);
     self.changeList.deinit(self.alloc);
 }
 
 /// adds one time timer, that will fire event after `wait` in **milliseconds**
-pub fn addTimer(self: *Self, id: usize, ms: usize, opts: struct { periodic: bool = false }) !void {
+pub fn addTimer(self: *KQ, id: usize, ms: usize, opts: struct { periodic: bool = false }) !void {
     const flags: usize = if (opts.periodic)
         std.c.EV.ADD | std.c.EV.ENABLE
     else
@@ -51,7 +51,7 @@ pub fn addTimer(self: *Self, id: usize, ms: usize, opts: struct { periodic: bool
 }
 
 /// subscribe to read or write of socket (`ident`)
-pub fn subscribe(self: *Self, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
+pub fn subscribe(self: *KQ, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
     const filter: isize = switch (kind) {
@@ -70,7 +70,7 @@ pub fn subscribe(self: *Self, ident: std.posix.fd_t, kind: Kind, udata: usize) !
     });
 }
 
-pub fn delete(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
+pub fn delete(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
@@ -96,7 +96,7 @@ pub fn delete(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
     });
 }
 
-pub fn enable(self: *Self, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
+pub fn enable(self: *KQ, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
     const filter: isize = switch (kind) {
@@ -115,7 +115,7 @@ pub fn enable(self: *Self, ident: std.posix.fd_t, kind: Kind, udata: usize) !voi
     });
 }
 
-pub fn disable(self: *Self, ident: std.posix.fd_t, kind: Kind) !void {
+pub fn disable(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
@@ -147,7 +147,7 @@ const NextError = error{
 } || std.posix.KEventError;
 
 const CustomEvent = struct {
-    ident : usize,
+    ident: usize,
     udata: usize,
     kind: Kind,
     err: ?std.c.E,
@@ -156,7 +156,7 @@ const CustomEvent = struct {
 const FALLBACK_ERROR = std.c.E.CONNREFUSED;
 var intermidiateKqBuf: [MAX_EVENTS]KEvent = undefined;
 
-pub fn next(self: *Self) NextError!?CustomEvent {
+pub fn next(self: *KQ) NextError!?CustomEvent {
     if (self.evs.count == 0) {
         defer self.changeList.clearRetainingCapacity();
 
@@ -197,7 +197,7 @@ pub fn next(self: *Self) NextError!?CustomEvent {
     return .{ .ident = ev.ident, .udata = ev.udata, .kind = kind, .err = err };
 }
 
-pub fn killPeer(self: *Self, socket: std.posix.fd_t) void {
+pub fn killPeer(self: *KQ, socket: std.posix.fd_t) void {
     std.posix.close(socket);
 
     var i = self.evs.count;

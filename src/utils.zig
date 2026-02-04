@@ -11,7 +11,6 @@ pub const RqPool = struct {
     count: usize = 0,
     size: usize,
 
-    const Self = @This();
     pub const Piece = packed struct { index: u32, begin: u32 };
 
     /// usually initial size is 32 "in-flight" requests
@@ -38,7 +37,7 @@ pub const RqPool = struct {
         std.log.debug("resized pool to {d}", .{cappedSize});
     }
 
-    pub fn push(self: *Self, r: Piece) !void {
+    pub fn push(self: *RqPool, r: Piece) !void {
         if (self.count == self.size) {
             return error.Full;
         }
@@ -47,7 +46,7 @@ pub const RqPool = struct {
         self.count += 1;
     }
 
-    pub fn receive(self: *Self, r: Piece) !void {
+    pub fn receive(self: *RqPool, r: Piece) !void {
         for (0..self.count) |i| {
             const req = self.buf[i];
 
@@ -64,7 +63,7 @@ pub const RqPool = struct {
         return error.UnknownChunk;
     }
 
-    pub fn format(self: *const Self, w: *std.Io.Writer) !void {
+    pub fn format(self: *const RqPool, w: *std.Io.Writer) !void {
         for (self.buf[0..self.count], 0..) |r, i| {
             try w.print("(piece: {d} + {d})", .{ r.index, r.begin });
 
@@ -124,7 +123,7 @@ pub fn Queue(comptime T: type, comptime Size: usize) type {
             self.end = @rem(self.end + Size - 1, Size);
         }
 
-        pub fn get(self: Self, index: usize) T {
+        pub fn get(self: *const Self, index: usize) T {
             assert(index < self.count);
             const targetIndex = @rem(self.begin + index, Size);
             return self.buf[targetIndex];
