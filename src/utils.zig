@@ -369,3 +369,11 @@ test "TaggedPointer" {
         else => try std.testing.expect(false),
     }
 }
+
+pub fn isHttp(haystack: []const u8) bool {
+    return std.mem.startsWith(u8, haystack, "http://");
+}
+
+pub fn isHttps(haystack: []const u8) bool {
+    return std.mem.startsWith(u8, haystack, "https://");
+}

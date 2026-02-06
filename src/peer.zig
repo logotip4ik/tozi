@@ -47,7 +47,13 @@ pub const State = union(enum) {
 };
 
 pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
-    return .{ .socket = fd, .readBuf = .init(alloc), .writeBuf = .init(alloc), .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS), .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST) };
+    return .{
+        .socket = fd,
+        .readBuf = .init(alloc),
+        .writeBuf = .init(alloc),
+        .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
+        .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST),
+    };
 }
 
 pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {

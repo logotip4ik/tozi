@@ -24,15 +24,18 @@ uri: std.Uri,
 
 handshake: ?TlsHandshake,
 
+/// used in `readingRequest` to prevent re-parsing head each time, new chunk or read appears
+contentLength: ?u32 = null,
+
 pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
+    const isHttp = utils.isHttp(url);
+    const isHttps = utils.isHttps(url);
+    utils.assert(isHttp or isHttps);
+
     const urlDupe = try alloc.dupe(u8, url);
     errdefer alloc.free(urlDupe);
 
     const uri: std.Uri = try .parse(urlDupe);
-
-    const isHttp = std.mem.eql(u8, uri.scheme, "http");
-    const isHttps = std.mem.eql(u8, uri.scheme, "https");
-    utils.assert(isHttp or isHttps);
 
     var hostBuffer: [std.Uri.host_name_max]u8 = undefined;
     const host = try uri.getHost(&hostBuffer);
@@ -92,6 +95,7 @@ pub fn tlsHandshake(self: *HttpTracker, alloc: std.mem.Allocator) !*TlsHandshake
 //     }
 // }
 
+// TODO: actually use captured tls cert in connection...
 pub const TlsHandshake = struct {
     caBundle: tls.config.cert.Bundle,
     client: tls.nonblock.Client,
@@ -327,11 +331,15 @@ pub fn sendRequest(self: *HttpTracker) !bool {
 
     _ = self.buffer.writer.consume(wrote);
 
+    if (self.buffer.writer.end != 0) {
+        return false;
+    }
+
     self.state = .readingRequest;
-    return self.buffer.writer.end == 0;
+    return true;
 }
 
-pub fn readRequest(self: *HttpTracker) !?void {
+pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
     utils.assert(self.state == .readingRequest);
 
     const readCount = 8 * 1024;
@@ -347,6 +355,33 @@ pub fn readRequest(self: *HttpTracker) !?void {
     if (self.buffer.writer.end > std.math.maxInt(u16)) {
         return error.ResponseTooLong;
     }
+
+    const written = self.buffer.written();
+    var hp: std.http.HeadParser = .{};
+
+    const contentStart = hp.feed(written);
+    if (hp.state != .finished) {
+        return null;
+    }
+
+    const contentLength = self.contentLength orelse blk: {
+        const head = try std.http.Client.Response.Head.parse(written[0..contentStart]);
+
+        // TODO: maybe this shouldn't result in error
+        const contentLength: u16 = @intCast(head.content_length orelse return error.MissingContentLength);
+        self.contentLength = contentLength;
+
+        break :blk self.contentLength.?;
+    };
+
+    if (contentStart + contentLength > written.len) {
+        return null;
+    }
+
+    const contenet = try alloc.dupe(u8, written[contentStart .. contentStart + contentLength]);
+    _ = self.buffer.writer.consumeAll();
+
+    return contenet;
 }
 
 fn connectToAddress(addr: std.net.Address) !std.posix.socket_t {
@@ -443,24 +478,17 @@ test "make request" {
     try std.testing.expectEqual(0, t.buffer.writer.end);
     try std.testing.expectEqual(State.readingRequest, t.state);
 
-    var hp: std.http.HeadParser = .{};
-    var headLen: u16 = 0;
-
     try kq.subscribe(t.socket, .read, 1);
     try kq.addTimer(0, 100, .{ .periodic = false });
 
     while (try kq.next()) |ev| {
-        try std.testing.expectEqual(null, ev.err);
         try std.testing.expectEqual(.read, ev.kind);
 
-        try t.readRequest() orelse unreachable;
+        const bytes = try t.readRequest(alloc) orelse continue;
+        defer alloc.free(bytes);
 
-        headLen += @intCast(hp.feed(t.buffer.written()[headLen..]));
-
-        if (hp.state == .finished) {
-            try std.testing.expect(true);
-            return;
-        }
+        try std.testing.expectEqual(82, bytes.len);
+        return;
     }
 
     try std.testing.expect(false);

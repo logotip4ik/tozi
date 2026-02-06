@@ -19,11 +19,12 @@ downloaded: usize,
 
 left: usize,
 
-numWant: usize = 100,
+numWant: u16 = 100,
 
 port: u16 = 6889,
 
 http: ?std.http.Client = null,
+client: union(enum) { none, http: HttpTracker } = .none,
 
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
@@ -31,6 +32,8 @@ newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 tiers: Torrent.Tiers,
 
 initialized: ?Source = null,
+
+queued: HttpTracker.Stats = undefined,
 
 const Source = struct {
     interval: usize,
@@ -81,6 +84,10 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.tiers.deinit(alloc);
 
     if (self.http) |*x| x.deinit();
+    switch (self.client) {
+        .none => {},
+        .http => |*t| t.deinit(alloc),
+    }
 }
 
 fn getHttp(self: *Tracker, alloc: std.mem.Allocator) !std.http.Client {
@@ -145,7 +152,11 @@ pub fn announce(self: *Tracker, alloc: std.mem.Allocator, url: []const u8) !usiz
 
     try self.sendEvent(alloc, .started, url, &stream.writer);
 
-    var reader: std.Io.Reader = .fixed(stream.written());
+    return try self.addNewAddrs(alloc, stream.written());
+}
+
+pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) !usize {
+    var reader: std.Io.Reader = .fixed(bytes);
 
     var value: Bencode = try .decode(alloc, &reader, 0);
     defer value.deinit(alloc);
@@ -248,6 +259,98 @@ pub fn keepAlive(self: *Tracker, alloc: std.mem.Allocator) !usize {
     }
 
     return error.NoSourceAvailable;
+}
+
+const Operation = union(enum) {
+    read,
+    write,
+    timer: u32,
+};
+
+fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTracker) !?Operation {
+    switch (client.state) {
+        .handshake => {
+            const handshake = try client.tlsHandshake(alloc);
+
+            switch (handshake.state) {
+                .needWrite => return .write,
+                .needRead => return .read,
+                .done => unreachable, // TODO
+            }
+        },
+        .prepareRequest => {
+            try client.prepareRequest(&self.queued);
+
+            return .write;
+        },
+        .sendingRequest => {
+            const ready = try client.sendRequest();
+
+            if (!ready) return .write;
+            return .read;
+        },
+        .readingRequest => {
+            const content = try client.readRequest(alloc) orelse return .read;
+            defer alloc.free(content);
+
+            const interval = try self.addNewAddrs(alloc, content);
+            std.log.debug("received interval of {d}", .{interval});
+            return .{ .timer = @intCast(interval) };
+        },
+    }
+}
+
+pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
+    const tier, const i = blk: {
+        for (self.tiers.items, 0..) |urls, tier| {
+            for (urls.items, 0..) |url, i| {
+                if (!utils.isHttp(url) and !utils.isHttp(url)) {
+                    continue;
+                }
+
+                break :blk .{ tier, i };
+            }
+        }
+
+        return error.NoAnnounceUrl;
+    };
+
+    const url = self.tiers.items[tier].items[i];
+
+    // TODO: catch error here and use `while (nextUrl)` to make this check all urls
+    self.client = .{ .http = try .init(alloc, url) };
+    errdefer switch (self.client) {
+        .http => |*t| t.deinit(alloc),
+        .none => {},
+    };
+
+    self.queued = .{
+        .infoHash = self.infoHash,
+        .peerId = self.peerId,
+        .left = self.left,
+        .downloaded = self.downloaded,
+        .uploaded = self.uploaded,
+        .numWant = self.numWant,
+    };
+
+    return switch (self.client) {
+        .http => |*t| try self.nextHttpOperation(alloc, t),
+        .none => return error.NoClientSetup,
+    };
+}
+
+pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
+    return switch (self.client) {
+        .http => |*t| try self.nextHttpOperation(alloc, t),
+        .none => unreachable,
+    };
+}
+
+pub fn socket(self: *const Tracker) std.posix.socket_t {
+    return switch (self.client) {
+        .http => |t| t.socket,
+        .none => unreachable,
+    };
 }
 
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
