@@ -5,6 +5,8 @@ const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 
+const HttpTracker = @import("./http-tracker.zig");
+
 const Tracker = @This();
 
 peerId: [20]u8,
@@ -270,4 +272,8 @@ pub fn generatePeerId() [20]u8 {
     }
 
     return id;
+}
+
+test {
+    _ = @import("http-tracker.zig");
 }
