@@ -200,10 +200,7 @@ pub fn appendQuery(
         const key, const val = query;
 
         switch (val) {
-            .int => |int| {
-                try writer.print("{s}=", .{key});
-                try writer.print("{d}", .{int});
-            },
+            .int => |int|  try writer.print("{s}={d}", .{key, int}),
 
             // default zig's query escaping is not enough...
             .string => |string| {
@@ -221,6 +218,43 @@ pub fn appendQuery(
     }
 
     return w.toArrayList();
+}
+
+pub fn writeQueryToStream(
+    w: *std.Io.Writer,
+    url: std.Uri,
+    queries: []const QueryParam,
+) !void {
+    try w.writeByte('?');
+
+    if (url.query) |query| {
+        try query.formatRaw(w);
+
+        if (w.buffer[w.end - 1] != '&') {
+            try w.writeByte('&');
+        }
+    }
+
+    for (queries) |query| {
+        const key, const val = query;
+
+        switch (val) {
+            .int => |int| try w.print("{s}={d}", .{key,int}),
+
+            // default zig's query escaping is not enough...
+            .string => |string| {
+                try w.print("{s}=", .{key});
+                const valComp: std.Uri.Component = .{ .raw = string };
+                try valComp.formatEscaped(w);
+            },
+
+            .skip => continue,
+        }
+
+        try w.writeByte('&');
+    }
+
+    w.undo(1);
 }
 
 test "appendQuery" {

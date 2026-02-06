@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x672c2c4ab745ba85,
     .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
+    .dependencies = .{
+        .tls = .{
+            .url = "git+https://github.com/ianic/tls.zig?ref=zig-0.15.x#57039ba1c97400c786ef8bf8b7394995fd52fe15",
+            .hash = "tls-0.1.0-ER2e0kZoBQAKITpTPs0jkkeULb5FeQNnU5tGE2lN-wjI",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

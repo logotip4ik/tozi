@@ -1,0 +1,13 @@
+{
+    # Disables the automatic HTTP->HTTPS redirect globally
+    auto_https disable_redirects
+}
+
+http://localhost:9000 {
+    reverse_proxy qbittorrent-testing:9000
+}
+
+https://localhost:9001 {
+    tls internal
+    reverse_proxy qbittorrent-testing:9000
+}

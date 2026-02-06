@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const tlsDep = b.dependency("tls", .{ .target = target, .optimize = optimize });
+
     const hasherMod = b.addModule("hasher", .{
         .root_source_file = b.path("src/hasher.zig"),
         .target = target,
@@ -26,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "hasher", .module = hasherMod },
             .{ .name = "utils", .module = utilsMod },
+            .{ .name = "tls", .module = tlsDep.module("tls") },
         },
     });
 

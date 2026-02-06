@@ -13,7 +13,25 @@ services:
       - ./testing-torrent/downloads:/downloads
     ports:
       - 8080:8080
-      - 9000:9000
       - 6881:6881
       - 6881:6881/udp
+    networks:
+      - testing-net
     restart: unless-stopped
+
+  reverse-proxy:
+    image: caddy:latest
+    container_name: caddy-proxy
+    networks:
+      - testing-net
+    ports:
+      - 9000:9000 # HTTP Port
+      - 9001:9001 # HTTPS Port
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./testing-torrent/ssl:/data/caddy
+    restart: unless-stopped
+
+networks:
+  testing-net:
+    driver: bridge
