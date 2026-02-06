@@ -47,42 +47,36 @@ pub const State = union(enum) {
 };
 
 pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
-    return .{
-        .socket = fd,
-        .readBuf = .init(alloc),
-        .writeBuf = .init(alloc),
-        .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
-        .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST)
-    };
+    return .{ .socket = fd, .readBuf = .init(alloc), .writeBuf = .init(alloc), .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS), .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST) };
 }
 
-pub fn deinit(p: *Peer, alloc: std.mem.Allocator) void {
-    p.state = .dead;
+pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
+    self.state = .dead;
 
-    p.readBuf.deinit();
-    p.writeBuf.deinit();
-    p.inFlight.deinit(alloc);
-    p.allowedFast.deinit(alloc);
+    self.readBuf.deinit();
+    self.writeBuf.deinit();
+    self.inFlight.deinit(alloc);
+    self.allowedFast.deinit(alloc);
 
-    if (p.bitfield) |*x| x.deinit(alloc);
-    if (p.workingOn) |*x| x.deinit(alloc);
-    if (p.extended) |*x| x.deinit(alloc);
+    if (self.bitfield) |*x| x.deinit(alloc);
+    if (self.workingOn) |*x| x.deinit(alloc);
+    if (self.extended) |*x| x.deinit(alloc);
 }
 
-pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
+pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     utils.assert(size <= Torrent.BLOCK_SIZE * 10);
 
-    if (p.readBuf.writer.end >= size) {
+    if (self.readBuf.writer.end >= size) {
         return;
     }
 
-    var list = p.readBuf.toArrayList();
-    defer p.readBuf = .fromArrayList(alloc, &list);
+    var list = self.readBuf.toArrayList();
+    defer self.readBuf = .fromArrayList(alloc, &list);
 
     try list.ensureTotalCapacity(alloc, size);
 
     const left = size - list.items.len;
-    const count = std.posix.read(p.socket, list.unusedCapacitySlice()[0..left]) catch |err| switch (err) {
+    const count = std.posix.read(self.socket, list.unusedCapacitySlice()[0..left]) catch |err| switch (err) {
         error.WouldBlock => return null,
         else => |e| return e,
     };
@@ -98,63 +92,63 @@ pub fn fillReadBuffer(p: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     }
 }
 
-pub inline fn peekInt(p: *Peer, alloc: std.mem.Allocator, comptime T: type, offset: usize) !?T {
+pub inline fn peekInt(self: *Peer, alloc: std.mem.Allocator, comptime T: type, offset: usize) !?T {
     const n = @divExact(@typeInfo(T).int.bits, 8);
 
-    try p.fillReadBuffer(alloc, n + offset) orelse return null;
+    try self.fillReadBuffer(alloc, n + offset) orelse return null;
 
-    const buffered = p.readBuf.written();
+    const buffered = self.readBuf.written();
 
     return std.mem.readInt(T, buffered[offset .. offset + n][0..n], .big);
 }
 
-pub fn read(p: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
-    try p.fillReadBuffer(alloc, size) orelse return null;
+pub fn read(self: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
+    try self.fillReadBuffer(alloc, size) orelse return null;
 
-    const buffered = p.readBuf.written();
+    const buffered = self.readBuf.written();
     const dupe = try alloc.dupe(u8, buffered[0..size]);
-    _ = p.readBuf.writer.consume(size);
+    _ = self.readBuf.writer.consume(size);
 
     return dupe;
 }
 
 /// returns `true` when all data was written to socket
-pub fn send(p: *Peer) !bool {
-    const toWrite = p.writeBuf.written();
+pub fn send(self: *Peer) !bool {
+    const toWrite = self.writeBuf.written();
 
     if (toWrite.len == 0) {
         return true;
     }
 
-    const wrote = std.posix.write(p.socket, toWrite) catch |err| switch (err) {
+    const wrote = std.posix.write(self.socket, toWrite) catch |err| switch (err) {
         error.WouldBlock => return false,
         else => |e| return e,
     };
 
-    _ = p.writeBuf.writer.consume(wrote);
+    _ = self.writeBuf.writer.consume(wrote);
 
-    const stillBuffered = p.writeBuf.written();
+    const stillBuffered = self.writeBuf.written();
     return stillBuffered.len == 0;
 }
 
 /// returns `true` when all data was written to socket
-pub fn addMessage(p: *Peer, message: proto.Message, data: []const u8) !bool {
-    utils.assert(p.state == .messageStart or p.state == .message);
+pub fn addMessage(self: *Peer, message: proto.Message, data: []const u8) !bool {
+    utils.assert(self.state == .messageStart or self.state == .message);
 
-    try message.writeMessage(&p.writeBuf.writer, data);
+    try message.writeMessage(&self.writeBuf.writer, data);
 
-    return try p.send();
+    return try self.send();
 }
 
-pub fn nextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
-    if (p.choked) {
-        for (p.allowedFast.items) |index| {
+pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
+    if (self.choked) {
+        for (self.allowedFast.items) |index| {
             if (pieces.canFetch(index)) {
-                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{p.socket, index});
+                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{ self.socket, index });
                 return @intCast(index);
             }
         }
-    } else if (p.bitfield) |bitfield| if (p.workingOn) |workingOn| {
+    } else if (self.bitfield) |bitfield| if (self.workingOn) |workingOn| {
         var iter = bitfield.iterator(.{ .direction = .forward, .kind = .set });
         while (iter.next()) |index| {
             if (pieces.canFetch(index)) {
@@ -171,25 +165,25 @@ pub fn nextWorkingPiece(p: *Peer, pieces: *PieceManager) ?u32 {
 }
 
 // returns true if pipeline is full
-pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) !enum { full, finishedPiece, next } {
-    p.inFlight.push(.{
+pub fn addRequest(self: *Peer, piece: u32, pieceLen: u32) !enum { full, finishedPiece, next } {
+    self.inFlight.push(.{
         .index = piece,
-        .begin = p.workingPieceOffset,
+        .begin = self.workingPieceOffset,
     }) catch return .full;
 
-    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - p.workingPieceOffset);
+    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - self.workingPieceOffset);
 
     const m: proto.Message = .{ .request = .{
         .index = piece,
-        .begin = p.workingPieceOffset,
+        .begin = self.workingPieceOffset,
         .len = chunkLen,
     } };
 
-    try m.writeMessage(&p.writeBuf.writer, &.{});
+    try m.writeMessage(&self.writeBuf.writer, &.{});
 
-    p.workingPieceOffset += chunkLen;
+    self.workingPieceOffset += chunkLen;
 
-    if (p.workingPieceOffset >= pieceLen) {
+    if (self.workingPieceOffset >= pieceLen) {
         return .finishedPiece;
     }
 
@@ -197,33 +191,109 @@ pub fn addRequest(p: *Peer, piece: u32, pieceLen: u32) !enum { full, finishedPie
 }
 
 /// returns `true` when all data was written to socket
-pub fn fillRqPool(p: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pieces: *PieceManager) !bool {
-    while (p.inFlight.count < p.inFlight.size) {
-        const piece = p.workingPiece orelse blk: {
-            p.workingPieceOffset = 0;
-            p.workingPiece = p.nextWorkingPiece(pieces) orelse break;
+pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pieces: *PieceManager) !bool {
+    while (self.inFlight.count < self.inFlight.size) {
+        const piece = self.workingPiece orelse blk: {
+            self.workingPieceOffset = 0;
+            self.workingPiece = self.nextWorkingPiece(pieces) orelse break;
 
-            if (p.workingOn) |*workingOn| {
-                workingOn.set(p.workingPiece.?);
+            if (self.workingOn) |*workingOn| {
+                workingOn.set(self.workingPiece.?);
             }
 
-            break :blk p.workingPiece.?;
+            break :blk self.workingPiece.?;
         };
 
         const len = torrent.getPieceSize(piece);
-        switch (try p.addRequest(piece, len)) {
+        switch (try self.addRequest(piece, len)) {
             .full => break,
             .next => {},
             .finishedPiece => {
-                p.workingPiece = null;
-                p.workingPieceOffset = 0;
+                self.workingPiece = null;
+                self.workingPieceOffset = 0;
             },
         }
     }
 
-    return try p.send();
+    return try self.send();
 }
 
 pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
     return std.math.order(a.bytesReceived, b.bytesReceived) == .gt;
+}
+
+pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u32) !?proto.Message {
+    const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
+        std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket, idInt });
+        return error.Dead;
+    };
+
+    const sizeOfMessageStart = id.messageStartLen();
+    const messageStartBytes = self.read(alloc, sizeOfMessageStart) catch |err| switch (err) {
+        error.EndOfStream => return error.Dead,
+        else => |e| return e,
+    } orelse return null;
+    defer alloc.free(messageStartBytes);
+
+    var reader: std.Io.Reader = .fixed(messageStartBytes);
+    reader.toss(@sizeOf(u32) + @sizeOf(u8));
+
+    return switch (id) {
+        .choke => .choke,
+        .unchoke => .unchoke,
+        .interested => .interested,
+        .notInterested => .notInterested,
+        .haveAll => .haveAll,
+        .haveNone => .haveNone,
+
+        .have => .{ .have = reader.takeInt(u32, .big) catch unreachable },
+        .bitfield => .{ .bitfield = len - 1 },
+
+        .suggestPiece => .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable },
+        .allowedFast => .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable },
+
+        .piece => .{ .piece = .{
+            .index = reader.takeInt(u32, .big) catch unreachable,
+            .begin = reader.takeInt(u32, .big) catch unreachable,
+            .len = len - 9,
+        } },
+
+        .extended => .{ .extended = .{
+            .id = reader.takeByte() catch unreachable,
+            .len = len - 2,
+        } },
+
+        .request, .cancel, .rejectRequest => blk: {
+            const index = reader.takeInt(u32, .big) catch unreachable;
+            const begin = reader.takeInt(u32, .big) catch unreachable;
+            const mLen = reader.takeInt(u32, .big) catch unreachable;
+
+            if (mLen > Torrent.BLOCK_SIZE) {
+                std.log.err("peer: {d} dropped (msg too big: {d})", .{ self.socket, len });
+                return error.Dead;
+            }
+
+            if (id == .request) {
+                break :blk .{ .request = .{
+                    .index = index,
+                    .begin = begin,
+                    .len = mLen,
+                } };
+            } else if (id == .cancel) {
+                break :blk .{ .cancel = .{
+                    .index = index,
+                    .begin = begin,
+                    .len = mLen,
+                } };
+            } else {
+                break :blk .{ .rejectRequest = .{
+                    .index = index,
+                    .begin = begin,
+                    .len = mLen,
+                } };
+            }
+        },
+
+        .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
+    };
 }

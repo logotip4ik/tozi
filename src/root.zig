@@ -300,84 +300,13 @@ pub fn downloadTorrent(
                         else => |e| return e,
                     } orelse break :readblk;
 
-                    const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
-                        std.log.warn("peer: {d} unknown msg id {d}", .{ peer.socket, idInt });
-                        peer.state = .dead;
-                        break :readblk;
-                    };
-
-                    const sizeOfMessageStart = id.messageStartLen();
-                    const messageStartBytes = peer.read(alloc, sizeOfMessageStart) catch |err| switch (err) {
-                        error.EndOfStream => {
+                    const message = peer.readMessageStart(alloc, idInt, len) catch |err| switch (err) {
+                        error.Dead => {
                             peer.state = .dead;
                             break :readblk;
                         },
                         else => |e| return e,
                     } orelse break :readblk;
-                    defer alloc.free(messageStartBytes);
-
-                    var reader: std.Io.Reader = .fixed(messageStartBytes);
-                    reader.toss(@sizeOf(u32) + @sizeOf(u8));
-
-                    const message: proto.Message = switch (id) {
-                        .choke => .choke,
-                        .unchoke => .unchoke,
-                        .interested => .interested,
-                        .notInterested => .notInterested,
-                        .haveAll => .haveAll,
-                        .haveNone => .haveNone,
-
-                        .have => .{ .have = reader.takeInt(u32, .big) catch unreachable },
-                        .bitfield => .{ .bitfield = len - 1 },
-
-                        .suggestPiece => .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable },
-                        .allowedFast => .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable },
-
-                        .piece => .{ .piece = .{
-                            .index = reader.takeInt(u32, .big) catch unreachable,
-                            .begin = reader.takeInt(u32, .big) catch unreachable,
-                            .len = len - 9,
-                        } },
-
-                        .extended => .{ .extended = .{
-                            .id = reader.takeByte() catch unreachable,
-                            .len = len - 2,
-                        } },
-
-                        .request, .cancel, .rejectRequest => blk: {
-                            const index = reader.takeInt(u32, .big) catch unreachable;
-                            const begin = reader.takeInt(u32, .big) catch unreachable;
-                            const mLen = reader.takeInt(u32, .big) catch unreachable;
-
-                            if (mLen > Torrent.BLOCK_SIZE) {
-                                std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
-                                peer.state = .dead;
-                                break :readblk;
-                            }
-
-                            if (id == .request) {
-                                break :blk .{ .request = .{
-                                    .index = index,
-                                    .begin = begin,
-                                    .len = mLen,
-                                } };
-                            } else if (id == .cancel) {
-                                break :blk .{ .cancel = .{
-                                    .index = index,
-                                    .begin = begin,
-                                    .len = mLen,
-                                } };
-                            } else {
-                                break :blk .{ .rejectRequest = .{
-                                    .index = index,
-                                    .begin = begin,
-                                    .len = mLen,
-                                } };
-                            }
-                        },
-
-                        .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
-                    };
 
                     peer.state = .{ .message = message };
                 },
