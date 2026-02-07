@@ -53,6 +53,7 @@ pub fn downloadTorrent(
     );
     defer tracker.deinit(alloc);
     const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
+    var prevTrackerOperation: Tracker.Operation = .{ .timer = 0 };
 
     const Timer = enum { tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
@@ -133,32 +134,34 @@ pub fn downloadTorrent(
         switch (taggedPointer) {
             .peer => {},
             .tracker => {
-                const nextOperation = tracker.nextOperation(alloc) catch {
-                    switch (tracker.client) {
-                        .http => |*t| t.deinit(alloc),
-                        .none => {},
-                    }
+                // get socket **before** updating state
+                const socket = tracker.socket();
 
+                const nextOperation = tracker.nextOperation(alloc) catch |err| {
+                    std.log.warn("failed announcing with {t}", .{err});
                     tracker.used = tracker.nextUsed() orelse {
                         std.log.info("all tracker urls are dead", .{});
                         return;
                     };
 
+                    switch (tracker.client) {
+                        .http => |*t| t.deinit(alloc),
+                        .none => {},
+                    }
+
                     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
+                    prevTrackerOperation = .{ .timer = 0 };
 
                     continue;
                 };
+                defer prevTrackerOperation = nextOperation;
 
                 switch (nextOperation) {
-                    .read => {
-                        const socket = tracker.socket();
-
+                    .read => if (@intFromEnum(nextOperation) != @intFromEnum(prevTrackerOperation)) {
                         kq.delete(socket, .write) catch {};
                         try kq.subscribe(socket, .read, trackerTaggedPointer);
                     },
-                    .write => {
-                        const socket = tracker.socket();
-
+                    .write => if (@intFromEnum(nextOperation) != @intFromEnum(prevTrackerOperation)) {
                         kq.delete(socket, .read) catch {};
                         try kq.subscribe(socket, .write, trackerTaggedPointer);
                     },

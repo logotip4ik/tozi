@@ -136,7 +136,7 @@ pub const TlsHandshake = struct {
         const client = Tls.nonblock.Client.init(.{
             .host = host,
             .root_ca = caBundle,
-            .insecure_skip_verify = builtin.is_test,
+            .insecure_skip_verify = builtin.is_test or builtin.mode == .Debug,
         });
 
         return .{

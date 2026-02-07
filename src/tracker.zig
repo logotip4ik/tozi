@@ -88,16 +88,6 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     }
 }
 
-/// returns tracker interval, peers are appended to `newAddrs`
-pub fn announce(self: *Tracker, alloc: std.mem.Allocator, url: []const u8) !usize {
-    var stream: std.Io.Writer.Allocating = .init(alloc);
-    defer stream.deinit();
-
-    try self.sendEvent(alloc, .started, url, &stream.writer);
-
-    return try self.addNewAddrs(alloc, stream.written());
-}
-
 pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) !usize {
     var reader: std.Io.Reader = .fixed(bytes);
 
@@ -170,25 +160,49 @@ pub fn finalizeSource(self: *Tracker, alloc: std.mem.Allocator) void {
     // }
 }
 
-const Operation = union(enum) {
+pub const Operation = union(enum) {
     read,
     write,
     timer: u32,
 };
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTracker) !Operation {
-    switch (client.state) {
+    sw: switch (client.state) {
         .handshake => {
             const handshake = try client.tlsHandshake(alloc);
 
             switch (handshake.state) {
-                .needWrite => return .write,
-                .needRead => return .read,
-                .done => unreachable, // TODO
+                .write => {
+                    try handshake.write();
+
+                    return switch (handshake.state) {
+                        .read => .read,
+                        .write => .write,
+                        .done => |cipher| {
+                            handshake.deinit(alloc);
+
+                            std.log.debug("received tls cipher for {s}", .{client.url});
+                            client.tls = .{ .connection = .init(cipher) };
+                            client.state = .prepareRequest;
+
+                            continue :sw client.state;
+                        },
+                    };
+                },
+                .read => {
+                    try handshake.read();
+
+                    return switch (handshake.state) {
+                        .read => .read,
+                        .write => .write,
+                        .done => unreachable,
+                    };
+                },
+                .done => unreachable
             }
         },
         .prepareRequest => {
-            try client.prepareRequest(&self.queued);
+            try client.prepareRequest(alloc, &self.queued);
 
             return .write;
         },
