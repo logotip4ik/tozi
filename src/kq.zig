@@ -197,9 +197,7 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
     return .{ .ident = ev.ident, .udata = ev.udata, .kind = kind, .err = err };
 }
 
-pub fn killPeer(self: *KQ, socket: std.posix.fd_t) void {
-    std.posix.close(socket);
-
+pub fn killSocket(self: *KQ, socket: std.posix.fd_t) void {
     var i = self.evs.count;
     while (i > 0) {
         i -= 1;

@@ -67,6 +67,8 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     if (self.bitfield) |*x| x.deinit(alloc);
     if (self.workingOn) |*x| x.deinit(alloc);
     if (self.extended) |*x| x.deinit(alloc);
+
+    std.posix.close(self.socket);
 }
 
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {

@@ -36,7 +36,7 @@ pub fn downloadTorrent(
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
-            kq.killPeer(peer.socket);
+            kq.killSocket(peer.socket);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
             alloc.destroy(peer);
@@ -139,6 +139,7 @@ pub fn downloadTorrent(
 
                 const nextOperation = tracker.nextOperation(alloc) catch |err| {
                     std.log.warn("failed announcing with {t}", .{err});
+
                     tracker.used = tracker.nextUsed() orelse {
                         std.log.info("all tracker urls are dead", .{});
                         return;
@@ -166,6 +167,7 @@ pub fn downloadTorrent(
                         try kq.subscribe(socket, .write, trackerTaggedPointer);
                     },
                     .timer => |timer| {
+                        kq.killSocket(socket);
                         try kq.addTimer(@intFromEnum(Timer.tracker), timer, .{ .periodic = false });
 
                         while (tracker.nextNewPeer()) |addr| {
@@ -193,7 +195,7 @@ pub fn downloadTorrent(
                             errdefer peer.deinit(alloc);
 
                             try kq.subscribe(peer.socket, .write, TaggedPointer.pack(.{ .peer = peer }));
-                            errdefer kq.killPeer(peer.socket);
+                            errdefer kq.killSocket(peer.socket);
 
                             try peers.append(alloc, peer);
                         }
@@ -614,7 +616,7 @@ pub fn downloadTorrent(
         }
 
         if (peer.state == .dead) {
-            kq.killPeer(peer.socket);
+            kq.killSocket(peer.socket);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
 
