@@ -23,7 +23,6 @@ numWant: u16 = 100,
 
 port: u16 = 6889,
 
-http: ?std.http.Client = null,
 client: union(enum) { none, http: HttpTracker } = .none,
 
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
@@ -31,13 +30,13 @@ newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 
 tiers: Torrent.Tiers,
 
-initialized: ?Source = null,
+used: Source = .{ .tier = 0, .i = 0 },
 
 queued: HttpTracker.Stats = undefined,
 
-const Source = struct {
-    interval: usize,
-    checkinAt: usize,
+const Source = packed struct {
+    tier: u32,
+    i: u32,
 };
 
 pub const defaultNumWant = 20;
@@ -83,69 +82,13 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |*x| x.deinit(alloc);
     self.tiers.deinit(alloc);
 
-    if (self.http) |*x| x.deinit();
     switch (self.client) {
         .none => {},
         .http => |*t| t.deinit(alloc),
     }
 }
 
-fn getHttp(self: *Tracker, alloc: std.mem.Allocator) !std.http.Client {
-    return self.http orelse blk: {
-        var client: std.http.Client = .{ .allocator = alloc };
-        errdefer client.deinit();
-
-        try client.initDefaultProxies(alloc);
-
-        self.http = client;
-
-        break :blk client;
-    };
-}
-
-pub fn sendEvent(
-    self: *Tracker,
-    alloc: std.mem.Allocator,
-    event: ?enum { started, stopped, completed },
-    url: []const u8,
-    responseWriter: ?*std.Io.Writer,
-) !void {
-    var http = try self.getHttp(alloc);
-
-    var uri: std.Uri = try .parse(url);
-
-    var newQuery = try utils.appendQuery(alloc, uri, &[_]utils.QueryParam{
-        .{ "info_hash", .{ .string = self.infoHash[0..20] } },
-        .{ "peer_id", .{ .string = self.peerId[0..20] } },
-        .{ "port", .{ .int = self.port } },
-        .{ "uploaded", .{ .int = self.uploaded } },
-        .{ "downloaded", .{ .int = self.downloaded } },
-        .{ "left", .{ .int = self.left } },
-        .{ "compact", .{ .int = 1 } },
-        .{ "key", .{ .string = self.peerId[16..20] } },
-        .{ "numwant", .{ .int = self.numWant } },
-        .{
-            "event",
-            if (event) |x| .{ .string = @tagName(x) } else .skip,
-        },
-    });
-    defer newQuery.deinit(alloc);
-
-    uri.query = .{ .percent_encoded = newQuery.items };
-
-    const res = try http.fetch(.{
-        .method = .GET,
-        .location = .{ .uri = uri },
-        .keep_alive = false,
-        .response_writer = responseWriter,
-    });
-
-    if (res.status != .ok) {
-        return error.NonOkStatus;
-    }
-}
-
-/// returns tracker interval, peers are appended to `newPeers`
+/// returns tracker interval, peers are appended to `newAddrs`
 pub fn announce(self: *Tracker, alloc: std.mem.Allocator, url: []const u8) !usize {
     var stream: std.Io.Writer.Allocating = .init(alloc);
     defer stream.deinit();
@@ -205,60 +148,26 @@ pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) 
     return @max(0, interval.inner.int);
 }
 
+/// TODO: make finalize source
 pub fn finalizeSource(self: *Tracker, alloc: std.mem.Allocator) void {
-    for (self.tiers.items) |urls| {
-        for (urls.items, 0..) |url, i| {
-            if (!std.mem.startsWith(u8, url, "http://")) continue;
-
-            self.sendEvent(alloc, .stopped, url, null) catch |err| {
-                std.log.warn("failed announcing to {s} with {t}", .{ url, err });
-                continue;
-            };
-
-            if (i != 0) {
-                std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
-            }
-
-            return;
-        }
-    }
-}
-
-pub fn keepAlive(self: *Tracker, alloc: std.mem.Allocator) !usize {
-    if (self.initialized) |source| {
-        const now: usize = @intCast(std.time.milliTimestamp());
-
-        if (now < source.checkinAt) {
-            return source.checkinAt - now;
-        }
-    }
-
-    for (self.tiers.items) |urls| {
-        for (urls.items, 0..) |url, i| {
-            if (!std.mem.startsWith(u8, url, "http://")) continue;
-
-            const interval = self.announce(alloc, url) catch |err| {
-                std.log.warn("failed announcing to {s} with {t}", .{ url, err });
-                continue;
-            };
-
-            const now: usize = @intCast(std.time.milliTimestamp());
-            const intervalInMs = interval * std.time.ms_per_s;
-
-            self.initialized = .{
-                .interval = intervalInMs,
-                .checkinAt = now + intervalInMs,
-            };
-
-            if (i != 0) {
-                std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
-            }
-
-            return intervalInMs;
-        }
-    }
-
-    return error.NoSourceAvailable;
+    _ = self;
+    _ = alloc;
+    // for (self.tiers.items) |urls| {
+    //     for (urls.items, 0..) |url, i| {
+    //         if (!std.mem.startsWith(u8, url, "http://")) continue;
+    //
+    //         self.sendEvent(alloc, .stopped, url, null) catch |err| {
+    //             std.log.warn("failed announcing to {s} with {t}", .{ url, err });
+    //             continue;
+    //         };
+    //
+    //         if (i != 0) {
+    //             std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
+    //         }
+    //
+    //         return;
+    //     }
+    // }
 }
 
 const Operation = union(enum) {
@@ -267,7 +176,7 @@ const Operation = union(enum) {
     timer: u32,
 };
 
-fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTracker) !?Operation {
+fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTracker) !Operation {
     switch (client.state) {
         .handshake => {
             const handshake = try client.tlsHandshake(alloc);
@@ -295,32 +204,49 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTrac
 
             const interval = try self.addNewAddrs(alloc, content);
             std.log.debug("received interval of {d}", .{interval});
+
+            if (self.used.i != 0) {
+                const tier = self.tiers.items[self.used.tier];
+                const workingUrl = tier.items[self.used.i];
+
+                std.mem.copyForwards(
+                    []const u8,
+                    tier.items[1..self.used.i],
+                    tier.items[0 .. self.used.i - 1],
+                );
+
+                tier.items[0] = workingUrl;
+
+                std.log.debug("updated tier: {any}", .{tier});
+            }
+
+            client.deinit(alloc);
+            self.client = .none;
+            self.used.tier = 0;
+            self.used.i = 0;
+
             return .{ .timer = @intCast(interval) };
         },
     }
 }
 
-pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
-    const tier, const i = blk: {
-        for (self.tiers.items, 0..) |urls, tier| {
-            for (urls.items, 0..) |url, i| {
-                if (!utils.isHttp(url) and !utils.isHttp(url)) {
-                    continue;
-                }
+pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
+    while (true) {
+        const url = self.tiers.items[self.used.tier].items[self.used.i];
+        const client = HttpTracker.init(alloc, url) catch {
+            self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+            continue;
+        };
 
-                break :blk .{ tier, i };
-            }
-        }
+        self.client = .{ .http = client };
+        break;
+    }
 
-        return error.NoAnnounceUrl;
-    };
-
-    const url = self.tiers.items[tier].items[i];
-
-    // TODO: catch error here and use `while (nextUrl)` to make this check all urls
-    self.client = .{ .http = try .init(alloc, url) };
     errdefer switch (self.client) {
-        .http => |*t| t.deinit(alloc),
+        .http => |*t| {
+            t.deinit(alloc);
+            self.client = .none;
+        },
         .none => {},
     };
 
@@ -333,13 +259,10 @@ pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
         .numWant = self.numWant,
     };
 
-    return switch (self.client) {
-        .http => |*t| try self.nextHttpOperation(alloc, t),
-        .none => return error.NoClientSetup,
-    };
+    return try self.nextOperation(alloc);
 }
 
-pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
+pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     return switch (self.client) {
         .http => |*t| try self.nextHttpOperation(alloc, t),
         .none => unreachable,
@@ -351,6 +274,27 @@ pub fn socket(self: *const Tracker) std.posix.socket_t {
         .http => |t| t.socket,
         .none => unreachable,
     };
+}
+
+pub fn nextUsed(self: *Tracker) ?Source {
+    for (self.tiers.items[self.used.tier..], 0..) |urls, tier| {
+        if (self.used.tier == tier) {
+            const maxIInTier = urls.items.len;
+
+            if (self.used.i + 1 < maxIInTier) {
+                self.used.i += 1;
+
+                return self.used;
+            }
+        } else if (urls.items.len > 0) {
+            self.used.tier = @intCast(tier);
+            self.used.i = 0;
+
+            return self.used;
+        }
+    }
+
+    return null;
 }
 
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {

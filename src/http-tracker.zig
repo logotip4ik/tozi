@@ -367,9 +367,10 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
     const contentLength = self.contentLength orelse blk: {
         const head = try std.http.Client.Response.Head.parse(written[0..contentStart]);
 
-        // TODO: maybe this shouldn't result in error
-        const contentLength: u16 = @intCast(head.content_length orelse return error.MissingContentLength);
-        self.contentLength = contentLength;
+        // TODO: maybe missing content length shouldn't result in error ?
+        const contentLength = head.content_length orelse return error.MissingContentLength;
+        if (contentLength > std.math.maxInt(u16)) return error.ContentTooLong;
+        self.contentLength = @intCast(contentLength);
 
         break :blk self.contentLength.?;
     };

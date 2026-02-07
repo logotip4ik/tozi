@@ -74,17 +74,11 @@ pub fn downloadTorrent(
                     tracker.downloaded = pieces.countDownloaded(&torrent);
                     tracker.left = torrent.totalLen - tracker.downloaded;
 
-                    if (try tracker.enqueueKeepAlive(alloc)) |op| switch (op) {
+                    switch (try tracker.enqueueKeepAlive(alloc)) {
                         .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
                         .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
                         .timer => unreachable, // shouldn't be available on first call
-                    };
-
-                    // TODO: i would still like to have this check somehow
-                    // if (peers.items.len == 0 and tracker.newAddrs.items.len == 0) {
-                    //     std.log.info("no pending or alive peers left", .{});
-                    //     return;
-                    // }
+                    }
                 },
                 .tick => {
                     var bytesPerTick: usize = 0;
@@ -135,25 +129,40 @@ pub fn downloadTorrent(
             continue;
         }
 
-        const value = TaggedPointer.unpack(event.udata);
-        // TODO: this should not return peer
-        const peer: *Peer = switch (value) {
-            .peer => |peer| peer,
+        const taggedPointer = TaggedPointer.unpack(event.udata);
+        switch (taggedPointer) {
+            .peer => {},
             .tracker => {
-                const op = try tracker.nextOperation(alloc);
-                const socket = tracker.socket();
+                const nextOperation = tracker.nextOperation(alloc) catch {
+                    switch (tracker.client) {
+                        .http => |*t| t.deinit(alloc),
+                        .none => {},
+                    }
 
-                if (op) |x| switch (x) {
+                    tracker.used = tracker.nextUsed() orelse {
+                        std.log.info("all tracker urls are dead", .{});
+                        return;
+                    };
+
+                    try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
+
+                    continue;
+                };
+
+                switch (nextOperation) {
                     .read => {
+                        const socket = tracker.socket();
+
                         kq.delete(socket, .write) catch {};
                         try kq.subscribe(socket, .read, trackerTaggedPointer);
                     },
                     .write => {
+                        const socket = tracker.socket();
+
                         kq.delete(socket, .read) catch {};
                         try kq.subscribe(socket, .write, trackerTaggedPointer);
                     },
                     .timer => |timer| {
-                        kq.delete(socket, .read) catch {};
                         try kq.addTimer(@intFromEnum(Timer.tracker), timer, .{ .periodic = false });
 
                         while (tracker.nextNewPeer()) |addr| {
@@ -167,7 +176,7 @@ pub fn downloadTorrent(
                             );
                             errdefer std.posix.close(fd);
 
-                            std.log.debug("peer: {d} connecting to {f}", .{fd, addr});
+                            std.log.debug("peer: {d} connecting to {f}", .{ fd, addr });
                             std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
                                 error.WouldBlock => {},
                                 else => return err,
@@ -185,14 +194,19 @@ pub fn downloadTorrent(
 
                             try peers.append(alloc, peer);
                         }
+
+                        if (peers.items.len == 0 and tracker.newAddrs.items.len == 0) {
+                            std.log.info("no pending or alive peers left", .{});
+                            return;
+                        }
                     },
-                };
+                }
 
                 continue;
             },
-        };
-        const taggedPeerPointer = TaggedPointer.pack(.{ .peer = peer });
+        }
 
+        const peer = taggedPointer.peer;
         if (event.err) |err| {
             peer.state = .dead;
             std.log.err("peer: {d} received {t}", .{ peer.socket, err });
@@ -217,7 +231,7 @@ pub fn downloadTorrent(
                 peer.state = .readHandshake;
 
                 try kq.disable(peer.socket, .write);
-                try kq.subscribe(peer.socket, .read, TaggedPointer.pack(.{ .peer = peer }));
+                try kq.subscribe(peer.socket, .read, event.udata);
             },
             .messageStart, .message => {
                 const ready = peer.send() catch {
@@ -264,7 +278,7 @@ pub fn downloadTorrent(
 
                     if (matched.fast and pieces.countDownloaded(&torrent) == 0) {
                         const ready = try peer.addMessage(.haveNone, &.{});
-                        if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
 
                         std.log.debug("peer: {d} sent 'haveNone' message", .{peer.socket});
                     } else {
@@ -272,7 +286,7 @@ pub fn downloadTorrent(
                         defer alloc.free(bitfield);
 
                         const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
-                        if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     }
 
                     if (matched.extended) {
@@ -288,7 +302,7 @@ pub fn downloadTorrent(
                         const ready = try peer.addMessage(.{
                             .extended = .{ .id = 0, .len = @intCast(w.written().len) },
                         }, w.written());
-                        if (!ready) try kq.subscribe(peer.socket, .write, taggedPeerPointer);
+                        if (!ready) try kq.subscribe(peer.socket, .write, event.udata);
                     }
                 },
                 .messageStart => {
@@ -305,7 +319,7 @@ pub fn downloadTorrent(
 
                         if (!peer.choked) {
                             const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
 
                         continue;
@@ -373,7 +387,7 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                        if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
 
                         std.log.debug("peer: {d}, received unchoke message", .{peer.socket});
                     },
@@ -389,7 +403,7 @@ pub fn downloadTorrent(
 
                         if (pieces.hasInterestingPiece(bitfield)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
                     },
                     .haveAll => {
@@ -406,7 +420,7 @@ pub fn downloadTorrent(
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
 
                             std.log.debug("peer: {d} sent 'interested' message", .{peer.socket});
                         }
@@ -450,7 +464,7 @@ pub fn downloadTorrent(
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
                     },
                     .allowedFast => |allowedFast| blk: {
@@ -470,7 +484,7 @@ pub fn downloadTorrent(
                         std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket, allowedFast });
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                        if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
                     },
                     .suggestPiece => |index| {
                         peer.state = .messageStart;
@@ -515,7 +529,7 @@ pub fn downloadTorrent(
                             @branchHint(.likely);
 
                             const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket, .write, taggedPeerPointer);
+                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
@@ -547,7 +561,7 @@ pub fn downloadTorrent(
                             }
 
                             const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                            if (!ready) try kq.enable(otherPeer.socket, .write, TaggedPointer.pack(.{ .peer = otherPeer }));
+                            if (!ready) try kq.enable(otherPeer.socket, .write, event.udata);
                         }
                     },
                     .interested => {
@@ -585,7 +599,7 @@ pub fn downloadTorrent(
 
                         const m: proto.Message = .{ .piece = request };
                         try m.writeMessage(&peer.writeBuf.writer, data);
-                        try kq.enable(peer.socket, .write, taggedPeerPointer);
+                        try kq.enable(peer.socket, .write, event.udata);
                     },
                     .cancel,
                     .port,
