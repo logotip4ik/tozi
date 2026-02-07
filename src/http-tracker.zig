@@ -102,7 +102,6 @@ pub fn tlsHandshake(self: *HttpTracker, alloc: std.mem.Allocator) !*TlsHandshake
     };
 }
 
-// TODO: actually use captured tls cert in connection...
 pub const TlsHandshake = struct {
     caBundle: Tls.config.cert.Bundle,
     client: Tls.nonblock.Client,

@@ -138,28 +138,6 @@ pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) 
     return @max(0, interval.inner.int);
 }
 
-/// TODO: make finalize source
-pub fn finalizeSource(self: *Tracker, alloc: std.mem.Allocator) void {
-    _ = self;
-    _ = alloc;
-    // for (self.tiers.items) |urls| {
-    //     for (urls.items, 0..) |url, i| {
-    //         if (!std.mem.startsWith(u8, url, "http://")) continue;
-    //
-    //         self.sendEvent(alloc, .stopped, url, null) catch |err| {
-    //             std.log.warn("failed announcing to {s} with {t}", .{ url, err });
-    //             continue;
-    //         };
-    //
-    //         if (i != 0) {
-    //             std.mem.swap([]const u8, &urls.items[0], &urls.items[i]);
-    //         }
-    //
-    //         return;
-    //     }
-    // }
-}
-
 pub const Operation = union(enum) {
     read,
     write,
@@ -244,6 +222,13 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTrac
     }
 }
 
+pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
+    return switch (self.client) {
+        .http => |*t| try self.nextHttpOperation(alloc, t),
+        .none => unreachable,
+    };
+}
+
 pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
@@ -276,11 +261,37 @@ pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     return try self.nextOperation(alloc);
 }
 
-pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
-    return switch (self.client) {
-        .http => |*t| try self.nextHttpOperation(alloc, t),
-        .none => unreachable,
+pub fn enqueuefinalizeSource(self: *Tracker, alloc: std.mem.Allocator) !Operation {
+    while (true) {
+        const url = self.tiers.items[self.used.tier].items[self.used.i];
+        const client = HttpTracker.init(alloc, url) catch {
+            self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+            continue;
+        };
+
+        self.client = .{ .http = client };
+        break;
+    }
+
+    errdefer switch (self.client) {
+        .http => |*t| {
+            t.deinit(alloc);
+            self.client = .none;
+        },
+        .none => {},
     };
+
+    self.queued = .{
+        .infoHash = self.infoHash,
+        .peerId = self.peerId,
+        .left = self.left,
+        .downloaded = self.downloaded,
+        .uploaded = self.uploaded,
+        .numWant = self.numWant,
+        .event = .stopped,
+    };
+
+    return try self.nextOperation(alloc);
 }
 
 pub fn socket(self: *const Tracker) std.posix.socket_t {

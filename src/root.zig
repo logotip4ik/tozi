@@ -168,6 +168,11 @@ pub fn downloadTorrent(
                     },
                     .timer => |timer| {
                         kq.killSocket(socket);
+
+                        if (pieces.isDownloadComplete()) {
+                            return;
+                        }
+
                         try kq.addTimer(@intFromEnum(Timer.tracker), timer, .{ .periodic = false });
 
                         while (tracker.nextNewPeer()) |addr| {
@@ -555,8 +560,21 @@ pub fn downloadTorrent(
 
                         if (pieces.isDownloadComplete()) {
                             @branchHint(.cold);
-                            std.log.info("download finished", .{});
-                            break :loop;
+
+                            tracker.downloaded = pieces.countDownloaded(&torrent);
+                            tracker.left = torrent.totalLen - tracker.downloaded;
+                            const op = tracker.enqueuefinalizeSource(alloc) catch return;
+                            switch (op) {
+                                .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
+                                .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
+                                .timer => unreachable, // shouldn't be available on first call
+                            }
+
+                            for (peers.items) |otherPeer| {
+                                kq.killSocket(otherPeer.socket);
+                            }
+
+                            continue :loop;
                         }
 
                         for (peers.items) |otherPeer| {
@@ -628,10 +646,6 @@ pub fn downloadTorrent(
             }
         }
     }
-
-    tracker.downloaded = pieces.countDownloaded(&torrent);
-    tracker.left = torrent.totalLen - tracker.downloaded;
-    tracker.finalizeSource(alloc);
 }
 
 test {
