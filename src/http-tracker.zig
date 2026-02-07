@@ -2,7 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const utils = @import("utils");
-const tls = @import("tls");
+const Tls = @import("tls");
+const Operation = @import("tozi").Tracker.Operation;
 
 const HttpTracker = @This();
 
@@ -19,10 +20,16 @@ socket: std.posix.socket_t,
 
 buffer: std.Io.Writer.Allocating,
 
+encryptedBuf: ?std.array_list.Aligned(u8, null) = null,
+
 url: []const u8,
 uri: std.Uri,
 
-handshake: ?TlsHandshake,
+tls: union(enum) {
+    handshake: TlsHandshake,
+    connection: Tls.nonblock.Connection,
+    none,
+},
 
 /// used in `readingRequest` to prevent re-parsing head each time, new chunk or read appears
 parsedHead: ?struct {
@@ -66,28 +73,39 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
         .socket = socket,
         .url = urlDupe,
         .uri = uri,
-        .handshake = null,
+        .tls = .none,
     };
 }
 
 pub fn deinit(self: *HttpTracker, alloc: std.mem.Allocator) void {
     alloc.free(self.url);
     self.buffer.deinit();
+    if (self.encryptedBuf) |*x| x.deinit(alloc);
+
+    switch (self.tls) {
+        .handshake => |*h| h.deinit(alloc),
+        else => {},
+    }
+
     std.posix.close(self.socket);
 }
 
 pub fn tlsHandshake(self: *HttpTracker, alloc: std.mem.Allocator) !*TlsHandshake {
-    return if (self.handshake) |*x| x else {
-        utils.assert(self.state == .handshake);
-        self.handshake = try .init(alloc, self);
-        return &self.handshake.?;
+    return switch (self.tls) {
+        .handshake => |*h| h,
+        .connection => error.HandshakeAlreadyEstablished,
+        .none => {
+            utils.assert(self.state == .handshake);
+            self.tls = .{ .handshake = try .init(alloc, self) };
+            return &self.tls.handshake;
+        },
     };
 }
 
 // TODO: actually use captured tls cert in connection...
 pub const TlsHandshake = struct {
-    caBundle: tls.config.cert.Bundle,
-    client: tls.nonblock.Client,
+    caBundle: Tls.config.cert.Bundle,
+    client: Tls.nonblock.Client,
 
     socket: std.posix.socket_t,
 
@@ -99,23 +117,23 @@ pub const TlsHandshake = struct {
 
     recvPos: u32 = 0,
 
-    recvBuf: [tls.max_ciphertext_record_len]u8 = undefined,
-    sendBuf: [tls.max_ciphertext_record_len]u8 = undefined,
+    recvBuf: [Tls.max_ciphertext_record_len]u8 = undefined,
+    sendBuf: [Tls.max_ciphertext_record_len]u8 = undefined,
 
     state: union(enum) {
-        needWrite,
-        needRead,
-        done: tls.Cipher,
+        write,
+        read,
+        done: Tls.Cipher,
     },
 
     pub fn init(alloc: std.mem.Allocator, tracker: *const HttpTracker) !TlsHandshake {
-        var caBundle = try tls.config.cert.fromSystem(alloc);
-        defer caBundle.deinit(alloc);
+        var caBundle = try Tls.config.cert.fromSystem(alloc);
+        errdefer caBundle.deinit(alloc);
 
         var hostBuf: [std.Uri.host_name_max]u8 = undefined;
         const host = try tracker.uri.getHost(&hostBuf);
 
-        const client = tls.nonblock.Client.init(.{
+        const client = Tls.nonblock.Client.init(.{
             .host = host,
             .root_ca = caBundle,
             .insecure_skip_verify = builtin.is_test,
@@ -125,7 +143,7 @@ pub const TlsHandshake = struct {
             .caBundle = caBundle,
             .client = client,
             .socket = tracker.socket,
-            .state = .needWrite,
+            .state = .write,
             .res = null,
         };
     }
@@ -135,7 +153,7 @@ pub const TlsHandshake = struct {
     }
 
     pub fn write(self: *TlsHandshake) !void {
-        if (self.state == .done or self.state == .needRead) return;
+        if (self.state == .done or self.state == .read) return;
 
         const res = if (self.res) |*r| r else blk: {
             const res = try self.client.run(self.recvBuf[0..self.recvPos], &self.sendBuf);
@@ -154,12 +172,12 @@ pub const TlsHandshake = struct {
 
         res.sendPos += @intCast(wrote);
 
-        utils.assert(res.sendPos <= tls.max_ciphertext_record_len);
+        utils.assert(res.sendPos <= Tls.max_ciphertext_record_len);
 
         if (res.sendPos == res.send.len) {
             self.recvPos = @intCast(shiftUnused(&self.recvBuf, res.unusedRecv));
             self.res = null;
-            self.state = .needRead;
+            self.state = .read;
 
             if (self.client.cipher()) |cipher| {
                 self.state = .{ .done = cipher };
@@ -168,7 +186,7 @@ pub const TlsHandshake = struct {
     }
 
     pub fn read(self: *TlsHandshake) !void {
-        if (self.state == .done or self.state == .needWrite) return;
+        if (self.state == .done or self.state == .write) return;
 
         const readCount = std.posix.read(self.socket, self.recvBuf[self.recvPos..]) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -177,17 +195,7 @@ pub const TlsHandshake = struct {
 
         self.recvPos += @intCast(readCount);
 
-        self.state = .needWrite;
-    }
-
-    /// Shift unused part of the buffer to the beginning.
-    /// Returns write position for the next write into buffer.
-    /// Unused part is at the end of the buffer.
-    fn shiftUnused(buf: []u8, unused: []const u8) usize {
-        if (unused.len == 0) return 0;
-        if (unused.ptr == buf.ptr) return unused.len;
-        std.mem.copyForwards(u8, buf, unused);
-        return unused.len;
+        self.state = .write;
     }
 
     test "initiate handshake" {
@@ -210,8 +218,8 @@ pub const TlsHandshake = struct {
         try kq.subscribe(handshake.socket, .write, 1);
         try kq.subscribe(handshake.socket, .read, 1);
         try kq.disable(handshake.socket, switch (handshake.state) {
-            .needWrite => .read,
-            .needRead => .write,
+            .write => .read,
+            .read => .write,
             .done => unreachable,
         });
         try kq.addTimer(0, 250, .{ .periodic = false });
@@ -222,12 +230,12 @@ pub const TlsHandshake = struct {
 
             switch (ev.kind) {
                 .timer => unreachable,
-                .write => if (handshake.state == .needWrite) {
+                .write => if (handshake.state == .write) {
                     try handshake.write();
 
                     switch (handshake.state) {
-                        .needWrite => {},
-                        .needRead => {
+                        .write => {},
+                        .read => {
                             try kq.disable(handshake.socket, .write);
                             try kq.enable(handshake.socket, .read, 1);
                         },
@@ -237,10 +245,10 @@ pub const TlsHandshake = struct {
                         },
                     }
                 },
-                .read => if (handshake.state == .needRead) {
+                .read => if (handshake.state == .read) {
                     try handshake.read();
 
-                    if (handshake.state == .needWrite) {
+                    if (handshake.state == .write) {
                         try kq.disable(handshake.socket, .read);
                         try kq.enable(handshake.socket, .write, 1);
                     }
@@ -262,7 +270,7 @@ pub const Stats = struct {
     event: ?enum { started, stopped, completed } = null,
 };
 
-pub fn prepareRequest(self: *HttpTracker, stats: *const Stats) !void {
+pub fn prepareRequest(self: *HttpTracker, alloc: std.mem.Allocator, stats: *const Stats) !void {
     utils.assert(self.state == .prepareRequest);
 
     const w = &self.buffer.writer;
@@ -307,6 +315,24 @@ pub fn prepareRequest(self: *HttpTracker, stats: *const Stats) !void {
 
     try w.writeAll("\r\n");
 
+    switch (self.tls) {
+        .connection => |*conn| {
+            const text = w.buffered();
+            const encryptedSize = conn.encryptedLength(text.len);
+            utils.assert(encryptedSize <= std.math.maxInt(u16));
+
+            const encrypted = try alloc.alloc(u8, encryptedSize);
+            defer alloc.free(encrypted);
+
+            const res = try conn.encrypt(text, encrypted);
+            utils.assert(res.ciphertext.len == encrypted.len);
+
+            _ = w.consumeAll();
+            try w.writeAll(encrypted);
+        },
+        else => {},
+    }
+
     self.state = .sendingRequest;
 }
 
@@ -332,15 +358,46 @@ pub fn sendRequest(self: *HttpTracker) !bool {
 pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
     utils.assert(self.state == .readingRequest);
 
-    const readCount = 8 * 1024;
-    try self.buffer.ensureUnusedCapacity(readCount);
+    const readBuf = switch (self.tls) {
+        .connection => blk: {
+            const arr = if (self.encryptedBuf) |*buf| buf else arr: {
+                self.encryptedBuf = .empty;
+                break :arr &self.encryptedBuf.?;
+            };
 
-    const wrote = std.posix.read(self.socket, self.buffer.writer.unusedCapacitySlice()[0..readCount]) catch |err| switch (err) {
+            try arr.ensureTotalCapacityPrecise(alloc, Tls.max_ciphertext_record_len);
+
+            break :blk arr.unusedCapacitySlice();
+        },
+        .handshake, .none => blk: {
+            const readCount = 4 * 1024;
+            try self.buffer.ensureUnusedCapacity(readCount);
+
+            break :blk self.buffer.writer.unusedCapacitySlice()[0..readCount];
+        },
+    };
+
+    const wrote = std.posix.read(self.socket, readBuf) catch |err| switch (err) {
         error.WouldBlock => return null,
         else => |e| return e,
     };
 
-    self.buffer.writer.end += wrote;
+    switch (self.tls) {
+        .connection => |*conn| {
+            const encryptedBuf = if (self.encryptedBuf) |*x| x else unreachable;
+            encryptedBuf.items.len += wrote;
+
+            try self.buffer.writer.ensureUnusedCapacity(Tls.max_ciphertext_record_len);
+            const res = try conn.decrypt(encryptedBuf.items, self.buffer.writer.unusedCapacitySlice());
+
+            self.buffer.writer.end += res.cleartext.len;
+
+            encryptedBuf.items.len = shiftUnused(encryptedBuf.allocatedSlice(), res.unused_ciphertext);
+        },
+        .handshake, .none => {
+            self.buffer.writer.end += wrote;
+        },
+    }
 
     if (self.buffer.writer.end > std.math.maxInt(u16)) {
         return error.ResponseTooLong;
@@ -353,7 +410,7 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
 
         const contentStart = hp.feed(written);
         if (hp.state != .finished) {
-            return null;
+            return if (wrote == 0) error.ResponseTruncated else null;
         }
 
         const head = try std.http.Client.Response.Head.parse(written[0..contentStart]);
@@ -427,6 +484,16 @@ fn connectToAddress(addr: std.net.Address) !std.posix.socket_t {
     return sock;
 }
 
+/// Shift unused part of the buffer to the beginning.
+/// Returns write position for the next write into buffer.
+/// Unused part is at the end of the buffer.
+fn shiftUnused(buf: []u8, unused: []const u8) usize {
+    if (unused.len == 0) return 0;
+    if (unused.ptr == buf.ptr) return unused.len;
+    std.mem.copyForwards(u8, buf, unused);
+    return unused.len;
+}
+
 const Torrent = @import("torrent.zig");
 
 test "writes correct http request" {
@@ -438,12 +505,12 @@ test "writes correct http request" {
         .uri = try .parse(requrl),
         .socket = 0,
         .url = "",
-        .handshake = null,
+        .tls = .none,
         .state = .prepareRequest,
     };
     defer t.buffer.deinit();
 
-    try t.prepareRequest(&.{
+    try t.prepareRequest(alloc, &.{
         .infoHash = .{1} ** 20,
         .peerId = .{1} ** 20,
         .numWant = 0,
@@ -480,14 +547,16 @@ test "make request" {
     var t: HttpTracker = try .init(alloc, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
 
-    try t.prepareRequest(&.{
+    const stats: Stats = .{
         .infoHash = torrent.infoHash,
         .peerId = .{1} ** 20,
         .numWant = 50,
         .downloaded = 0,
         .uploaded = 0,
         .left = torrent.totalLen,
-    });
+    };
+
+    try t.prepareRequest(alloc, &stats);
 
     const KQ = @import("./kq.zig");
     const Bencode = @import("bencode.zig");
@@ -521,6 +590,108 @@ test "make request" {
         defer value.deinit(alloc);
 
         return;
+    }
+
+    try std.testing.expect(false);
+}
+
+test "make https request" {
+    const alloc = std.testing.allocator;
+
+    var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");
+    defer torrent.deinit(alloc);
+
+    const KQ = @import("./kq.zig");
+    const Bencode = @import("bencode.zig");
+
+    var t: HttpTracker = try .init(alloc, torrent.tiers.items[0].items[0]);
+    defer t.deinit(alloc);
+
+    const stats: Stats = .{
+        .infoHash = torrent.infoHash,
+        .peerId = .{1} ** 20,
+        .numWant = 50,
+        .downloaded = 0,
+        .uploaded = 0,
+        .left = torrent.totalLen,
+    };
+
+    var kq: KQ = try .init(alloc);
+    defer kq.deinit();
+
+    try kq.subscribe(t.socket, .write, 1);
+    try kq.addTimer(0, 100, .{ .periodic = false });
+
+    while (try kq.next()) |e| {
+        try std.testing.expect(e.kind != .timer);
+
+        sw: switch (t.state) {
+            .handshake => {
+                const handshake = try t.tlsHandshake(alloc);
+
+                switch (e.kind) {
+                    .timer => unreachable,
+                    .write => if (handshake.state == .write) {
+                        try handshake.write();
+
+                        switch (handshake.state) {
+                            .write => {},
+                            .read => {
+                                try kq.delete(t.socket, .write);
+                                try kq.subscribe(t.socket, .read, 1);
+                            },
+                            .done => |cipher| {
+                                kq.delete(t.socket, .write) catch {};
+
+                                handshake.deinit(alloc);
+
+                                t.tls = .{ .connection = .init(cipher) };
+                                t.state = .prepareRequest;
+
+                                continue :sw t.state;
+                            }
+                        }
+                    },
+                    .read => if (handshake.state == .read) {
+                        try handshake.read();
+
+                        switch (handshake.state) {
+                            .write => {
+                                try kq.delete(t.socket, .read);
+                                try kq.subscribe(t.socket, .write, 1);
+                            },
+                            .read => {},
+                            .done => unreachable,
+                        }
+                    },
+                }
+            },
+            .prepareRequest => {
+                try t.prepareRequest(alloc, &stats);
+                try kq.subscribe(t.socket, .write, 1);
+            },
+            .sendingRequest => {
+                const ready = try t.sendRequest();
+
+                if (!ready) continue;
+
+                kq.delete(t.socket, .write) catch {};
+                try kq.subscribe(t.socket, .read, 1);
+            },
+            .readingRequest => {
+                const content = try t.readRequest(alloc) orelse continue;
+                defer alloc.free(content);
+
+                kq.delete(t.socket, .read) catch {};
+
+                var reader: std.Io.Reader = .fixed(content);
+
+                var value: Bencode = try .decode(alloc, &reader, 0);
+                defer value.deinit(alloc);
+
+                return;
+            },
+        }
     }
 
     try std.testing.expect(false);
