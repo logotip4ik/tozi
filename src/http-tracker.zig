@@ -25,7 +25,11 @@ uri: std.Uri,
 handshake: ?TlsHandshake,
 
 /// used in `readingRequest` to prevent re-parsing head each time, new chunk or read appears
-contentLength: ?u32 = null,
+parsedHead: ?struct {
+    contentStart: usize,
+    contentLength: ?usize,
+    encoding: std.http.ContentEncoding,
+} = null,
 
 pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
     const isHttp = utils.isHttp(url);
@@ -79,21 +83,6 @@ pub fn tlsHandshake(self: *HttpTracker, alloc: std.mem.Allocator) !*TlsHandshake
         return &self.handshake.?;
     };
 }
-
-// const Operation = enum { write, read };
-// pub fn nextOperation(self: *HttpTracker, alloc: std.mem.Allocator, op: Operation) !Operation {
-//     switch (self.state) {
-//         .handshake => {
-//             const handshake = if (self.handshake) |*x| x else blk: {
-//                 self.handshake = .init(alloc, self);
-//                 break :blk &self.handshake.?;
-//             };
-//             switch (handshake.state) {
-//                 .needWrite
-//             }
-//         }
-//     }
-// }
 
 // TODO: actually use captured tls cert in connection...
 pub const TlsHandshake = struct {
@@ -315,6 +304,7 @@ pub fn prepareRequest(self: *HttpTracker, stats: *const Stats) !void {
     }
     w.undo(2);
     try w.writeAll("\r\n");
+
     try w.writeAll("\r\n");
 
     self.state = .sendingRequest;
@@ -357,32 +347,67 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
     }
 
     const written = self.buffer.written();
-    var hp: std.http.HeadParser = .{};
 
-    const contentStart = hp.feed(written);
-    if (hp.state != .finished) {
-        return null;
-    }
+    const head = self.parsedHead orelse blk: {
+        var hp: std.http.HeadParser = .{};
 
-    const contentLength = self.contentLength orelse blk: {
+        const contentStart = hp.feed(written);
+        if (hp.state != .finished) {
+            return null;
+        }
+
         const head = try std.http.Client.Response.Head.parse(written[0..contentStart]);
 
-        // TODO: maybe missing content length shouldn't result in error ?
-        const contentLength = head.content_length orelse return error.MissingContentLength;
-        if (contentLength > std.math.maxInt(u16)) return error.ContentTooLong;
-        self.contentLength = @intCast(contentLength);
+        if (head.content_length) |contentLength| if (contentLength > std.math.maxInt(u16)) {
+            return error.ResponseTooLong;
+        };
 
-        break :blk self.contentLength.?;
+        if (head.content_encoding == .compress) return error.UnsupportedCompressionMethod;
+
+        self.parsedHead = .{
+            .contentStart = contentStart,
+            .contentLength = head.content_length,
+            .encoding = head.content_encoding,
+        };
+
+        break :blk self.parsedHead.?;
     };
 
-    if (contentStart + contentLength > written.len) {
-        return null;
+    if (head.contentLength) |contentLength| {
+        if (head.contentStart + contentLength > written.len) return null;
+    } else if (wrote != 0) return null;
+
+    defer _ = self.buffer.writer.consumeAll();
+    const bytes = written[head.contentStart..];
+
+    switch (head.encoding) {
+        .compress => unreachable,
+        .identity => return try alloc.dupe(u8, bytes),
+        .zstd => {
+            var reader: std.Io.Reader = .fixed(bytes);
+
+            const buffer = try alloc.alloc(u8, std.compress.zstd.default_window_len);
+            defer alloc.free(buffer);
+
+            var decompress = std.compress.zstd.Decompress.init(&reader, buffer, .{ .verify_checksum = false });
+
+            return try decompress.reader.allocRemaining(alloc, .unlimited);
+        },
+        inline else => |tag| {
+            var reader: std.Io.Reader = .fixed(bytes);
+
+            const buffer = try alloc.alloc(u8, std.compress.flate.max_window_len);
+            defer alloc.free(buffer);
+
+            var decompress = std.compress.flate.Decompress.init(&reader, switch (tag) {
+                .deflate => .zlib,
+                .gzip => .gzip,
+                else => @compileError("handle else in switch above"),
+            }, buffer);
+
+            return try decompress.reader.allocRemaining(alloc, .unlimited);
+        },
     }
-
-    const contenet = try alloc.dupe(u8, written[contentStart .. contentStart + contentLength]);
-    _ = self.buffer.writer.consumeAll();
-
-    return contenet;
 }
 
 fn connectToAddress(addr: std.net.Address) !std.posix.socket_t {
@@ -464,6 +489,7 @@ test "make request" {
     });
 
     const KQ = @import("./kq.zig");
+    const Bencode = @import("bencode.zig");
 
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
@@ -488,7 +514,11 @@ test "make request" {
         const bytes = try t.readRequest(alloc) orelse continue;
         defer alloc.free(bytes);
 
-        try std.testing.expectEqual(82, bytes.len);
+        var reader: std.Io.Reader = .fixed(bytes);
+
+        var value: Bencode = try .decode(alloc, &reader, 0);
+        defer value.deinit(alloc);
+
         return;
     }
 
