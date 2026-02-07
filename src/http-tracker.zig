@@ -363,6 +363,7 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
         };
 
         if (head.content_encoding == .compress) return error.UnsupportedCompressionMethod;
+        if (head.transfer_encoding == .chunked) return error.UnsupportedTransferEncoding;
 
         self.parsedHead = .{
             .contentStart = contentStart,
