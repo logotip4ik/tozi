@@ -5,13 +5,14 @@ const proto = @import("proto.zig");
 const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
 const Handshake = @import("handshake.zig");
+const Socket = @import("socket.zig");
 
 const Peer = @This();
 
 const DEFAULT_IN_FLIGHT_REQUESTS = 50;
 const DEFAULT_ALLOWED_FAST = 10;
 
-socket: std.posix.fd_t,
+socket: Socket.Posix,
 
 state: State = .writeHandshake,
 
@@ -48,7 +49,7 @@ pub const State = union(enum) {
 
 pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
     return .{
-        .socket = fd,
+        .socket = .init(fd),
         .readBuf = .init(alloc),
         .writeBuf = .init(alloc),
         .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
@@ -68,7 +69,7 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     if (self.workingOn) |*x| x.deinit(alloc);
     if (self.extended) |*x| x.deinit(alloc);
 
-    std.posix.close(self.socket);
+    std.posix.close(self.socket.fd);
 }
 
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
@@ -84,14 +85,8 @@ pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void
     try list.ensureTotalCapacity(alloc, size);
 
     const left = size - list.items.len;
-    const count = std.posix.read(self.socket, list.unusedCapacitySlice()[0..left]) catch |err| switch (err) {
-        error.WouldBlock => return null,
-        else => |e| return e,
-    };
 
-    if (count == 0) {
-        return error.EndOfStream;
-    }
+    const count = try self.socket.interface.read(list.unusedCapacitySlice()[0..left]) orelse return null;
 
     list.items.len += count;
 
@@ -128,10 +123,7 @@ pub fn send(self: *Peer) !bool {
         return true;
     }
 
-    const wrote = std.posix.write(self.socket, toWrite) catch |err| switch (err) {
-        error.WouldBlock => return false,
-        else => |e| return e,
-    };
+    const wrote = try self.socket.interface.write(toWrite) orelse return false;
 
     _ = self.writeBuf.writer.consume(wrote);
 
@@ -152,7 +144,7 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     if (self.choked) {
         for (self.allowedFast.items) |index| {
             if (pieces.canFetch(index)) {
-                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{ self.socket, index });
+                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{ self.socket.fd, index });
                 return @intCast(index);
             }
         }
@@ -232,7 +224,7 @@ pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
 
 pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u32) !?proto.Message {
     const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
-        std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket, idInt });
+        std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket.fd, idInt });
         return error.Dead;
     };
 
@@ -277,7 +269,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
             const mLen = reader.takeInt(u32, .big) catch unreachable;
 
             if (mLen > Torrent.BLOCK_SIZE) {
-                std.log.err("peer: {d} dropped (msg too big: {d})", .{ self.socket, len });
+                std.log.err("peer: {d} dropped (msg too big: {d})", .{ self.socket.fd, len });
                 return error.Dead;
             }
 

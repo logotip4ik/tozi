@@ -296,7 +296,7 @@ pub fn enqueuefinalizeSource(self: *Tracker, alloc: std.mem.Allocator) !Operatio
 
 pub fn socket(self: *const Tracker) std.posix.socket_t {
     return switch (self.client) {
-        .http => |t| t.socket,
+        .http => |t| t.socketPosix.?.fd,
         .none => unreachable,
     };
 }

@@ -8,6 +8,7 @@ pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
 pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
+pub const Socket = @import("socket.zig");
 
 const utils = @import("utils");
 const proto = @import("proto.zig");
@@ -36,7 +37,7 @@ pub fn downloadTorrent(
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
-            kq.killSocket(peer.socket);
+            kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
             alloc.destroy(peer);
@@ -101,13 +102,13 @@ pub fn downloadTorrent(
                             if (!peer.isUnchoked) {
                                 peer.isUnchoked = true;
                                 const ready = try peer.addMessage(.unchoke, &.{});
-                                if (!ready) try kq.enable(peer.socket, .write, TaggedPointer.pack(.{ .peer = peer }));
+                                if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
                             }
                             unchokedCount += 1;
                         } else if (peer.isUnchoked) {
                             peer.isUnchoked = false;
                             const ready = try peer.addMessage(.choke, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, TaggedPointer.pack(.{ .peer = peer }));
+                            if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
                         }
 
                         bytesPerTick += peer.bytesReceived;
@@ -199,8 +200,8 @@ pub fn downloadTorrent(
                             };
                             errdefer peer.deinit(alloc);
 
-                            try kq.subscribe(peer.socket, .write, TaggedPointer.pack(.{ .peer = peer }));
-                            errdefer kq.killSocket(peer.socket);
+                            try kq.subscribe(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
+                            errdefer kq.killSocket(peer.socket.fd);
 
                             try peers.append(alloc, peer);
                         }
@@ -219,7 +220,7 @@ pub fn downloadTorrent(
         const peer = taggedPointer.peer;
         if (event.err) |err| {
             peer.state = .dead;
-            std.log.err("peer: {d} received {t}", .{ peer.socket, err });
+            std.log.err("peer: {d} received {t}", .{ peer.socket.fd, err });
         }
 
         const isDead = peer.state == .dead;
@@ -240,8 +241,8 @@ pub fn downloadTorrent(
 
                 peer.state = .readHandshake;
 
-                try kq.disable(peer.socket, .write);
-                try kq.subscribe(peer.socket, .read, event.udata);
+                try kq.disable(peer.socket.fd, .write);
+                try kq.subscribe(peer.socket.fd, .read, event.udata);
             },
             .messageStart, .message => {
                 const ready = peer.send() catch {
@@ -251,7 +252,7 @@ pub fn downloadTorrent(
 
                 if (!ready) continue;
 
-                try kq.disable(peer.socket, .write);
+                try kq.disable(peer.socket.fd, .write);
             },
         };
 
@@ -277,7 +278,7 @@ pub fn downloadTorrent(
                     defer alloc.free(bytes);
 
                     const matched = handshake.matchExtensions(bytes) catch |err| {
-                        std.log.err("peer: {d} bad handshake {s}", .{ peer.socket, @errorName(err) });
+                        std.log.err("peer: {d} bad handshake {s}", .{ peer.socket.fd, @errorName(err) });
                         peer.state = .dead;
                         break :readblk;
                     };
@@ -288,19 +289,19 @@ pub fn downloadTorrent(
 
                     if (matched.fast and pieces.countDownloaded(&torrent) == 0) {
                         const ready = try peer.addMessage(.haveNone, &.{});
-                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
-                        std.log.debug("peer: {d} sent 'haveNone' message", .{peer.socket});
+                        std.log.debug("peer: {d} sent 'haveNone' message", .{peer.socket.fd});
                     } else {
                         const bitfield = try pieces.torrentBitfieldBytes(alloc);
                         defer alloc.free(bitfield);
 
                         const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
-                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     }
 
                     if (matched.extended) {
-                        std.log.debug("peer: {d} sending extended handshake message", .{peer.socket});
+                        std.log.debug("peer: {d} sending extended handshake message", .{peer.socket.fd});
 
                         var extended: Handshake.Extended = .{};
 
@@ -312,7 +313,7 @@ pub fn downloadTorrent(
                         const ready = try peer.addMessage(.{
                             .extended = .{ .id = 0, .len = @intCast(w.written().len) },
                         }, w.written());
-                        if (!ready) try kq.subscribe(peer.socket, .write, event.udata);
+                        if (!ready) try kq.subscribe(peer.socket.fd, .write, event.udata);
                     }
                 },
                 .messageStart => {
@@ -329,14 +330,14 @@ pub fn downloadTorrent(
 
                         if (!peer.choked) {
                             const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
 
                         continue;
                     }
 
                     if (len > Torrent.BLOCK_SIZE + 9) {
-                        std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket, len });
+                        std.log.err("peer: {d} dropped (msg too big: {d})", .{ peer.socket.fd, len });
                         peer.state = .dead;
                         break :readblk;
                     }
@@ -381,7 +382,7 @@ pub fn downloadTorrent(
                                 };
                                 peer.extended = e;
 
-                                std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket, e.v, e.reqq });
+                                std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket.fd, e.v, e.reqq });
 
                                 if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
                             },
@@ -397,9 +398,9 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
-                        std.log.debug("peer: {d}, received unchoke message", .{peer.socket});
+                        std.log.debug("peer: {d}, received unchoke message", .{peer.socket.fd});
                     },
                     .have => |piece| {
                         peer.state = .messageStart;
@@ -413,7 +414,7 @@ pub fn downloadTorrent(
 
                         if (pieces.hasInterestingPiece(bitfield)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
                     },
                     .haveAll => {
@@ -423,16 +424,16 @@ pub fn downloadTorrent(
                             continue;
                         }
 
-                        std.log.debug("peer: {d} receied 'haveAll' message", .{peer.socket});
+                        std.log.debug("peer: {d} receied 'haveAll' message", .{peer.socket.fd});
 
                         peer.bitfield = try .initFull(alloc, pieces.pieces.len);
                         peer.workingOn = try .initEmpty(alloc, pieces.pieces.len);
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
-                            std.log.debug("peer: {d} sent 'interested' message", .{peer.socket});
+                            std.log.debug("peer: {d} sent 'interested' message", .{peer.socket.fd});
                         }
                     },
                     .haveNone => {
@@ -449,7 +450,7 @@ pub fn downloadTorrent(
                         if (peer.protocols.fast and peer.bitfield != null) {
                             peer.state = .dead;
                             std.log.warn("peer: {d} received bitfield message while already received `have` messages", .{
-                                peer.socket,
+                                peer.socket.fd,
                             });
                             break :readblk;
                         }
@@ -474,7 +475,7 @@ pub fn downloadTorrent(
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
                             const ready = try peer.addMessage(.interested, &.{});
-                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
                     },
                     .allowedFast => |allowedFast| blk: {
@@ -491,14 +492,14 @@ pub fn downloadTorrent(
 
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
 
-                        std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket, allowedFast });
+                        std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket.fd, allowedFast });
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                        if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .suggestPiece => |index| {
                         peer.state = .messageStart;
-                        std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{ peer.socket, index });
+                        std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{ peer.socket.fd, index });
                     },
                     .rejectRequest => |piece| {
                         _ = piece;
@@ -527,7 +528,7 @@ pub fn downloadTorrent(
                         if (piece.index > totalPieces) {
                             @branchHint(.unlikely);
                             std.log.err("peer {d} sent unknown piece message: {d}", .{
-                                peer.socket,
+                                peer.socket.fd,
                                 piece.index,
                             });
                             peer.state = .dead;
@@ -539,7 +540,7 @@ pub fn downloadTorrent(
                             @branchHint(.likely);
 
                             const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
@@ -551,7 +552,7 @@ pub fn downloadTorrent(
                         const expectedHash = torrent.pieces[piece.index * 20 ..][0..20];
                         pieces.validatePiece(completed.written(), expectedHash) catch {
                             @branchHint(.unlikely);
-                            std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket });
+                            std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
                             pieces.reset(piece.index);
                             continue;
                         };
@@ -571,7 +572,7 @@ pub fn downloadTorrent(
                             }
 
                             for (peers.items) |otherPeer| {
-                                kq.killSocket(otherPeer.socket);
+                                kq.killSocket(otherPeer.socket.fd);
                             }
 
                             continue :loop;
@@ -584,18 +585,18 @@ pub fn downloadTorrent(
                             }
 
                             const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                            if (!ready) try kq.enable(otherPeer.socket, .write, event.udata);
+                            if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
                         }
                     },
                     .interested => {
                         peer.isInterested = true;
                         peer.state = .messageStart;
-                        std.log.info("peer: {d} is interested", .{peer.socket});
+                        std.log.info("peer: {d} is interested", .{peer.socket.fd});
                     },
                     .notInterested => {
                         peer.isInterested = false;
                         peer.state = .messageStart;
-                        std.log.info("peer: {d} is not interested", .{peer.socket});
+                        std.log.info("peer: {d} is not interested", .{peer.socket.fd});
                     },
                     .request => |request| {
                         peer.state = .messageStart;
@@ -607,7 +608,7 @@ pub fn downloadTorrent(
                         if (request.index > totalPieces) {
                             @branchHint(.unlikely);
                             std.log.err("peer {d} sent unknown request message: {d}", .{
-                                peer.socket,
+                                peer.socket.fd,
                                 request.index,
                             });
                             peer.state = .dead;
@@ -616,13 +617,13 @@ pub fn downloadTorrent(
 
                         peer.requestsPerTick += 1;
 
-                        std.log.info("peer: {d} sending {any}", .{ peer.socket, request });
+                        std.log.info("peer: {d} sending {any}", .{ peer.socket.fd, request });
                         const data = try files.readPieceData(alloc, request, torrent.pieceLen);
                         defer alloc.free(data);
 
                         const m: proto.Message = .{ .piece = request };
                         try m.writeMessage(&peer.writeBuf.writer, data);
-                        try kq.enable(peer.socket, .write, event.udata);
+                        try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .cancel,
                     .port,
@@ -634,7 +635,7 @@ pub fn downloadTorrent(
         }
 
         if (peer.state == .dead) {
-            kq.killSocket(peer.socket);
+            kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
 
