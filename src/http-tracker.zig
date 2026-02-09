@@ -22,7 +22,8 @@ socketPosix: ?Socket.Posix,
 
 buffer: std.Io.Writer.Allocating,
 
-encryptedBuf: ?std.array_list.Aligned(u8, null) = null,
+encryptedBuf: std.array_list.Aligned(u8, null) = .empty,
+chunks: std.array_list.Aligned(packed struct { start: u32, len: u32 }, null) = .empty,
 
 url: []const u8,
 uri: std.Uri,
@@ -36,7 +37,7 @@ tls: union(enum) {
 /// used in `readingRequest` to prevent re-parsing head each time, new chunk or read appears
 parsedHead: ?struct {
     contentStart: usize,
-    contentLength: ?usize,
+    transfer: union(enum) { chunked: struct { start: usize, headerLen: ?usize, len: ?usize }, length: ?usize },
     encoding: std.http.ContentEncoding,
 } = null,
 
@@ -87,7 +88,8 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
 pub fn deinit(self: *HttpTracker, alloc: std.mem.Allocator) void {
     alloc.free(self.url);
     self.buffer.deinit();
-    if (self.encryptedBuf) |*x| x.deinit(alloc);
+    self.chunks.deinit(alloc);
+    self.encryptedBuf.deinit(alloc);
 
     switch (self.tls) {
         .handshake => |*h| h.deinit(alloc),
@@ -355,14 +357,9 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
 
     const readBuf = switch (self.tls) {
         .connection => blk: {
-            const arr = if (self.encryptedBuf) |*buf| buf else arr: {
-                self.encryptedBuf = .empty;
-                break :arr &self.encryptedBuf.?;
-            };
+            try self.encryptedBuf.ensureTotalCapacityPrecise(alloc, Tls.max_ciphertext_record_len);
 
-            try arr.ensureTotalCapacityPrecise(alloc, Tls.max_ciphertext_record_len);
-
-            break :blk arr.unusedCapacitySlice();
+            break :blk self.encryptedBuf.unusedCapacitySlice();
         },
         .handshake, .none => blk: {
             const readCount = 4 * 1024;
@@ -376,15 +373,14 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
 
     switch (self.tls) {
         .connection => |*conn| {
-            const encryptedBuf = if (self.encryptedBuf) |*x| x else unreachable;
-            encryptedBuf.items.len += count;
+            self.encryptedBuf.items.len += count;
 
             try self.buffer.writer.ensureUnusedCapacity(Tls.max_ciphertext_record_len);
-            const res = try conn.decrypt(encryptedBuf.items, self.buffer.writer.unusedCapacitySlice());
+            const res = try conn.decrypt(self.encryptedBuf.items, self.buffer.writer.unusedCapacitySlice());
 
             self.buffer.writer.end += res.cleartext.len;
 
-            encryptedBuf.items.len = shiftUnused(encryptedBuf.allocatedSlice(), res.unused_ciphertext);
+            self.encryptedBuf.items.len = shiftUnused(self.encryptedBuf.allocatedSlice(), res.unused_ciphertext);
         },
         .handshake, .none => {
             self.buffer.writer.end += count;
@@ -396,8 +392,7 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
     }
 
     const written = self.buffer.written();
-
-    const head = self.parsedHead orelse blk: {
+    const head = if (self.parsedHead) |*x| x else blk: {
         var hp: std.http.HeadParser = .{};
 
         const contentStart = hp.feed(written);
@@ -407,28 +402,84 @@ pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
 
         const head = try std.http.Client.Response.Head.parse(written[0..contentStart]);
 
+        if (head.status != .ok) return error.NonOkStatus;
         if (head.content_length) |contentLength| if (contentLength > std.math.maxInt(u16)) {
             return error.ResponseTooLong;
         };
 
         if (head.content_encoding == .compress) return error.UnsupportedCompressionMethod;
-        if (head.transfer_encoding == .chunked) return error.UnsupportedTransferEncoding;
 
         self.parsedHead = .{
-            .contentStart = contentStart,
-            .contentLength = head.content_length,
             .encoding = head.content_encoding,
+            .contentStart = contentStart,
+            .transfer = if (head.transfer_encoding == .chunked)
+                .{ .chunked = .{ .start = contentStart, .headerLen = null, .len = null } }
+            else
+                .{ .length = head.content_length },
         };
 
-        break :blk self.parsedHead.?;
+        break :blk &self.parsedHead.?;
     };
 
-    if (head.contentLength) |contentLength| {
-        if (head.contentStart + contentLength > written.len) return null;
-    } else if (count != 0) return null;
+    switch (head.transfer) {
+        .length => |len| {
+            if (len) |contentLength| {
+                if (head.contentStart + contentLength > written.len) return null;
+            } else if (count != 0) return null;
+        },
+        .chunked => |*state| while (true) {
+            if (state.len) |chunkLen| {
+                const end = state.start + state.headerLen.? + chunkLen + 2;
 
-    defer _ = self.buffer.writer.consumeAll();
-    const bytes = written[head.contentStart..];
+                if (written.len < end) {
+                    return null;
+                } else {
+                    try self.chunks.append(alloc, .{
+                        .start = @intCast(state.start + state.headerLen.?),
+                        .len = @intCast(chunkLen),
+                    });
+
+                    state.start = end;
+                    state.len = null;
+                }
+            } else {
+                var chp: std.http.ChunkParser = .init;
+                const headerLen = chp.feed(written[state.start..]);
+
+                switch (chp.state) {
+                    .invalid => return error.InvalidChunkEncoding,
+                    .data => {
+                        if (chp.chunk_len == 0) break;
+
+                        state.len = chp.chunk_len;
+                        state.headerLen = headerLen;
+                    },
+                    else => return null,
+                }
+            }
+        },
+    }
+
+    const bytes = switch (head.transfer) {
+        .length => written[head.contentStart..],
+        .chunked => blk: {
+            var prevChunkEnd: usize = head.contentStart;
+            var copied: usize = 0;
+
+            for (self.chunks.items) |chunk| {
+                std.mem.copyForwards(
+                    u8,
+                    written[prevChunkEnd .. prevChunkEnd + chunk.len],
+                    written[chunk.start .. chunk.start + chunk.len],
+                );
+
+                prevChunkEnd += chunk.len;
+                copied += chunk.len;
+            }
+
+            break :blk written[head.contentStart .. head.contentStart + copied];
+        },
+    };
 
     switch (head.encoding) {
         .compress => unreachable,
@@ -644,7 +695,7 @@ test "make https request" {
                                 t.state = .prepareRequest;
 
                                 continue :sw t.state;
-                            }
+                            },
                         }
                     },
                     .read => if (handshake.state == .read) {
@@ -690,6 +741,50 @@ test "make https request" {
     }
 
     try std.testing.expect(false);
+}
+
+test "chuncked transfer encoding" {
+    const alloc = std.testing.allocator;
+
+    outer: for (12..32) |max| {
+        var a: Socket.Allocating = .init(alloc, @intCast(max));
+        defer a.deinit();
+
+        try a.addInBytes("HTTP/1.1 200 OK\r\n" ++
+            "Content-Type: text/plain\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "\r\n" ++
+            "5\r\n" ++
+            "Hello\r\n" ++
+            "7\r\n" ++
+            " World!\r\n" ++
+            "0\r\n" ++
+            "\r\n");
+
+        var t: HttpTracker = .{
+            .socket = &a.interface,
+            .socketPosix = null,
+            .buffer = .init(alloc),
+            .state = .readingRequest,
+            .tls = .none,
+            .url = undefined,
+            .uri = undefined,
+        };
+        defer t.buffer.deinit();
+        defer t.chunks.deinit(alloc);
+
+        var i: u8 = 0;
+        while (i < std.math.maxInt(u8)) : (i += 1) {
+            const bytes = try t.readRequest(alloc) orelse continue;
+            defer alloc.free(bytes);
+
+            try std.testing.expectEqualStrings("Hello World!", bytes);
+
+            break :outer;
+        }
+
+        try std.testing.expect(false);
+    }
 }
 
 test {
