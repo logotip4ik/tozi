@@ -108,7 +108,7 @@ pub const Allocating = struct {
         @memcpy(buf[0..count], p.bufferIn.items[0..count]);
 
         const left = p.bufferIn.items.len - count;
-        std.mem.copyBackwards(u8, p.bufferIn.items[0..left], p.bufferIn.items[count..]);
+        std.mem.copyForwards(u8, p.bufferIn.items[0..left], p.bufferIn.items[count..]);
         p.bufferIn.items.len = left;
 
         return count;
@@ -126,7 +126,7 @@ pub const Allocating = struct {
         return count;
     }
 
-    fn addInBytes(self: *Allocating, bytes: []const u8) !void {
+    pub fn addInBytes(self: *Allocating, bytes: []const u8) !void {
         try self.bufferIn.appendSlice(self.alloc, bytes);
     }
 };
