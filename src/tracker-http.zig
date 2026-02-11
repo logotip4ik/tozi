@@ -6,7 +6,7 @@ const Tls = @import("tls");
 const Socket = @import("socket.zig");
 const Operation = @import("tozi").Tracker.Operation;
 
-const HttpTracker = @This();
+const TrackerHttp = @This();
 
 const State = enum {
     handshake,
@@ -41,7 +41,7 @@ parsedHead: ?struct {
     encoding: std.http.ContentEncoding,
 } = null,
 
-pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
+pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
     const isHttp = utils.isHttp(url);
     const isHttps = utils.isHttps(url);
     utils.assert(isHttp or isHttps);
@@ -70,7 +70,7 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
         return std.posix.ConnectError.ConnectionRefused;
     };
 
-    var self = HttpTracker{
+    var self = TrackerHttp{
         .state = if (isHttps) .handshake else .prepareRequest,
         .buffer = .init(alloc),
         .socket = undefined,
@@ -85,7 +85,7 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !HttpTracker {
     return self;
 }
 
-pub fn deinit(self: *HttpTracker, alloc: std.mem.Allocator) void {
+pub fn deinit(self: *TrackerHttp, alloc: std.mem.Allocator) void {
     alloc.free(self.url);
     self.buffer.deinit();
     self.chunks.deinit(alloc);
@@ -99,7 +99,7 @@ pub fn deinit(self: *HttpTracker, alloc: std.mem.Allocator) void {
     if (self.socketPosix) |x| std.posix.close(x.fd);
 }
 
-pub fn tlsHandshake(self: *HttpTracker, alloc: std.mem.Allocator) !*TlsHandshake {
+pub fn tlsHandshake(self: *TrackerHttp, alloc: std.mem.Allocator) !*TlsHandshake {
     return switch (self.tls) {
         .handshake => |*h| h,
         .connection => error.HandshakeAlreadyEstablished,
@@ -134,7 +134,7 @@ pub const TlsHandshake = struct {
         done: Tls.Cipher,
     },
 
-    pub fn init(alloc: std.mem.Allocator, tracker: *const HttpTracker) !TlsHandshake {
+    pub fn init(alloc: std.mem.Allocator, tracker: *const TrackerHttp) !TlsHandshake {
         var caBundle = try Tls.config.cert.fromSystem(alloc);
         errdefer caBundle.deinit(alloc);
 
@@ -204,7 +204,7 @@ pub const TlsHandshake = struct {
         var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");
         defer torrent.deinit(alloc);
 
-        var t: HttpTracker = try .init(alloc, torrent.tiers.items[0].items[0]);
+        var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
         defer t.deinit(alloc);
         const socket = t.socketPosix.?.fd;
 
@@ -271,7 +271,7 @@ pub const Stats = struct {
     event: ?enum { started, stopped, completed } = null,
 };
 
-pub fn prepareRequest(self: *HttpTracker, alloc: std.mem.Allocator, stats: *const Stats) !void {
+pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *const Stats) !void {
     utils.assert(self.state == .prepareRequest);
 
     const w = &self.buffer.writer;
@@ -338,7 +338,7 @@ pub fn prepareRequest(self: *HttpTracker, alloc: std.mem.Allocator, stats: *cons
 }
 
 /// true - wrote all, false - still data to be written
-pub fn sendRequest(self: *HttpTracker) !bool {
+pub fn sendRequest(self: *TrackerHttp) !bool {
     utils.assert(self.state == .sendingRequest);
 
     const wrote = try self.socket.write(self.buffer.written()) orelse return false;
@@ -352,7 +352,7 @@ pub fn sendRequest(self: *HttpTracker) !bool {
     return true;
 }
 
-pub fn readRequest(self: *HttpTracker, alloc: std.mem.Allocator) !?[]u8 {
+pub fn readRequest(self: *TrackerHttp, alloc: std.mem.Allocator) !?[]u8 {
     utils.assert(self.state == .readingRequest);
 
     const readBuf = switch (self.tls) {
@@ -543,7 +543,7 @@ test "writes correct http request" {
     const requrl = "http://localhost:9000/announce";
 
     const alloc = std.testing.allocator;
-    var t = HttpTracker{
+    var t = TrackerHttp{
         .buffer = .init(alloc),
         .uri = try .parse(requrl),
         .socket = undefined,
@@ -588,7 +588,7 @@ test "make request" {
     var torrent = try getTestTorrent(alloc, "./src/test_files/copper.torrent");
     defer torrent.deinit(alloc);
 
-    var t: HttpTracker = try .init(alloc, torrent.tiers.items[0].items[0]);
+    var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
     const socket = t.socketPosix.?.fd;
 
@@ -649,7 +649,7 @@ test "make https request" {
     const KQ = @import("./kq.zig");
     const Bencode = @import("bencode.zig");
 
-    var t: HttpTracker = try .init(alloc, torrent.tiers.items[0].items[0]);
+    var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
     const socket = t.socketPosix.?.fd;
 
@@ -761,7 +761,7 @@ test "chuncked transfer encoding" {
             "0\r\n" ++
             "\r\n");
 
-        var t: HttpTracker = .{
+        var t: TrackerHttp = .{
             .socket = &a.interface,
             .socketPosix = null,
             .buffer = .init(alloc),
@@ -788,5 +788,5 @@ test "chuncked transfer encoding" {
 }
 
 test {
-    std.testing.refAllDecls(HttpTracker);
+    std.testing.refAllDecls(TrackerHttp);
 }

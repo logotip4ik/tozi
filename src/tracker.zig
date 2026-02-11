@@ -5,7 +5,7 @@ const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 
-const HttpTracker = @import("./http-tracker.zig");
+const TrackerHttp = @import("./tracker-http.zig");
 
 const Tracker = @This();
 
@@ -23,7 +23,7 @@ numWant: u16 = 100,
 
 port: u16 = 6889,
 
-client: union(enum) { none, http: HttpTracker } = .none,
+client: union(enum) { none, http: TrackerHttp } = .none,
 
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
@@ -32,7 +32,7 @@ tiers: Torrent.Tiers,
 
 used: Source = .{ .tier = 0, .i = 0 },
 
-queued: HttpTracker.Stats = undefined,
+queued: TrackerHttp.Stats = undefined,
 
 const Source = packed struct {
     tier: u32,
@@ -144,7 +144,7 @@ pub const Operation = union(enum) {
     timer: u32,
 };
 
-fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *HttpTracker) !Operation {
+fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
     sw: switch (client.state) {
         .handshake => {
             const handshake = try client.tlsHandshake(alloc);
@@ -232,7 +232,7 @@ pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
 pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
-        const client = HttpTracker.init(alloc, url) catch {
+        const client = TrackerHttp.init(alloc, url) catch {
             self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
             continue;
         };
@@ -264,7 +264,7 @@ pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
 pub fn enqueuefinalizeSource(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
-        const client = HttpTracker.init(alloc, url) catch {
+        const client = TrackerHttp.init(alloc, url) catch {
             self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
             continue;
         };
@@ -347,5 +347,5 @@ pub fn generatePeerId() [20]u8 {
 }
 
 test {
-    _ = @import("http-tracker.zig");
+    _ = @import("tracker-http.zig");
 }
