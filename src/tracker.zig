@@ -6,6 +6,7 @@ const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 
 const TrackerHttp = @import("./tracker-http.zig");
+const Operation = @import("./tracker-utils.zig").Operation;
 
 const Tracker = @This();
 
@@ -137,12 +138,6 @@ pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) 
 
     return @max(0, interval.inner.int);
 }
-
-pub const Operation = union(enum) {
-    read,
-    write,
-    timer: u32,
-};
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
     sw: switch (client.state) {

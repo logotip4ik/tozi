@@ -7,6 +7,7 @@ pub const Files = @import("files.zig");
 pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
 pub const Tracker = @import("tracker.zig");
+pub const TrackerUtils = @import("tracker-utils.zig");
 pub const Handshake = @import("handshake.zig");
 pub const Socket = @import("socket.zig");
 
@@ -54,7 +55,7 @@ pub fn downloadTorrent(
     );
     defer tracker.deinit(alloc);
     const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
-    var prevTrackerOperation: Tracker.Operation = .{ .timer = 0 };
+    var prevTrackerOperation: TrackerUtils.Operation = .{ .timer = 0 };
 
     const Timer = enum { tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });

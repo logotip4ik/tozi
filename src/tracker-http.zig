@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils");
 const Tls = @import("tls");
+const utils = @import("utils");
 const Socket = @import("socket.zig");
-const Operation = @import("tozi").Tracker.Operation;
+
+const Operation = @import("./tracker-utils.zig").Operation;
 
 const TrackerHttp = @This();
 
@@ -37,8 +38,11 @@ tls: union(enum) {
 /// used in `readingRequest` to prevent re-parsing head each time, new chunk or read appears
 parsedHead: ?struct {
     contentStart: usize,
-    transfer: union(enum) { chunked: struct { start: usize, headerLen: ?usize, len: ?usize }, length: ?usize },
     encoding: std.http.ContentEncoding,
+    transfer: union(enum) {
+        chunked: struct { start: usize, headerLen: ?usize, len: ?usize },
+        length: ?usize,
+    },
 } = null,
 
 pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
