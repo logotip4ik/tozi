@@ -4,12 +4,12 @@ pub inline fn assert(ok: bool) void {
     if (!ok) unreachable;
 }
 
-const MAX_REQUEST_POOL_SIZE = 250;
-
 pub const RqPool = struct {
     buf: []Piece,
     count: usize = 0,
     size: usize,
+
+    const MAX_REQUEST_POOL_SIZE = 250;
 
     pub const Piece = packed struct { index: u32, begin: u32 };
 

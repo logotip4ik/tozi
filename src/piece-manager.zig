@@ -24,7 +24,7 @@ const State = enum(u2) {
     have,
 };
 
-const MAX_STALE_BUFFERS_COUNT = 64; // 64 stale piece buffers, should be plenty right ?
+const MAX_STALE_BUFFERS_COUNT = 32; // 32 stale piece buffers, should be plenty right ?
 
 const PieceBuf = struct {
     fetched: u32,
@@ -114,7 +114,7 @@ pub fn validatePiece(
     noalias bytes: []const u8,
     noalias expectedHash: []const u8,
 ) !void {
-    const computedHash = hasher.hash(bytes) catch return error.HashingFailed;
+    const computedHash = hasher.hash(bytes);
 
     if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
         @branchHint(.unlikely);
@@ -200,8 +200,12 @@ pub fn canFetch(self: *PieceManager, index: usize) bool {
     }
 }
 
+pub fn isEndgame(self: *const PieceManager) bool {
+    return self.missingCount == 0;
+}
+
 pub fn isDownloadComplete(self: PieceManager) bool {
-    return std.mem.allEqual(State, self.pieces, .have);
+    return self.completedCount == self.pieces.len;
 }
 
 pub fn reset(self: *PieceManager, index: u32) void {

@@ -17,7 +17,7 @@ const KEvent = std.posix.Kevent;
 
 pub const Kind = enum(u2) { timer, read, write };
 
-const MAX_EVENTS = 512;
+const MAX_EVENTS = 256;
 
 pub fn init(alloc: std.mem.Allocator) !KQ {
     comptime utils.assert(builtin.os.tag == .macos);

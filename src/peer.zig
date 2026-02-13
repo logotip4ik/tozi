@@ -197,9 +197,7 @@ pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pi
             self.workingPieceOffset = 0;
             self.workingPiece = self.nextWorkingPiece(pieces) orelse break;
 
-            if (self.workingOn) |*workingOn| {
-                workingOn.set(self.workingPiece.?);
-            }
+            self.workingOn.?.set(self.workingPiece.?);
 
             break :blk self.workingPiece.?;
         };
