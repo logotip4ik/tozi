@@ -7,12 +7,12 @@ pub const Files = @import("files.zig");
 pub const KQ = @import("kq.zig");
 pub const Peer = @import("peer.zig");
 pub const Tracker = @import("tracker.zig");
-pub const TrackerUtils = @import("tracker-utils.zig");
 pub const Handshake = @import("handshake.zig");
 pub const Socket = @import("socket.zig");
 
 const utils = @import("utils");
 const proto = @import("proto.zig");
+const trackerUtils = @import("tracker-utils.zig");
 
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
@@ -55,7 +55,7 @@ pub fn downloadTorrent(
     );
     defer tracker.deinit(alloc);
     const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
-    var prevTrackerOperation: TrackerUtils.Operation = .{ .timer = 0 };
+    var prevTrackerOperation: trackerUtils.Operation = .{ .timer = 0 };
 
     const Timer = enum { tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
@@ -352,7 +352,7 @@ pub fn downloadTorrent(
                     } orelse break :readblk;
 
                     const message = peer.readMessageStart(alloc, idInt, len) catch |err| switch (err) {
-                        error.Dead => {
+                        error.EndOfStream => {
                             peer.state = .dead;
                             break :readblk;
                         },

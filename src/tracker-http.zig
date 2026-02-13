@@ -5,8 +5,6 @@ const Tls = @import("tls");
 const utils = @import("utils");
 const Socket = @import("socket.zig");
 
-const Operation = @import("./tracker-utils.zig").Operation;
-
 const TrackerHttp = @This();
 
 const State = enum {

@@ -59,119 +59,6 @@ pub fn deinit(self: *Files, alloc: std.mem.Allocator) void {
     alloc.free(self.files);
 }
 
-const SReader = struct {
-    currentFileIdx: usize = 0,
-    currentFileOffset: usize = 0,
-    mptr: ?[]align(std.heap.page_size_min) u8 = null,
-
-    scratchBuf: []u8,
-
-    pub fn init(alloc: std.mem.Allocator, torrentPieceLen: usize) !SReader {
-        return SReader{
-            .scratchBuf = try alloc.alloc(u8, torrentPieceLen),
-        };
-    }
-
-    pub fn deinit(self: *SReader, alloc: std.mem.Allocator) void {
-        self.unmapCurrent();
-        alloc.free(self.scratchBuf);
-    }
-
-    pub fn next(self: *SReader, len: usize, files: []const FileRef) ![]const u8 {
-        const mptr = try self.ensureMapped(files);
-
-        const currentFileSize = files[self.currentFileIdx].size;
-        const available = currentFileSize - self.currentFileOffset;
-
-        if (len <= available) {
-            const slice = mptr[self.currentFileOffset .. self.currentFileOffset + len];
-
-            self.currentFileOffset += len;
-
-            return slice;
-        }
-
-        var destOffset: usize = 0;
-        var remaining = len;
-
-        while (remaining > 0) {
-            const nextMptr = try self.ensureMapped(files);
-
-            const fileSize = files[self.currentFileIdx].size;
-            const fileAvail = fileSize - self.currentFileOffset;
-
-            const toCopy = @min(remaining, fileAvail);
-
-            if (toCopy > 0) {
-                @branchHint(.unlikely);
-                const src = nextMptr[self.currentFileOffset .. self.currentFileOffset + toCopy];
-                @memcpy(self.scratchBuf[destOffset .. destOffset + toCopy], src);
-
-                destOffset += toCopy;
-                remaining -= toCopy;
-                self.currentFileOffset += toCopy;
-            }
-
-            if (self.currentFileOffset == fileSize) {
-                self.advanceFile();
-            }
-        }
-
-        return self.scratchBuf[0..len];
-    }
-
-    fn advanceFile(self: *SReader) void {
-        self.unmapCurrent();
-        self.currentFileIdx += 1;
-        self.currentFileOffset = 0;
-    }
-
-    fn unmapCurrent(self: *SReader) void {
-        if (self.mptr) |ptr| {
-            @branchHint(.likely);
-            std.posix.munmap(ptr);
-            self.mptr = null;
-        }
-    }
-
-    fn ensureMapped(self: *SReader, files: []const FileRef) ![]align(std.heap.page_size_min) u8 {
-        if (self.mptr) |mptr| {
-            @branchHint(.likely);
-            return mptr;
-        }
-
-        if (self.currentFileIdx >= files.len) {
-            @branchHint(.cold);
-            return error.EndOfStream;
-        }
-
-        const file = files[self.currentFileIdx];
-
-        if (file.size == 0) {
-            @branchHint(.cold);
-            self.currentFileIdx += 1;
-            self.currentFileOffset = 0;
-            return self.ensureMapped(files);
-        }
-
-        const ptr = try std.posix.mmap(
-            null,
-            file.size,
-            std.posix.PROT.READ,
-            .{ .TYPE = .PRIVATE },
-            file.handle.handle,
-            0,
-        );
-
-        // Essential optimization
-        _ = std.posix.madvise(ptr.ptr, file.size, std.posix.MADV.SEQUENTIAL) catch {};
-
-        self.mptr = ptr;
-
-        return ptr;
-    }
-};
-
 pub fn collectPieces(
     self: *Files,
     alloc: std.mem.Allocator,
@@ -285,3 +172,116 @@ pub fn writePieceData(self: Files, index: u32, torrentPieceLen: u32, data: []con
         if (dataOffset >= data.len) break;
     }
 }
+
+const SReader = struct {
+    currentFileIdx: usize = 0,
+    currentFileOffset: usize = 0,
+    mptr: ?[]align(std.heap.page_size_min) u8 = null,
+
+    scratchBuf: []u8,
+
+    pub fn init(alloc: std.mem.Allocator, torrentPieceLen: usize) !SReader {
+        return SReader{
+            .scratchBuf = try alloc.alloc(u8, torrentPieceLen),
+        };
+    }
+
+    pub fn deinit(self: *SReader, alloc: std.mem.Allocator) void {
+        self.unmapCurrent();
+        alloc.free(self.scratchBuf);
+    }
+
+    pub fn next(self: *SReader, len: usize, files: []const FileRef) ![]const u8 {
+        const mptr = try self.ensureMapped(files);
+
+        const currentFileSize = files[self.currentFileIdx].size;
+        const available = currentFileSize - self.currentFileOffset;
+
+        if (len <= available) {
+            const slice = mptr[self.currentFileOffset .. self.currentFileOffset + len];
+
+            self.currentFileOffset += len;
+
+            return slice;
+        }
+
+        var destOffset: usize = 0;
+        var remaining = len;
+
+        while (remaining > 0) {
+            const nextMptr = try self.ensureMapped(files);
+
+            const fileSize = files[self.currentFileIdx].size;
+            const fileAvail = fileSize - self.currentFileOffset;
+
+            const toCopy = @min(remaining, fileAvail);
+
+            if (toCopy > 0) {
+                @branchHint(.unlikely);
+                const src = nextMptr[self.currentFileOffset .. self.currentFileOffset + toCopy];
+                @memcpy(self.scratchBuf[destOffset .. destOffset + toCopy], src);
+
+                destOffset += toCopy;
+                remaining -= toCopy;
+                self.currentFileOffset += toCopy;
+            }
+
+            if (self.currentFileOffset == fileSize) {
+                self.advanceFile();
+            }
+        }
+
+        return self.scratchBuf[0..len];
+    }
+
+    fn advanceFile(self: *SReader) void {
+        self.unmapCurrent();
+        self.currentFileIdx += 1;
+        self.currentFileOffset = 0;
+    }
+
+    fn unmapCurrent(self: *SReader) void {
+        if (self.mptr) |ptr| {
+            @branchHint(.likely);
+            std.posix.munmap(ptr);
+            self.mptr = null;
+        }
+    }
+
+    fn ensureMapped(self: *SReader, files: []const FileRef) ![]align(std.heap.page_size_min) u8 {
+        if (self.mptr) |mptr| {
+            @branchHint(.likely);
+            return mptr;
+        }
+
+        if (self.currentFileIdx >= files.len) {
+            @branchHint(.cold);
+            return error.EndOfStream;
+        }
+
+        const file = files[self.currentFileIdx];
+
+        if (file.size == 0) {
+            @branchHint(.cold);
+            self.currentFileIdx += 1;
+            self.currentFileOffset = 0;
+            return self.ensureMapped(files);
+        }
+
+        const ptr = try std.posix.mmap(
+            null,
+            file.size,
+            std.posix.PROT.READ,
+            .{ .TYPE = .PRIVATE },
+            file.handle.handle,
+            0,
+        );
+
+        // Essential optimization
+        _ = std.posix.madvise(ptr.ptr, file.size, std.posix.MADV.SEQUENTIAL) catch {};
+
+        self.mptr = ptr;
+
+        return ptr;
+    }
+};

@@ -229,14 +229,11 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
     };
 
     const sizeOfMessageStart = id.messageStartLen();
-    const messageStartBytes = self.read(alloc, sizeOfMessageStart) catch |err| switch (err) {
-        error.EndOfStream => return error.Dead,
-        else => |e| return e,
-    } orelse return null;
+    const messageStartBytes = try self.read(alloc, sizeOfMessageStart) orelse return null;
     defer alloc.free(messageStartBytes);
 
     var reader: std.Io.Reader = .fixed(messageStartBytes);
-    reader.toss(@sizeOf(u32) + @sizeOf(u8));
+    reader.toss(@sizeOf(@TypeOf(idInt)) + @sizeOf(@TypeOf(len)));
 
     return switch (id) {
         .choke => .choke,
