@@ -32,7 +32,7 @@ const VERY_VERBOSE = false;
 
 const MAX_STALE_BUFFERS_COUNT = 32; // 32 stale piece buffers, should be plenty right ?
 
-const PieceBuf = struct {
+pub const PieceBuf = struct {
     index: u32,
     fetched: u32,
     received: std.bit_set.ArrayBitSet(usize, 1024),

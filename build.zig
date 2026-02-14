@@ -4,7 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const tlsDep = b.dependency("tls", .{ .target = target, .optimize = optimize });
+    const tlsDep = b.dependency("tls", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const hasherMod = b.addModule("hasher", .{
         .root_source_file = b.path("src/hasher.zig"),

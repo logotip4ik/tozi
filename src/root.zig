@@ -21,6 +21,7 @@ const ENABLE_EXTENSION = true;
 const TaggedPointer = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
     peer: *Peer,
+    pieces: *PieceManager,
 });
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
@@ -39,6 +40,12 @@ pub fn downloadTorrent(
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .allocator = alloc });
     defer pool.deinit();
+
+    const threadPipes = try std.posix.pipe();
+    defer for (threadPipes) |fd| std.posix.close(fd);
+
+    const readPipe, const writePipe = threadPipes;
+    try kq.subscribe(readPipe, .read, TaggedPointer.pack(.{ .pieces = pieces }));
 
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
@@ -123,7 +130,7 @@ pub fn downloadTorrent(
                 const percent = (pieces.completedCount * 100) / totalPieces;
                 const bytesPerSecond = bytesPerTick / 3;
 
-                std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
+                std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
                     percent,
                     pieces.completedCount,
                     totalPieces,
@@ -138,6 +145,52 @@ pub fn downloadTorrent(
         const taggedPointer = TaggedPointer.unpack(event.udata);
         switch (taggedPointer) {
             .peer => {},
+            .pieces => {
+                var peerAndPointersBytes: [16]u8 = undefined;
+                const count = try std.posix.read(readPipe, &peerAndPointersBytes);
+                utils.assert(count == peerAndPointersBytes.len);
+
+                const peer: *Peer = @ptrFromInt(std.mem.readInt(usize, peerAndPointersBytes[0..8], .big));
+                const piece: *PieceManager.PieceBuf = @ptrFromInt(std.mem.readInt(usize, peerAndPointersBytes[8..16], .big));
+
+                defer pieces.consumePieceBuf(alloc, piece);
+                defer if (peer.workingOn) |*x| x.unset(piece.index);
+
+                if (piece.fetched == 0) {
+                    pieces.reset(piece);
+
+                    continue;
+                }
+
+                pieces.complete(piece);
+
+                for (peers.items) |otherPeer| {
+                    switch (otherPeer.state) {
+                        .readHandshake, .writeHandshake, .dead => continue,
+                        .messageStart, .message => {},
+                    }
+
+                    const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
+                    if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
+                }
+
+                if (pieces.isDownloadComplete()) {
+                    tracker.downloaded = pieces.downloaded;
+                    tracker.left = torrent.totalLen - tracker.downloaded;
+                    const op = tracker.enqueuefinalizeSource(alloc) catch return;
+                    switch (op) {
+                        .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
+                        .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
+                        .timer => unreachable, // shouldn't be available on first call
+                    }
+
+                    for (peers.items) |otherPeer| {
+                        kq.killSocket(otherPeer.socket.fd);
+                    }
+                }
+
+                continue;
+            },
             .tracker => {
                 // get socket **before** updating state
                 const socket = tracker.socket();
@@ -548,53 +601,15 @@ pub fn downloadTorrent(
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
-
                         const fullPiece = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
-                        defer pieces.consumePieceBuf(alloc, fullPiece);
 
-                        defer if (peer.workingOn) |*x| x.unset(piece.index);
-
-                        const expectedHash = torrent.pieces[piece.index * 20 ..];
-                        const computedHash = hasher.hash(fullPiece.written());
-
-                        if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
-                            @branchHint(.unlikely);
-                            std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
-                            pieces.reset(fullPiece);
-                            continue;
-                        }
-
-                        try files.writePieceData(piece.index, torrent.pieceLen, fullPiece.written());
-                        pieces.complete(fullPiece);
-
-                        for (peers.items) |otherPeer| {
-                            switch (otherPeer.state) {
-                                .readHandshake, .writeHandshake, .dead => continue,
-                                .messageStart, .message => {},
-                            }
-
-                            const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                            if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
-                        }
-
-                        if (pieces.isDownloadComplete()) {
-                            @branchHint(.cold);
-
-                            tracker.downloaded = pieces.downloaded;
-                            tracker.left = torrent.totalLen - tracker.downloaded;
-                            const op = tracker.enqueuefinalizeSource(alloc) catch return;
-                            switch (op) {
-                                .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
-                                .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
-                                .timer => unreachable, // shouldn't be available on first call
-                            }
-
-                            for (peers.items) |otherPeer| {
-                                kq.killSocket(otherPeer.socket.fd);
-                            }
-
-                            break :readblk;
-                        }
+                        try pool.spawn(hashAndWrite, .{
+                            writePipe,
+                            peer,
+                            fullPiece,
+                            &torrent,
+                            files,
+                        });
                     },
                     .interested => {
                         peer.isInterested = true;
@@ -655,6 +670,52 @@ pub fn downloadTorrent(
             }
         }
     }
+}
+
+fn hashAndWrite(
+    writeFd: std.posix.socket_t,
+    peer: *const Peer,
+    piece: *PieceManager.PieceBuf,
+    torrent: *const Torrent,
+    files: *const Files,
+) void {
+    var peerAndPointersBytes: [16]u8 = undefined;
+    std.mem.writeInt(usize, peerAndPointersBytes[0..8], @intFromPtr(peer), .big);
+    std.mem.writeInt(usize, peerAndPointersBytes[8..16], @intFromPtr(piece), .big);
+
+    const expectedHash = torrent.pieces[piece.index * 20 ..];
+    const computedHash = hasher.hash(piece.written());
+
+    if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
+        @branchHint(.unlikely);
+
+        std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
+
+        // mark as errored
+        piece.fetched = 0;
+
+        const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
+        utils.assert(wrote == peerAndPointersBytes.len);
+
+        return;
+    }
+
+    files.writePieceData(piece.index, torrent.pieceLen, piece.written()) catch |err| {
+        @branchHint(.unlikely);
+
+        std.log.warn("piece: {d} failed writing with {t}", .{ piece.index, err });
+
+        // mark as errored
+        piece.fetched = 0;
+
+        const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
+        utils.assert(wrote == peerAndPointersBytes.len);
+
+        return;
+    };
+
+    const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
+    utils.assert(wrote == peerAndPointersBytes.len);
 }
 
 test {

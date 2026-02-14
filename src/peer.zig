@@ -183,32 +183,6 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     return null;
 }
 
-// returns true if pipeline is full
-pub fn addRequest(self: *Peer, piece: u32, pieceLen: u32) !enum { full, finishedPiece, next } {
-    self.inFlight.push(.{
-        .index = piece,
-        .begin = self.workingPieceOffset,
-    }) catch return .full;
-
-    const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - self.workingPieceOffset);
-
-    const m: proto.Message = .{ .request = .{
-        .index = piece,
-        .begin = self.workingPieceOffset,
-        .len = chunkLen,
-    } };
-
-    try m.writeMessage(&self.writeBuf.writer, &.{});
-
-    self.workingPieceOffset += chunkLen;
-
-    if (self.workingPieceOffset >= pieceLen) {
-        return .finishedPiece;
-    }
-
-    return .next;
-}
-
 /// returns `true` when all data was written to socket
 pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pieces: *PieceManager) !bool {
     while (self.inFlight.count < self.inFlight.size) {
@@ -222,14 +196,28 @@ pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pi
             break :blk self.workingPiece.?;
         };
 
-        const len = torrent.getPieceSize(piece);
-        switch (try self.addRequest(piece, len)) {
-            .full => break,
-            .next => {},
-            .finishedPiece => {
-                self.workingPiece = null;
-                self.workingPieceOffset = 0;
-            },
+        const pieceLen = torrent.getPieceSize(piece);
+
+        self.inFlight.push(.{
+            .index = piece,
+            .begin = self.workingPieceOffset,
+        }) catch break;
+
+        const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - self.workingPieceOffset);
+
+        const m: proto.Message = .{ .request = .{
+            .index = piece,
+            .begin = self.workingPieceOffset,
+            .len = chunkLen,
+        } };
+
+        try m.writeMessage(&self.writeBuf.writer, &.{});
+
+        self.workingPieceOffset += chunkLen;
+
+        if (self.workingPieceOffset >= pieceLen) {
+            self.workingPiece = null;
+            self.workingPieceOffset = 0;
         }
     }
 
