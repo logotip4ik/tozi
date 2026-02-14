@@ -36,6 +36,10 @@ pub fn downloadTorrent(
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{ .allocator = alloc });
+    defer pool.deinit();
+
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
         for (peers.items) |peer| {
@@ -51,7 +55,7 @@ pub fn downloadTorrent(
         alloc,
         peerId,
         torrent.infoHash,
-        pieces.countDownloaded(&torrent),
+        pieces.downloaded,
         &torrent,
     );
     defer tracker.deinit(alloc);
@@ -70,68 +74,66 @@ pub fn downloadTorrent(
     const totalPieces = torrent.pieces.len / 20;
 
     while (try kq.next()) |event| {
-        if (event.kind == .timer) {
-            const timer = std.enums.fromInt(Timer, event.ident) orelse continue;
+        if (event.kind == .timer) if (std.enums.fromInt(Timer, event.ident)) |timer| switch (timer) {
+            .tracker => {
+                tracker.downloaded = pieces.downloaded;
+                tracker.left = torrent.totalLen - tracker.downloaded;
 
-            switch (timer) {
-                .tracker => {
-                    tracker.downloaded = pieces.countDownloaded(&torrent);
-                    tracker.left = torrent.totalLen - tracker.downloaded;
+                switch (try tracker.enqueueKeepAlive(alloc)) {
+                    .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
+                    .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
+                    .timer => unreachable, // shouldn't be available on first call
+                }
 
-                    switch (try tracker.enqueueKeepAlive(alloc)) {
-                        .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
-                        .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
-                        .timer => unreachable, // shouldn't be available on first call
+                continue;
+            },
+            .tick => {
+                var bytesPerTick: usize = 0;
+                var activePeers: usize = 0;
+
+                const maxPeersToUnchoke = 5;
+                var unchokedCount: usize = 0;
+
+                std.mem.sort(*Peer, peers.items, {}, Peer.compareBytesReceived);
+
+                for (peers.items) |peer| {
+                    defer {
+                        peer.bytesReceived = 0;
+                        peer.requestsPerTick = 0;
                     }
-                },
-                .tick => {
-                    var bytesPerTick: usize = 0;
-                    var activePeers: usize = 0;
 
-                    const maxPeersToUnchoke = 5;
-                    var unchokedCount: usize = 0;
-
-                    std.mem.sort(*Peer, peers.items, {}, Peer.compareBytesReceived);
-
-                    for (peers.items) |peer| {
-                        defer {
-                            peer.bytesReceived = 0;
-                            peer.requestsPerTick = 0;
-                        }
-
-                        const shouldUnchoke = peer.isInterested and unchokedCount < maxPeersToUnchoke;
-                        if (shouldUnchoke) {
-                            if (!peer.isUnchoked) {
-                                peer.isUnchoked = true;
-                                const ready = try peer.addMessage(.unchoke, &.{});
-                                if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
-                            }
-                            unchokedCount += 1;
-                        } else if (peer.isUnchoked) {
-                            peer.isUnchoked = false;
-                            const ready = try peer.addMessage(.choke, &.{});
+                    const shouldUnchoke = peer.isInterested and unchokedCount < maxPeersToUnchoke;
+                    if (shouldUnchoke) {
+                        if (!peer.isUnchoked) {
+                            peer.isUnchoked = true;
+                            const ready = try peer.addMessage(.unchoke, &.{});
                             if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
                         }
-
-                        bytesPerTick += peer.bytesReceived;
-                        activePeers += if (peer.bytesReceived > 0) 1 else 0;
+                        unchokedCount += 1;
+                    } else if (peer.isUnchoked) {
+                        peer.isUnchoked = false;
+                        const ready = try peer.addMessage(.choke, &.{});
+                        if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
                     }
 
-                    const percent = (pieces.completedCount * 100) / totalPieces;
-                    const bytesPerSecond = bytesPerTick / 3;
+                    bytesPerTick += peer.bytesReceived;
+                    activePeers += if (peer.bytesReceived > 0) 1 else 0;
+                }
 
-                    std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
-                        percent,
-                        pieces.completedCount,
-                        totalPieces,
-                        activePeers,
-                        bytesPerSecond,
-                    });
-                },
-            }
+                const percent = (pieces.completedCount * 100) / totalPieces;
+                const bytesPerSecond = bytesPerTick / 3;
 
-            continue;
-        }
+                std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:.2})", .{
+                    percent,
+                    pieces.completedCount,
+                    totalPieces,
+                    activePeers,
+                    bytesPerSecond,
+                });
+
+                continue;
+            },
+        } else continue;
 
         const taggedPointer = TaggedPointer.unpack(event.udata);
         switch (taggedPointer) {
@@ -289,7 +291,7 @@ pub fn downloadTorrent(
                     peer.protocols.fast = matched.fast;
                     peer.protocols.extended = matched.extended;
 
-                    if (matched.fast and pieces.countDownloaded(&torrent) == 0) {
+                    if (matched.fast and pieces.downloaded == 0) {
                         const ready = try peer.addMessage(.haveNone, &.{});
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
@@ -546,22 +548,24 @@ pub fn downloadTorrent(
                         }
 
                         const pieceLen = torrent.getPieceSize(piece.index);
-                        var completed = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
 
-                        defer pieces.consumePieceBuf(alloc, &completed);
+                        const fullPiece = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
+                        defer pieces.consumePieceBuf(alloc, fullPiece);
+
                         defer if (peer.workingOn) |*x| x.unset(piece.index);
 
                         const expectedHash = torrent.pieces[piece.index * 20 ..];
-                        const computedHash = hasher.hash(completed.written());
+                        const computedHash = hasher.hash(fullPiece.written());
 
                         if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
-                            pieces.reset(piece.index);
+                            pieces.reset(fullPiece);
                             continue;
                         }
 
-                        try files.writePieceData(piece.index, torrent.pieceLen, completed.written());
+                        try files.writePieceData(piece.index, torrent.pieceLen, fullPiece.written());
+                        pieces.complete(fullPiece);
 
                         for (peers.items) |otherPeer| {
                             switch (otherPeer.state) {
@@ -576,7 +580,7 @@ pub fn downloadTorrent(
                         if (pieces.isDownloadComplete()) {
                             @branchHint(.cold);
 
-                            tracker.downloaded = pieces.countDownloaded(&torrent);
+                            tracker.downloaded = pieces.downloaded;
                             tracker.left = torrent.totalLen - tracker.downloaded;
                             const op = tracker.enqueuefinalizeSource(alloc) catch return;
                             switch (op) {

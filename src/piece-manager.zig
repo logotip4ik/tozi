@@ -11,9 +11,13 @@ missingCount: usize,
 
 completedCount: usize,
 
-buffers: std.hash_map.AutoHashMapUnmanaged(u32, PieceBuf) = .empty,
+/// downloaded bytes, instead of iterating each time over "pieces", use this to check how many is
+/// already downloaded
+downloaded: usize,
 
-buffersPool: std.array_list.Aligned(PieceBuf, null),
+buffers: std.hash_map.AutoHashMapUnmanaged(u32, *PieceBuf) = .empty,
+
+buffersPool: std.array_list.Aligned(*PieceBuf, null),
 
 const PieceManager = @This();
 
@@ -23,11 +27,15 @@ const State = enum(u2) {
     have,
 };
 
+/// enable logging of "fetching/reseted/completed" piece
+const VERY_VERBOSE = false;
+
 const MAX_STALE_BUFFERS_COUNT = 32; // 32 stale piece buffers, should be plenty right ?
 
 const PieceBuf = struct {
+    index: u32,
     fetched: u32,
-    received: std.bit_set.ArrayBitSet(usize, 2048),
+    received: std.bit_set.ArrayBitSet(usize, 1024),
     bytes: []u8,
 
     /// last piece is almost always smaller than rest, this means if we use `bytes` directly to
@@ -63,11 +71,12 @@ pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !PieceManager {
         .pieces = arr,
         .missingCount = numberOfPieces,
         .completedCount = 0,
+        .downloaded = 0,
         .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
 
-pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnmanaged) !PieceManager {
+pub fn fromBitset(alloc: std.mem.Allocator, torrent: *const Torrent, bitset: std.bit_set.DynamicBitSetUnmanaged) !PieceManager {
     const numberOfPieces = bitset.bit_length;
 
     const arr = try alloc.alloc(State, numberOfPieces);
@@ -75,11 +84,13 @@ pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnm
 
     var missingCount: usize = 0;
     var completedCount: usize = 0;
+    var downloaded: usize = 0;
 
     for (arr, 0..) |*piece, i| {
         if (bitset.isSet(i)) {
             piece.* = .have;
             completedCount += 1;
+            downloaded += torrent.getPieceSize(i);
         } else {
             piece.* = .missing;
             missingCount += 1;
@@ -90,6 +101,7 @@ pub fn fromBitset(alloc: std.mem.Allocator, bitset: std.bit_set.DynamicBitSetUnm
         .pieces = arr,
         .missingCount = missingCount,
         .completedCount = completedCount,
+        .downloaded = downloaded,
         .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
@@ -99,12 +111,15 @@ pub fn deinit(self: *PieceManager, alloc: std.mem.Allocator) void {
 
     var iter = self.buffers.valueIterator();
     while (iter.next()) |buf| {
-        buf.deinit(alloc);
+        buf.*.deinit(alloc);
+        alloc.destroy(buf.*);
     }
-
     self.buffers.deinit(alloc);
 
-    for (self.buffersPool.items) |buf| buf.deinit(alloc);
+    for (self.buffersPool.items) |buf| {
+        buf.deinit(alloc);
+        alloc.destroy(buf);
+    }
     self.buffersPool.deinit(alloc);
 }
 
@@ -114,7 +129,7 @@ pub fn writePiece(
     piece: proto.Piece,
     pieceLen: u32,
     noalias bytes: []const u8,
-) !?PieceBuf {
+) !?*PieceBuf {
     if (self.pieces[piece.index] == .have) {
         return null;
     }
@@ -134,7 +149,8 @@ pub fn writePiece(
         return null;
     }
 
-    return self.complete(piece.index) catch null;
+    const kv = self.buffers.fetchRemove(piece.index) orelse unreachable;
+    return kv.value;
 }
 
 pub fn getPieceBuf(
@@ -146,21 +162,35 @@ pub fn getPieceBuf(
     const res = try self.buffers.getOrPut(alloc, index);
 
     if (!res.found_existing) {
-        res.value_ptr.* = self.buffersPool.pop() orelse .{
-            .bytes = try alloc.alloc(u8, len),
-            .received = .initEmpty(),
-            .fetched = 0,
-        };
+        if (self.buffersPool.pop()) |buf| {
+            buf.index = index;
+            res.value_ptr.* = buf;
+        } else {
+            const buf = try alloc.create(PieceBuf);
+            errdefer alloc.destroy(buf);
+
+            buf.* = .{
+                .index = index,
+                .bytes = try alloc.alloc(u8, len),
+                .received = .initEmpty(),
+                .fetched = 0,
+            };
+
+            res.value_ptr.* = buf;
+        }
     }
 
-    return res.value_ptr;
+    return res.value_ptr.*;
 }
 
 pub fn consumePieceBuf(self: *PieceManager, alloc: std.mem.Allocator, piece: *PieceBuf) void {
     piece.fetched = 0;
     piece.received = .initEmpty();
 
-    self.buffersPool.appendBounded(piece.*) catch piece.deinit(alloc);
+    self.buffersPool.appendBounded(piece) catch {
+        piece.deinit(alloc);
+        alloc.destroy(piece);
+    };
 }
 
 pub fn suggstPiece(self: *PieceManager) ?usize {
@@ -197,29 +227,22 @@ pub fn downloading(self: *PieceManager, index: u32) void {
     self.missingCount -= 1;
     self.pieces[index] = .downloading;
 
-    std.log.debug("pieces: downloading {d}", .{index});
+    if (VERY_VERBOSE) std.log.debug("pieces: downloading {d}", .{index});
 }
 
-pub fn reset(self: *PieceManager, index: u32) void {
-    self.pieces[index] = .missing;
+pub fn reset(self: *PieceManager, piece: *PieceBuf) void {
+    self.pieces[piece.index] = .missing;
     self.missingCount += 1;
 
-    std.log.debug("pieces: reseting {d}", .{index});
-
-    const buf = self.buffers.getPtr(index) orelse return;
-    buf.fetched = 0;
-    buf.received = .initEmpty();
+    if (VERY_VERBOSE) std.log.debug("pieces: reseting {d}", .{piece.index});
 }
 
-pub fn complete(self: *PieceManager, index: u32) !PieceBuf {
-    const kv = self.buffers.fetchRemove(index) orelse return error.NoMatchingPiece;
-
-    self.pieces[index] = .have;
+pub fn complete(self: *PieceManager, piece: *PieceBuf) void {
+    self.pieces[piece.index] = .have;
     self.completedCount += 1;
+    self.downloaded += piece.fetched;
 
-    std.log.debug("pieces: finished {d}", .{index});
-
-    return kv.value;
+    if (VERY_VERBOSE) std.log.debug("pieces: finished {d}", .{piece.index});
 }
 
 pub fn killPeer(self: *PieceManager, workingOn: ?std.DynamicBitSetUnmanaged) void {
@@ -231,7 +254,8 @@ pub fn killPeer(self: *PieceManager, workingOn: ?std.DynamicBitSetUnmanaged) voi
     });
 
     while (iter.next()) |index| {
-        self.reset(@intCast(index));
+        const buf = self.buffers.get(@intCast(index)) orelse continue;
+        self.reset(buf);
     }
 }
 
@@ -293,17 +317,4 @@ pub fn bytesToBitfield(self: *PieceManager, alloc: std.mem.Allocator, bytes: []c
     }
 
     return bitfield;
-}
-
-pub fn countDownloaded(self: *const PieceManager, torrent: *const Torrent) usize {
-    var downloaded: usize = 0;
-
-    for (self.pieces, 0..) |piece, i| switch (piece) {
-        .have => {
-            downloaded += torrent.getPieceSize(i);
-        },
-        else => continue,
-    };
-
-    return downloaded;
 }

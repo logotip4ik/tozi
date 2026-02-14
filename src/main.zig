@@ -92,7 +92,7 @@ pub fn main() !void {
             std.log.info("whole torrent is downloaded.", .{});
         };
 
-        break :blk try .fromBitset(alloc, bitset);
+        break :blk try .fromBitset(alloc, &torrent, bitset);
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
 
