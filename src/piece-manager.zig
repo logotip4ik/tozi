@@ -207,6 +207,8 @@ pub fn suggstPiece(self: *PieceManager) ?usize {
     };
 }
 
+/// This function only checks if current piece **can** be downloaded, the peer **must** also check
+/// it's own "workingOn" to prevent downloading of the same piece by the same peer
 pub fn canFetch(self: *PieceManager, index: usize) bool {
     return switch (self.pieces[index]) {
         .missing => true,
@@ -216,7 +218,7 @@ pub fn canFetch(self: *PieceManager, index: usize) bool {
 }
 
 pub fn isEndgame(self: *const PieceManager) bool {
-    return self.missingCount == 0;
+    return self.missingCount < 20;
 }
 
 pub fn isDownloadComplete(self: PieceManager) bool {
