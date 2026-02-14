@@ -1,5 +1,4 @@
 const std = @import("std");
-const hasher = @import("hasher");
 
 const utils = @import("utils");
 const proto = @import("proto.zig");
@@ -109,19 +108,6 @@ pub fn deinit(self: *PieceManager, alloc: std.mem.Allocator) void {
     self.buffersPool.deinit(alloc);
 }
 
-pub fn validatePiece(
-    _: *PieceManager,
-    noalias bytes: []const u8,
-    noalias expectedHash: []const u8,
-) !void {
-    const computedHash = hasher.hash(bytes);
-
-    if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
-        @branchHint(.unlikely);
-        return error.CorruptPiece;
-    }
-}
-
 pub fn writePiece(
     self: *PieceManager,
     alloc: std.mem.Allocator,
@@ -177,27 +163,26 @@ pub fn consumePieceBuf(self: *PieceManager, alloc: std.mem.Allocator, piece: *Pi
     self.buffersPool.appendBounded(piece.*) catch piece.deinit(alloc);
 }
 
-pub fn isEndgame(self: *const PieceManager) bool {
-    return self.missingCount == 0;
+pub fn suggstPiece(self: *PieceManager) ?usize {
+    if (self.missingCount == 0) {
+        return null;
+    }
+
+    const maybeMissingPiece = self.pieces.len - self.missingCount;
+
+    return switch (self.pieces[maybeMissingPiece]) {
+        .missing => maybeMissingPiece,
+        .have => null,
+        .downloading => if (self.isEndgame()) maybeMissingPiece else null,
+    };
 }
 
 pub fn canFetch(self: *PieceManager, index: usize) bool {
-    switch (self.pieces[index]) {
-        .missing => {
-            self.missingCount -= 1;
-            self.pieces[index] = .downloading;
-
-            return true;
-        },
-
-        .have => {
-            return false;
-        },
-
-        .downloading => {
-            return self.isEndgame();
-        },
-    }
+    return switch (self.pieces[index]) {
+        .missing => true,
+        .have => false,
+        .downloading => self.isEndgame(),
+    };
 }
 
 pub fn isEndgame(self: *const PieceManager) bool {
@@ -208,9 +193,18 @@ pub fn isDownloadComplete(self: PieceManager) bool {
     return self.completedCount == self.pieces.len;
 }
 
+pub fn downloading(self: *PieceManager, index: u32) void {
+    self.missingCount -= 1;
+    self.pieces[index] = .downloading;
+
+    std.log.debug("pieces: downloading {d}", .{index});
+}
+
 pub fn reset(self: *PieceManager, index: u32) void {
     self.pieces[index] = .missing;
     self.missingCount += 1;
+
+    std.log.debug("pieces: reseting {d}", .{index});
 
     const buf = self.buffers.getPtr(index) orelse return;
     buf.fetched = 0;
@@ -222,6 +216,8 @@ pub fn complete(self: *PieceManager, index: u32) !PieceBuf {
 
     self.pieces[index] = .have;
     self.completedCount += 1;
+
+    std.log.debug("pieces: finished {d}", .{index});
 
     return kv.value;
 }

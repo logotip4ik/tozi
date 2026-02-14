@@ -141,25 +141,44 @@ pub fn addMessage(self: *Peer, message: proto.Message, data: []const u8) !bool {
 }
 
 pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
+    const workingOn = self.workingOn orelse {
+        @branchHint(.cold);
+        std.log.err("peer: {d} doesn't have workingOn bitset", .{self.socket.fd});
+        return null;
+    };
+
+    const bitfield = self.bitfield orelse {
+        @branchHint(.cold);
+        std.log.err("peer: {d} doesn't have bitfield bitset", .{self.socket.fd});
+        return null;
+    };
+
     if (self.choked) {
         for (self.allowedFast.items) |index| {
-            if (pieces.canFetch(index)) {
-                std.log.debug("peer: {d} using {d} piece as allowed fast in choked", .{ self.socket.fd, index });
+            if (pieces.canFetch(index) and !workingOn.isSet(index)) {
                 return @intCast(index);
             }
         }
-    } else if (self.bitfield) |bitfield| if (self.workingOn) |workingOn| {
-        var iter = bitfield.iterator(.{ .direction = .forward, .kind = .set });
-        while (iter.next()) |index| {
-            if (pieces.canFetch(index)) {
-                if (pieces.isEndgame() and workingOn.isSet(index)) {
-                    continue;
-                }
 
-                return @intCast(index);
-            }
+        return null;
+    }
+
+    if (pieces.suggstPiece()) |index| {
+        if (bitfield.isSet(index) and !workingOn.isSet(index)) {
+            return @intCast(index);
         }
-    };
+    }
+
+    var iter = bitfield.iterator(.{
+        .direction = .forward,
+        .kind = .set,
+    });
+
+    while (iter.next()) |index| {
+        if (pieces.canFetch(index) and !workingOn.isSet(index)) {
+            return @intCast(index);
+        }
+    }
 
     return null;
 }
@@ -198,6 +217,7 @@ pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pi
             self.workingPiece = self.nextWorkingPiece(pieces) orelse break;
 
             self.workingOn.?.set(self.workingPiece.?);
+            pieces.downloading(self.workingPiece.?);
 
             break :blk self.workingPiece.?;
         };

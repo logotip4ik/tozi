@@ -10,6 +10,7 @@ pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
 pub const Socket = @import("socket.zig");
 
+const hasher = @import("hasher");
 const utils = @import("utils");
 const proto = @import("proto.zig");
 const trackerUtils = @import("tracker-utils.zig");
@@ -68,7 +69,7 @@ pub fn downloadTorrent(
 
     const totalPieces = torrent.pieces.len / 20;
 
-    loop: while (try kq.next()) |event| {
+    while (try kq.next()) |event| {
         if (event.kind == .timer) {
             const timer = std.enums.fromInt(Timer, event.ident) orelse continue;
 
@@ -395,13 +396,13 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
                     },
                     .unchoke => {
+                        std.log.info("peer: {d}, received unchoke message", .{peer.socket.fd});
+
                         peer.choked = false;
                         peer.state = .messageStart;
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
-
-                        std.log.debug("peer: {d}, received unchoke message", .{peer.socket.fd});
                     },
                     .have => |piece| {
                         peer.state = .messageStart;
@@ -550,15 +551,27 @@ pub fn downloadTorrent(
                         defer pieces.consumePieceBuf(alloc, &completed);
                         defer if (peer.workingOn) |*x| x.unset(piece.index);
 
-                        const expectedHash = torrent.pieces[piece.index * 20 ..][0..20];
-                        pieces.validatePiece(completed.written(), expectedHash) catch {
+                        const expectedHash = torrent.pieces[piece.index * 20 ..];
+                        const computedHash = hasher.hash(completed.written());
+
+                        if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
                             @branchHint(.unlikely);
                             std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
                             pieces.reset(piece.index);
                             continue;
-                        };
+                        }
 
                         try files.writePieceData(piece.index, torrent.pieceLen, completed.written());
+
+                        for (peers.items) |otherPeer| {
+                            switch (otherPeer.state) {
+                                .readHandshake, .writeHandshake, .dead => continue,
+                                .messageStart, .message => {},
+                            }
+
+                            const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
+                            if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
+                        }
 
                         if (pieces.isDownloadComplete()) {
                             @branchHint(.cold);
@@ -576,17 +589,7 @@ pub fn downloadTorrent(
                                 kq.killSocket(otherPeer.socket.fd);
                             }
 
-                            continue :loop;
-                        }
-
-                        for (peers.items) |otherPeer| {
-                            switch (otherPeer.state) {
-                                .readHandshake, .writeHandshake, .dead => continue,
-                                .messageStart, .message => {},
-                            }
-
-                            const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                            if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
+                            break :readblk;
                         }
                     },
                     .interested => {
