@@ -5,9 +5,11 @@ const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 
-const TrackerHttp = @import("./tracker-http.zig");
-const Operation = @import("./tracker-utils.zig").Operation;
-const AnnounceResponse = @import("./tracker-utils.zig").AnnounceResponse;
+const TrackerHttp = @import("tracker-http.zig");
+const TrackerUdp = @import("tracker-udp.zig");
+const Stats = @import("tracker-utils.zig").Stats;
+const Operation = @import("tracker-utils.zig").Operation;
+const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
 
 const Tracker = @This();
 
@@ -25,7 +27,7 @@ numWant: u16 = 100,
 
 port: u16 = 6889,
 
-client: union(enum) { none, http: TrackerHttp } = .none,
+client: Client = .none,
 
 oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
 newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
@@ -34,11 +36,24 @@ tiers: Torrent.Tiers,
 
 used: Source = .{ .tier = 0, .i = 0 },
 
-queued: TrackerHttp.Stats = undefined,
+queued: Stats = undefined,
 
 const Source = packed struct {
     tier: u32,
     i: u32,
+};
+
+const Client = union(enum) {
+    none,
+    http: TrackerHttp,
+    udp: TrackerUdp,
+
+    pub fn deinit(self: *Client, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .none => {},
+            inline else => |*t| t.deinit(alloc),
+        }
+    }
 };
 
 pub const defaultNumWant = 20;
@@ -84,10 +99,7 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |*x| x.deinit(alloc);
     self.tiers.deinit(alloc);
 
-    switch (self.client) {
-        .none => {},
-        .http => |*t| t.deinit(alloc),
-    }
+    self.client.deinit(alloc);
 }
 
 pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, announce: *const AnnounceResponse) !void {
@@ -171,7 +183,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             try TrackerHttp.parseIntoAnnounce(alloc, content, &announce);
             try self.addNewAddrs(alloc, &announce);
 
-            std.log.debug("received interval of {d}", .{announce.interval});
+            std.log.debug("received interval of {d}s", .{announce.interval});
 
             if (self.used.i != 0) {
                 const tier = self.tiers.items[self.used.tier];
@@ -198,32 +210,110 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
     }
 }
 
+fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUdp) !Operation {
+    sw: switch (client.state) {
+        .prepare_connect => {
+            try client.prepareConnect();
+            return .write;
+        },
+        .send_connect => {
+            try client.sendConnect() orelse return .write;
+
+            return .read;
+        },
+        .read_connect => {
+            try client.readConnect() orelse return .read;
+
+            continue :sw .prepare_announce;
+        },
+        .prepare_announce => {
+            try client.prepareAnnounce(&self.queued);
+
+            return .write;
+        },
+        .send_announce => {
+            try client.sendAnnounce() orelse return .write;
+
+            return .read;
+        },
+        .read_announce => {
+            var announce: AnnounceResponse = .{};
+            defer announce.deinit(alloc);
+
+             try client.readAnnounce(alloc, &announce) orelse return .write;
+
+            try self.addNewAddrs(alloc, &announce);
+
+            std.log.debug("received interval of {d}s", .{announce.interval});
+
+            if (self.used.i != 0) {
+                const tier = self.tiers.items[self.used.tier];
+                const workingUrl = tier.items[self.used.i];
+
+                std.mem.copyForwards(
+                    []const u8,
+                    tier.items[1..self.used.i],
+                    tier.items[0 .. self.used.i - 1],
+                );
+
+                tier.items[0] = workingUrl;
+
+                std.log.debug("updated tier: {any}", .{tier});
+            }
+
+            client.deinit(alloc);
+            self.client = .none;
+            self.used.tier = 0;
+            self.used.i = 0;
+
+            return .{ .timer = announce.interval * std.time.ms_per_s };
+        }
+    }
+}
+
 pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
     return switch (self.client) {
         .http => |*t| try self.nextHttpOperation(alloc, t),
+        .udp => |*t| try self.nextUdpOperation(alloc, t),
         .none => unreachable,
     };
 }
 
-pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
+pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(Stats, "event")) !Operation {
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
-        const client = TrackerHttp.init(alloc, url) catch {
-            self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
-            continue;
-        };
 
-        self.client = .{ .http = client };
-        break;
+        if (utils.isHttp(url) or utils.isHttps(url)) {
+            const client = TrackerHttp.init(alloc, url) catch |err| {
+                std.log.debug("failed creating http client with {t} for {s}", .{err, url});
+                self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+                continue;
+            };
+
+            self.client = .{ .http = client };
+
+            break;
+        }
+
+        if (utils.isUdp(url)) {
+            const client = TrackerUdp.init(alloc, .{ .url = url }) catch |err| {
+                std.log.debug("failed creating udp client with {t} for {s}", .{err, url});
+                self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+                continue;
+            };
+
+            self.client = .{ .udp = client };
+
+            break;
+        }
+
+        self.client.deinit(alloc);
+        self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
     }
-
-    errdefer switch (self.client) {
-        .http => |*t| {
-            t.deinit(alloc);
-            self.client = .none;
-        },
-        .none => {},
-    };
+    errdefer {
+        self.client.deinit(alloc);
+        self.client = .none;
+    }
 
     self.queued = .{
         .infoHash = self.infoHash,
@@ -232,39 +322,7 @@ pub fn enqueueKeepAlive(self: *Tracker, alloc: std.mem.Allocator) !Operation {
         .downloaded = self.downloaded,
         .uploaded = self.uploaded,
         .numWant = self.numWant,
-    };
-
-    return try self.nextOperation(alloc);
-}
-
-pub fn enqueuefinalizeSource(self: *Tracker, alloc: std.mem.Allocator) !Operation {
-    while (true) {
-        const url = self.tiers.items[self.used.tier].items[self.used.i];
-        const client = TrackerHttp.init(alloc, url) catch {
-            self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
-            continue;
-        };
-
-        self.client = .{ .http = client };
-        break;
-    }
-
-    errdefer switch (self.client) {
-        .http => |*t| {
-            t.deinit(alloc);
-            self.client = .none;
-        },
-        .none => {},
-    };
-
-    self.queued = .{
-        .infoHash = self.infoHash,
-        .peerId = self.peerId,
-        .left = self.left,
-        .downloaded = self.downloaded,
-        .uploaded = self.uploaded,
-        .numWant = self.numWant,
-        .event = .stopped,
+        .event = event,
     };
 
     return try self.nextOperation(alloc);
@@ -272,8 +330,8 @@ pub fn enqueuefinalizeSource(self: *Tracker, alloc: std.mem.Allocator) !Operatio
 
 pub fn socket(self: *const Tracker) std.posix.socket_t {
     return switch (self.client) {
-        .http => |t| t.socketPosix.?.fd,
         .none => unreachable,
+        inline else => |t| t.socketPosix.?.fd,
     };
 }
 
@@ -324,4 +382,5 @@ pub fn generatePeerId() [20]u8 {
 
 test {
     _ = @import("tracker-http.zig");
+    _ = @import("tracker-udp.zig");
 }

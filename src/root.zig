@@ -86,7 +86,7 @@ pub fn downloadTorrent(
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.totalLen - tracker.downloaded;
 
-                switch (try tracker.enqueueKeepAlive(alloc)) {
+                switch (try tracker.enqueueEvent(alloc, if (tracker.oldAddrs.items.len == 0) .started else .none)) {
                     .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
                     .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
                     .timer => unreachable, // shouldn't be available on first call
@@ -177,7 +177,7 @@ pub fn downloadTorrent(
                 if (pieces.isDownloadComplete()) {
                     tracker.downloaded = pieces.downloaded;
                     tracker.left = torrent.totalLen - tracker.downloaded;
-                    const op = tracker.enqueuefinalizeSource(alloc) catch return;
+                    const op = tracker.enqueueEvent(alloc, .completed) catch return;
                     switch (op) {
                         .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
                         .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
@@ -198,15 +198,11 @@ pub fn downloadTorrent(
                 const nextOperation = tracker.nextOperation(alloc) catch |err| {
                     std.log.warn("failed announcing with {t}", .{err});
 
+                    tracker.client.deinit(alloc);
                     tracker.used = tracker.nextUsed() orelse {
                         std.log.info("all tracker urls are dead", .{});
                         return;
                     };
-
-                    switch (tracker.client) {
-                        .http => |*t| t.deinit(alloc),
-                        .none => {},
-                    }
 
                     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
                     prevTrackerOperation = .{ .timer = 0 };

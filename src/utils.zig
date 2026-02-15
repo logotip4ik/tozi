@@ -377,3 +377,7 @@ pub fn isHttp(haystack: []const u8) bool {
 pub fn isHttps(haystack: []const u8) bool {
     return std.mem.startsWith(u8, haystack, "https://");
 }
+
+pub fn isUdp(haystack: []const u8) bool {
+    return std.mem.startsWith(u8, haystack, "udp://");
+}

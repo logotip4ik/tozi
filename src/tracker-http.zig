@@ -5,7 +5,9 @@ const Tls = @import("tls");
 const utils = @import("utils");
 const Socket = @import("socket.zig");
 const Bencode = @import("bencode.zig");
+const Stats = @import("tracker-utils.zig").Stats;
 const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
+const connectToAddress = @import("tracker-utils.zig").connectToAddress;
 
 const TrackerHttp = @This();
 
@@ -66,7 +68,7 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
 
     const socket = blk: {
         for (list.addrs) |addr| {
-            break :blk connectToAddress(addr) catch |err| switch (err) {
+            break :blk connectToAddress(addr, .tcp) catch |err| switch (err) {
                 error.ConnectionRefused => continue,
                 else => return err,
             };
@@ -263,18 +265,6 @@ pub const TlsHandshake = struct {
     }
 };
 
-pub const Stats = struct {
-    infoHash: [20]u8,
-    peerId: [20]u8,
-    port: u16 = 6889,
-    numWant: u16,
-    downloaded: usize,
-    uploaded: usize,
-    left: usize,
-
-    event: ?enum { started, stopped, completed } = null,
-};
-
 pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *const Stats) !void {
     utils.assert(self.state == .prepare);
 
@@ -296,7 +286,7 @@ pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *cons
         .{ "numwant", .{ .int = stats.numWant } },
         .{
             "event",
-            if (stats.event) |x| .{ .string = @tagName(x) } else .skip,
+            if (stats.event == .none) .skip else .{ .string = @tagName(stats.event) },
         },
     });
 
@@ -556,22 +546,6 @@ pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: 
     };
 }
 
-fn connectToAddress(addr: std.net.Address) !std.posix.socket_t {
-    const CLOEXEC = if (builtin.os.tag == .windows) 0 else std.posix.SOCK.CLOEXEC;
-
-    const sock_flags = std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | CLOEXEC;
-
-    const sock = try std.posix.socket(addr.any.family, sock_flags, std.posix.IPPROTO.TCP);
-    errdefer std.posix.close(sock);
-
-    std.posix.connect(sock, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => |e| return e,
-    };
-
-    return sock;
-}
-
 /// Shift unused part of the buffer to the beginning.
 /// Returns write position for the next write into buffer.
 /// Unused part is at the end of the buffer.
@@ -606,9 +580,10 @@ test "writes correct http request" {
         .downloaded = 0,
         .uploaded = 0,
         .left = 0,
+        .event = .started,
     });
 
-    const expectedReqString = "GET /announce?info_hash=%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01&peer_id=%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01&port=6889&uploaded=0&downloaded=0&left=0&compact=1&key=%01%01%01%01&numwant=0 HTTP/1.1\r\n" ++
+    const expectedReqString = "GET /announce?info_hash=%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01&peer_id=%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01%01&port=6889&uploaded=0&downloaded=0&left=0&compact=1&key=%01%01%01%01&numwant=0&event=started HTTP/1.1\r\n" ++
         "host: localhost:9000\r\n" ++
         "user-agent: tozi/0.0.1\r\n" ++
         "connection: close\r\n" ++
@@ -644,6 +619,7 @@ test "make request" {
         .downloaded = 0,
         .uploaded = 0,
         .left = torrent.totalLen,
+        .event = .started,
     };
 
     try t.prepareRequest(alloc, &stats);
@@ -703,6 +679,7 @@ test "make https request" {
         .downloaded = 0,
         .uploaded = 0,
         .left = torrent.totalLen,
+        .event = .started,
     };
 
     var kq: KQ = try .init(alloc);
