@@ -87,8 +87,8 @@ pub fn downloadTorrent(
                 tracker.left = torrent.totalLen - tracker.downloaded;
 
                 switch (try tracker.enqueueEvent(alloc, if (tracker.oldAddrs.items.len == 0) .started else .none)) {
-                    .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
-                    .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
+                    .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
+                    .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
                     .timer => unreachable, // shouldn't be available on first call
                 }
 
@@ -179,8 +179,8 @@ pub fn downloadTorrent(
                     tracker.left = torrent.totalLen - tracker.downloaded;
                     const op = tracker.enqueueEvent(alloc, .completed) catch return;
                     switch (op) {
-                        .read => try kq.subscribe(tracker.socket(), .read, trackerTaggedPointer),
-                        .write => try kq.subscribe(tracker.socket(), .write, trackerTaggedPointer),
+                        .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
+                        .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
                         .timer => unreachable, // shouldn't be available on first call
                     }
 
@@ -193,7 +193,7 @@ pub fn downloadTorrent(
             },
             .tracker => {
                 // get socket **before** updating state
-                const socket = tracker.socket();
+                const socket = tracker.client.socket();
 
                 const nextOperation = tracker.nextOperation(alloc) catch |err| {
                     std.log.warn("failed announcing with {t}", .{err});
@@ -658,12 +658,10 @@ pub fn downloadTorrent(
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
 
-            for (peers.items, 0..) |item, i| {
-                if (item == peer) {
-                    alloc.destroy(peers.swapRemove(i));
-                    break;
-                }
-            }
+            for (peers.items, 0..) |item, i| if (item == peer) {
+                alloc.destroy(peers.swapRemove(i));
+                break;
+            };
         }
     }
 }

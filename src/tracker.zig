@@ -48,6 +48,13 @@ const Client = union(enum) {
     http: TrackerHttp,
     udp: TrackerUdp,
 
+    pub fn socket(self: *const Client) std.posix.socket_t {
+        return switch (self.*) {
+            .none => unreachable,
+            inline else => |t| t.socketPosix.?.fd,
+        };
+    }
+
     pub fn deinit(self: *Client, alloc: std.mem.Allocator) void {
         switch (self.*) {
             .none => {},
@@ -326,13 +333,6 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
     };
 
     return try self.nextOperation(alloc);
-}
-
-pub fn socket(self: *const Tracker) std.posix.socket_t {
-    return switch (self.client) {
-        .none => unreachable,
-        inline else => |t| t.socketPosix.?.fd,
-    };
 }
 
 pub fn nextUsed(self: *Tracker) ?Source {
