@@ -322,22 +322,25 @@ test "prepareAnnounce" {
     const written = t.buffer.written();
     try std.testing.expectEqual(98, written.len);
 
-    const infoHashOut = written[16..36];
+    var reader: std.Io.Reader = .fixed(written);
+    reader.toss(16);
+
+    const infoHashOut = reader.take(20) catch unreachable;
     try std.testing.expectEqualSlices(u8, &([_]u8{1} ** 20), infoHashOut);
 
-    const peerIdOut = written[36..56];
+    const peerIdOut = reader.take(20) catch unreachable;
     try std.testing.expectEqualSlices(u8, &([_]u8{2} ** 20), peerIdOut);
 
-    const downloaded = std.mem.readInt(u64, written[56..64], .big);
+    const downloaded = reader.takeInt(u64, .big);
     try std.testing.expectEqual(@as(u64, 100), downloaded);
 
-    const left = std.mem.readInt(u64, written[64..72], .big);
+    const left = reader.takeInt(u64, .big);
     try std.testing.expectEqual(@as(u64, 200), left);
 
-    const uploaded = std.mem.readInt(u64, written[72..80], .big);
+    const uploaded = reader.takeInt(u64, .big);
     try std.testing.expectEqual(@as(u64, 50), uploaded);
 
-    const event = std.mem.readInt(u32, written[80..84], .big);
+    const event = reader.takeInt(u32, .big);
     try std.testing.expectEqual(@as(u32, 2), event);
 }
 
@@ -354,19 +357,22 @@ test "readConnect response" {
     defer t.deinit(alloc);
 
     t.state = .read_connect;
+
     const expectedTransactionId = t.transactionId;
+    const connection_id = 0x123456789ABCDEF0;
 
     var response: [16]u8 = undefined;
-    std.mem.writeInt(u32, response[0..4], 0, .big);
-    std.mem.writeInt(u32, response[4..8], expectedTransactionId, .big);
-    std.mem.writeInt(u64, response[8..16], 0x123456789ABCDEF0, .big);
+    var writer: std.Io.Writer = .fixed(&response);
+
+    writer.writeInt(u32, 0, .big) catch unreachable;
+    writer.writeInt(u32, expectedTransactionId, .big) catch unreachable;
+    writer.writeInt(u64, connection_id, .big) catch unreachable;
 
     try socket.addInBytes(&response);
 
-    const result = try t.readConnect();
-    try std.testing.expect(result != null);
+    try t.readConnect() orelse unreachable;
 
-    try std.testing.expectEqual(@as(u64, 0x123456789ABCDEF0), t.connectionId);
+    try std.testing.expectEqual(connection_id, t.connectionId);
     try std.testing.expectEqual(.prepare_announce, t.state);
 }
 
@@ -386,13 +392,15 @@ test "readAnnounce response" {
     t.transactionId = 1;
 
     var response: [32]u8 = undefined;
-    std.mem.writeInt(u32, response[0..4], 1, .big);
-    std.mem.writeInt(u32, response[4..8], 1, .big);
-    std.mem.writeInt(u32, response[8..12], 300, .big);
-    std.mem.writeInt(u32, response[12..16], 10, .big);
-    std.mem.writeInt(u32, response[16..20], 5, .big);
-    @memcpy(response[20..26], &[_]u8{ 192, 168, 1, 1, 0x1A, 0xE1 });
-    @memcpy(response[26..32], &[_]u8{ 192, 168, 1, 2, 0x1A, 0xE2 });
+    var writer: std.Io.Writer = .fixed(&response);
+
+    writer.writeInt(u32, 1, .big) catch unreachable;
+    writer.writeInt(u32, 1, .big) catch unreachable;
+    writer.writeInt(u32, 300, .big) catch unreachable;
+    writer.writeInt(u32, 10, .big) catch unreachable;
+    writer.writeInt(u32, 5, .big) catch unreachable;
+    writer.writeAll(&[_]u8{ 192, 168, 1, 1, 0x1A, 0xE1 }) catch unreachable;
+    writer.writeAll(&[_]u8{ 192, 168, 1, 2, 0x1A, 0xE2 }) catch unreachable;
 
     try socket.addInBytes(&response);
 
@@ -401,10 +409,10 @@ test "readAnnounce response" {
 
     _ = try t.readAnnounce(alloc, &announce);
 
-    try std.testing.expectEqual(@as(usize, 2), announce.peers.items.len);
-    try std.testing.expectEqual(@as(u32, 300), announce.interval);
-    try std.testing.expectEqual(@as(u32, 10), announce.incomplete.?);
-    try std.testing.expectEqual(@as(u32, 5), announce.complete.?);
+    try std.testing.expectEqual(2, announce.peers.items.len);
+    try std.testing.expectEqual(300, announce.interval);
+    try std.testing.expectEqual(10, announce.incomplete.?);
+    try std.testing.expectEqual(5, announce.complete.?);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 1, 0x1A, 0xE1 }, &announce.peers.items[0]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 2, 0x1A, 0xE2 }, &announce.peers.items[1]);
