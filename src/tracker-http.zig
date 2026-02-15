@@ -4,14 +4,16 @@ const builtin = @import("builtin");
 const Tls = @import("tls");
 const utils = @import("utils");
 const Socket = @import("socket.zig");
+const Bencode = @import("bencode.zig");
+const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
 
 const TrackerHttp = @This();
 
 const State = enum {
     handshake,
-    prepareRequest,
-    sendingRequest,
-    readingRequest,
+    prepare,
+    send,
+    read,
 };
 
 state: State,
@@ -73,7 +75,7 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
     };
 
     var self = TrackerHttp{
-        .state = if (isHttps) .handshake else .prepareRequest,
+        .state = if (isHttps) .handshake else .prepare,
         .buffer = .init(alloc),
         .socket = undefined,
         .socketPosix = .init(socket),
@@ -274,7 +276,7 @@ pub const Stats = struct {
 };
 
 pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *const Stats) !void {
-    utils.assert(self.state == .prepareRequest);
+    utils.assert(self.state == .prepare);
 
     const w = &self.buffer.writer;
     _ = w.consumeAll();
@@ -336,12 +338,12 @@ pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *cons
         else => {},
     }
 
-    self.state = .sendingRequest;
+    self.state = .send;
 }
 
 /// true - wrote all, false - still data to be written
 pub fn sendRequest(self: *TrackerHttp) !bool {
-    utils.assert(self.state == .sendingRequest);
+    utils.assert(self.state == .send);
 
     const wrote = try self.socket.write(self.buffer.written()) orelse return false;
     _ = self.buffer.writer.consume(wrote);
@@ -350,12 +352,12 @@ pub fn sendRequest(self: *TrackerHttp) !bool {
         return false;
     }
 
-    self.state = .readingRequest;
+    self.state = .read;
     return true;
 }
 
 pub fn readRequest(self: *TrackerHttp, alloc: std.mem.Allocator) !?[]u8 {
-    utils.assert(self.state == .readingRequest);
+    utils.assert(self.state == .read);
 
     const readBuf = switch (self.tls) {
         .connection => blk: {
@@ -513,6 +515,47 @@ pub fn readRequest(self: *TrackerHttp, alloc: std.mem.Allocator) !?[]u8 {
     }
 }
 
+pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: *AnnounceResponse) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    var value: Bencode = try .decode(alloc, &reader, 0);
+    defer value.deinit(alloc);
+
+    if (value.inner.dict.get("failure reason")) |failureReason| {
+        std.log.err("received err from tracker: {s}", .{failureReason.inner.string});
+        return error.FailedAnnouncement;
+    }
+
+    if (value.inner.dict.get("interval")) |interval| {
+        if (interval.inner.int < 0) return error.InvalidInterval;
+
+        announce.interval = @intCast(interval.inner.int);
+    } else return error.MissingInternal;
+
+    if (value.inner.dict.get("peers")) |peers| {
+        if (@rem(peers.inner.string.len, 6) != 0) return error.InvalidPeers;
+
+        var iter = std.mem.window(u8, peers.inner.string, 6, 6);
+        while (iter.next()) |peer| {
+            const buf = try announce.peers.addOne(alloc);
+
+            @memcpy(buf[0..6], peer[0..6]);
+        }
+    } else return error.MissinPeers;
+
+    if (value.inner.dict.get("min interval")) |minInterval| if (minInterval.inner.int >= 0 ){
+        announce.minInterval = @intCast(minInterval.inner.int);
+    };
+
+    if (value.inner.dict.get("complete")) |complete| if (complete.inner.int >= 0 ){
+        announce.complete = @intCast(complete.inner.int);
+    };
+
+    if (value.inner.dict.get("incomplete")) |incomplete| if (incomplete.inner.int >= 0 ){
+        announce.incomplete = @intCast(incomplete.inner.int);
+    };
+}
+
 fn connectToAddress(addr: std.net.Address) !std.posix.socket_t {
     const CLOEXEC = if (builtin.os.tag == .windows) 0 else std.posix.SOCK.CLOEXEC;
 
@@ -552,7 +595,7 @@ test "writes correct http request" {
         .socketPosix = null,
         .url = "",
         .tls = .none,
-        .state = .prepareRequest,
+        .state = .prepare,
     };
     defer t.buffer.deinit();
 
@@ -606,7 +649,6 @@ test "make request" {
     try t.prepareRequest(alloc, &stats);
 
     const KQ = @import("./kq.zig");
-    const Bencode = @import("bencode.zig");
 
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
@@ -620,7 +662,7 @@ test "make request" {
     try kq.delete(socket, .write);
 
     try std.testing.expectEqual(0, t.buffer.writer.end);
-    try std.testing.expectEqual(State.readingRequest, t.state);
+    try std.testing.expectEqual(State.read, t.state);
 
     try kq.subscribe(socket, .read, 1);
     try kq.addTimer(0, 100, .{ .periodic = false });
@@ -649,7 +691,6 @@ test "make https request" {
     defer torrent.deinit(alloc);
 
     const KQ = @import("./kq.zig");
-    const Bencode = @import("bencode.zig");
 
     var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
@@ -694,7 +735,7 @@ test "make https request" {
                                 handshake.deinit(alloc);
 
                                 t.tls = .{ .connection = .init(cipher) };
-                                t.state = .prepareRequest;
+                                t.state = .prepare;
 
                                 continue :sw t.state;
                             },
@@ -714,11 +755,11 @@ test "make https request" {
                     },
                 }
             },
-            .prepareRequest => {
+            .prepare => {
                 try t.prepareRequest(alloc, &stats);
                 try kq.subscribe(socket, .write, 1);
             },
-            .sendingRequest => {
+            .send => {
                 const ready = try t.sendRequest();
 
                 if (!ready) continue;
@@ -726,7 +767,7 @@ test "make https request" {
                 kq.delete(socket, .write) catch {};
                 try kq.subscribe(socket, .read, 1);
             },
-            .readingRequest => {
+            .read => {
                 const content = try t.readRequest(alloc) orelse continue;
                 defer alloc.free(content);
 
@@ -767,7 +808,7 @@ test "chuncked transfer encoding" {
             .socket = &a.interface,
             .socketPosix = null,
             .buffer = .init(alloc),
-            .state = .readingRequest,
+            .state = .read,
             .tls = .none,
             .url = undefined,
             .uri = undefined,

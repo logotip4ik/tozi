@@ -7,6 +7,7 @@ const Bencode = @import("bencode.zig");
 
 const TrackerHttp = @import("./tracker-http.zig");
 const Operation = @import("./tracker-utils.zig").Operation;
+const AnnounceResponse = @import("./tracker-utils.zig").AnnounceResponse;
 
 const Tracker = @This();
 
@@ -89,31 +90,8 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) !usize {
-    var reader: std.Io.Reader = .fixed(bytes);
-
-    var value: Bencode = try .decode(alloc, &reader, 0);
-    defer value.deinit(alloc);
-
-    if (value.inner.dict.get("failure reason")) |failureReason| {
-        std.log.err("received err from tracker: {s}", .{failureReason.inner.string});
-        return error.FailedAnnouncement;
-    }
-
-    const interval = value.inner.dict.get("interval") orelse return error.MissingInternal;
-    const peers = value.inner.dict.get("peers") orelse return error.MissinPeers;
-
-    if (peers.inner.string.len < 6) {
-        return @max(0, interval.inner.int);
-    }
-
-    var window = std.mem.window(u8, peers.inner.string, 6, 6);
-    outer: while (window.next()) |peerString| {
-        if (@rem(peerString.len, 6) != 0) {
-            std.log.err("received invalid peer string {s}", .{peerString});
-            continue;
-        }
-
+pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, announce: *const AnnounceResponse) !void {
+    outer: for (announce.peers.items) |peerString| {
         if (peerString[0] == 0 or peerString[0] == 255) {
             continue;
         }
@@ -135,8 +113,6 @@ pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, bytes: []const u8) 
 
     std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
     try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
-
-    return @max(0, interval.inner.int);
 }
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
@@ -156,7 +132,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
 
                             std.log.debug("received tls cipher for {s}", .{client.url});
                             client.tls = .{ .connection = .init(cipher) };
-                            client.state = .prepareRequest;
+                            client.state = .prepare;
 
                             continue :sw client.state;
                         },
@@ -171,26 +147,31 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
                         .done => unreachable,
                     };
                 },
-                .done => unreachable
+                .done => unreachable,
             }
         },
-        .prepareRequest => {
+        .prepare => {
             try client.prepareRequest(alloc, &self.queued);
 
             return .write;
         },
-        .sendingRequest => {
+        .send => {
             const ready = try client.sendRequest();
 
             if (!ready) return .write;
             return .read;
         },
-        .readingRequest => {
+        .read => {
             const content = try client.readRequest(alloc) orelse return .read;
             defer alloc.free(content);
 
-            const interval = try self.addNewAddrs(alloc, content);
-            std.log.debug("received interval of {d}", .{interval});
+            var announce: AnnounceResponse = .{};
+            defer announce.deinit(alloc);
+
+            try TrackerHttp.parseIntoAnnounce(alloc, content, &announce);
+            try self.addNewAddrs(alloc, &announce);
+
+            std.log.debug("received interval of {d}", .{announce.interval});
 
             if (self.used.i != 0) {
                 const tier = self.tiers.items[self.used.tier];
@@ -212,7 +193,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             self.used.tier = 0;
             self.used.i = 0;
 
-            return .{ .timer = @intCast(interval) };
+            return .{ .timer = announce.interval * std.time.ms_per_s };
         },
     }
 }
