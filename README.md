@@ -29,7 +29,8 @@ zig build
 - there is no `seeding` capability, because almost nobody would have a server that is available to the public web. This means nobody can connect to you (unless you messed with your network setup, which I didn't do).
 - there is no linux support, because I didn't write `epoll` wrapper and I didn't use pre-built libraries.
 - ~~file read/writes are "blocking". I think i will change this with zig `0.16.0`. But to be honest, I didn't find it to be a bottleneck, because usually the network is saturated first.~~ File and hashing are now done in separate threads. It turned out to be easier than i expected. Also discovered new thing `std.posix.pipe` for threads communications. It integrated nicely with kqueue.
-- TODO: add udp tracker support
+- udp tracker support. Learned that udp is also quite cool, because you receive either **whole**
+    packet or nothing, which is perfect for torrent tracker.
 
 ## Support
 
@@ -37,5 +38,6 @@ zig build
 - BEP-006: Fast extension
 - BEP-010: Extension Protocol
 - BEP-012: Multiple trackers
+- BEP-015: UDP Tracker Protocol for BitTorrent (TODO: add reties)
 - BEP-020: Peer ID Conventions
 - BEP-023: Tracker Returns Compact Peer Lists
