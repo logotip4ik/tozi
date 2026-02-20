@@ -24,6 +24,16 @@ const TaggedPointer = utils.TaggedPointer(union(enum) {
     pieces: *PieceManager,
 });
 
+const Timer = enum(usize) {
+    tracker = std.math.maxInt(usize) - 1,
+    tick = std.math.maxInt(usize),
+    _,
+
+    pub fn fromInt(int: usize) Timer {
+        return @enumFromInt(int);
+    }
+};
+
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
 /// requests doesn't track when the request was done, so we don't have a way to check if this chunk
 /// is "stale" and all our download could be broken by one chunk that is "lost"...
@@ -69,7 +79,6 @@ pub fn downloadTorrent(
     const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
     var prevTrackerOperation: trackerUtils.Operation = .{ .timer = 0 };
 
-    const Timer = enum { tracker, tick };
     try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
     try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
 
@@ -81,7 +90,7 @@ pub fn downloadTorrent(
     const totalPieces = torrent.pieces.len / 20;
 
     while (try kq.next()) |event| {
-        if (event.kind == .timer) if (std.enums.fromInt(Timer, event.ident)) |timer| switch (timer) {
+        if (event.kind == .timer) switch (Timer.fromInt(event.ident)) {
             .tracker => {
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.totalLen - tracker.downloaded;
@@ -91,6 +100,12 @@ pub fn downloadTorrent(
                     .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
                     .timer => unreachable, // shouldn't be available on first call
                 }
+
+                try kq.addTimer(
+                    @intCast(tracker.client.socket()),
+                    tracker.timeout(),
+                    .{ .periodic = false },
+                );
 
                 continue;
             },
@@ -140,7 +155,22 @@ pub fn downloadTorrent(
 
                 continue;
             },
-        } else continue;
+            else => |socket_| {
+                const socket: std.posix.socket_t = @intCast(@intFromEnum(socket_));
+                defer kq.killSocket(socket);
+
+                std.log.info("tracker timeout, trying next one...", .{});
+
+                tracker.client.deinit(alloc);
+                tracker.client = .none;
+                tracker.used = tracker.nextUsed() orelse {
+                    std.log.info("all tracker urls are dead", .{});
+                    return;
+                };
+
+                continue;
+            },
+        };
 
         const taggedPointer = TaggedPointer.unpack(event.udata);
         switch (taggedPointer) {
@@ -205,6 +235,7 @@ pub fn downloadTorrent(
                     std.log.warn("failed announcing with {t}", .{err});
 
                     tracker.client.deinit(alloc);
+                    tracker.client = .none;
                     tracker.used = tracker.nextUsed() orelse {
                         std.log.info("all tracker urls are dead", .{});
                         return;
@@ -228,6 +259,10 @@ pub fn downloadTorrent(
                     },
                     .timer => |timer| {
                         kq.killSocket(socket);
+
+                        // closing socket will close "read/write"
+                        // pipes, but we have our custom timer with "socket" id
+                        try kq.delete(socket, .timer);
 
                         if (pieces.isDownloadComplete()) {
                             return;

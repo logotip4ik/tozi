@@ -247,7 +247,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
             var announce: AnnounceResponse = .{};
             defer announce.deinit(alloc);
 
-             try client.readAnnounce(alloc, &announce) orelse return .write;
+            try client.readAnnounce(alloc, &announce) orelse return .write;
 
             try self.addNewAddrs(alloc, &announce);
 
@@ -274,7 +274,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
             self.used.i = 0;
 
             return .{ .timer = announce.interval * std.time.ms_per_s };
-        }
+        },
     }
 }
 
@@ -292,7 +292,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
 
         if (utils.isHttp(url) or utils.isHttps(url)) {
             const client = TrackerHttp.init(alloc, url) catch |err| {
-                std.log.debug("failed creating http client with {t} for {s}", .{err, url});
+                std.log.debug("failed creating http client with {t} for {s}", .{ err, url });
                 self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
                 continue;
             };
@@ -304,7 +304,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
 
         if (utils.isUdp(url)) {
             const client = TrackerUdp.init(alloc, .{ .url = url }) catch |err| {
-                std.log.debug("failed creating udp client with {t} for {s}", .{err, url});
+                std.log.debug("failed creating udp client with {t} for {s}", .{ err, url });
                 self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
                 continue;
             };
@@ -364,6 +364,27 @@ pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
     const port = std.mem.readInt(u16, newPeer[4..6], .big);
 
     return std.net.Address.initIp4(newPeer[0..4].*, port);
+}
+
+/// in milliseconds
+pub fn timeout(self: *const Tracker) u32 {
+    return switch (self.client) {
+        .udp => |u| switch (u.state) {
+            // TODO
+            // .read_connect => 3000,
+            // .read_announce => 15000,
+            // else => 3000,
+            else => 5000,
+        },
+        .http => |h| switch (h.state) {
+            // TODO
+            // .handshake => 5000,
+            // .read => 10000,
+            // else => 3000,
+            else => 3000,
+        },
+        .none => unreachable,
+    };
 }
 
 pub fn generatePeerId() [20]u8 {
