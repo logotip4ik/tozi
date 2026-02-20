@@ -381,10 +381,8 @@ pub fn downloadTorrent(
                     if (len == 0) {
                         _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
-                        if (!peer.choked) {
-                            const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
-                        }
+                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         continue;
                     }
@@ -555,15 +553,23 @@ pub fn downloadTorrent(
                         std.log.debug("peer: {d} received 'suggestPiece' for {d}", .{ peer.socket.fd, index });
                     },
                     .rejectRequest => |piece| {
-                        _ = piece;
                         peer.state = .messageStart;
 
-                        // TODO: we need to add this request back to queue, or reset the whole piece
-                        // and give it to another peer
-                        // peer.inFlight.receive(.{
-                        //     .index = piece.index,
-                        //     .begin = piece.begin,
-                        // }) catch {};
+                        peer.inFlight.receive(.{
+                            .index = piece.index,
+                            .begin = piece.begin,
+                        }) catch {};
+
+                        if (pieces.buffers.get(piece.index)) |buf| pieces.reset(buf);
+                        if (peer.workingOn) |*workingOn| workingOn.unset(piece.index);
+
+                        if (peer.workingPiece != null and peer.workingPiece.? == piece.index) {
+                            peer.workingPiece = null;
+                            peer.workingPieceOffset = 0;
+                        }
+
+                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .piece => |piece| {
                         const chunkBytes = peer.read(alloc, piece.len) catch |err| switch (err) {
@@ -589,12 +595,9 @@ pub fn downloadTorrent(
                         }
 
                         peer.inFlight.receive(.{ .index = piece.index, .begin = piece.begin }) catch {};
-                        if (!peer.choked) {
-                            @branchHint(.likely);
 
-                            const ready = try peer.fillRqPool(alloc, &torrent, pieces);
-                            if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
-                        }
+                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         const pieceLen = torrent.getPieceSize(piece.index);
                         const fullPiece = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
