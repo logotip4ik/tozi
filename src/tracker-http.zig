@@ -522,7 +522,8 @@ pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: 
         announce.interval = @intCast(interval.inner.int);
     } else return error.MissingInternal;
 
-    if (value.inner.dict.get("peers")) |peers| {
+    if (value.inner.dict.get("peers")) |peers| peers: {
+        if (peers.inner.string.len == 0) break :peers;
         if (@rem(peers.inner.string.len, 6) != 0) return error.InvalidPeers;
 
         var iter = std.mem.window(u8, peers.inner.string, 6, 6);

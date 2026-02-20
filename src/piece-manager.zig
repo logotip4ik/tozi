@@ -142,10 +142,7 @@ pub fn writePiece(
         buf.fetched += piece.len;
     }
 
-    // TODO: maybe we should reset this piece and abort any operations ?
-    utils.assert(buf.fetched <= pieceLen);
-
-    if (buf.fetched != pieceLen) {
+    if (buf.fetched < pieceLen) {
         return null;
     }
 
