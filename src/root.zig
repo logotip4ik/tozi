@@ -146,46 +146,52 @@ pub fn downloadTorrent(
         switch (taggedPointer) {
             .peer => {},
             .pieces => {
-                var peerAndPointersBytes: [16]u8 = undefined;
-                const count = try std.posix.read(readPipe, &peerAndPointersBytes);
-                utils.assert(count == peerAndPointersBytes.len);
+                var buf: [256]u8 = undefined;
+                const count = try std.posix.read(readPipe, &buf);
 
-                const peer: *Peer = @ptrFromInt(std.mem.readInt(usize, peerAndPointersBytes[0..8], .big));
-                const piece: *PieceManager.PieceBuf = @ptrFromInt(std.mem.readInt(usize, peerAndPointersBytes[8..16], .big));
+                utils.assert(@rem(count, 16) == 0);
 
-                defer pieces.consumePieceBuf(alloc, piece);
-                defer if (peer.workingOn) |*x| x.unset(piece.index);
+                var r: std.Io.Reader = .fixed(buf[0..count]);
+                while (r.peek(16) catch null) |_| {
+                    const peer: *Peer = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
+                    const piece: *PieceManager.PieceBuf = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
 
-                if (piece.fetched == 0) {
-                    pieces.reset(piece);
+                    defer pieces.consumePieceBuf(alloc, piece);
+                    defer if (peer.workingOn) |*x| x.unset(piece.index);
 
-                    continue;
-                }
+                    if (piece.fetched == 0) {
+                        pieces.reset(piece);
 
-                pieces.complete(piece);
-
-                for (peers.items) |otherPeer| {
-                    switch (otherPeer.state) {
-                        .readHandshake, .writeHandshake, .dead => continue,
-                        .messageStart, .message => {},
+                        continue;
                     }
 
-                    const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                    if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
-                }
-
-                if (pieces.isDownloadComplete()) {
-                    tracker.downloaded = pieces.downloaded;
-                    tracker.left = torrent.totalLen - tracker.downloaded;
-                    const op = tracker.enqueueEvent(alloc, .completed) catch return;
-                    switch (op) {
-                        .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
-                        .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
-                        .timer => unreachable, // shouldn't be available on first call
-                    }
+                    pieces.complete(piece);
 
                     for (peers.items) |otherPeer| {
-                        kq.killSocket(otherPeer.socket.fd);
+                        switch (otherPeer.state) {
+                            .readHandshake, .writeHandshake, .dead => continue,
+                            .messageStart, .message => {},
+                        }
+
+                        const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
+                        if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
+                    }
+
+                    if (pieces.isDownloadComplete()) {
+                        tracker.downloaded = pieces.downloaded;
+                        tracker.left = torrent.totalLen - tracker.downloaded;
+                        const op = tracker.enqueueEvent(alloc, .completed) catch return;
+                        switch (op) {
+                            .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
+                            .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
+                            .timer => unreachable, // shouldn't be available on first call
+                        }
+
+                        for (peers.items) |otherPeer| {
+                            kq.killSocket(otherPeer.socket.fd);
+                        }
+
+                        break;
                     }
                 }
 
