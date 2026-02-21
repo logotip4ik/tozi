@@ -116,7 +116,7 @@ pub fn downloadTorrent(
                 const maxPeersToUnchoke = 5;
                 var unchokedCount: usize = 0;
 
-                std.mem.sort(*Peer, peers.items, {}, Peer.compareBytesReceived);
+                std.mem.sortUnstable(*Peer, peers.items, {}, Peer.compareBytesReceived);
 
                 for (peers.items) |peer| {
                     defer {
@@ -724,33 +724,23 @@ fn hashAndWrite(
     const expectedHash = torrent.pieces[piece.index * 20 ..];
     const computedHash = hasher.hash(piece.written());
 
-    if (!std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
+    if (std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
+        files.writePieceData(piece.index, torrent.pieceLen, piece.written()) catch |err| {
+            @branchHint(.unlikely);
+
+            std.log.warn("piece: {d} failed writing with {t}", .{ piece.index, err });
+
+            // mark as errored
+            piece.fetched = 0;
+        };
+    } else {
         @branchHint(.unlikely);
 
         std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
 
         // mark as errored
         piece.fetched = 0;
-
-        const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
-        utils.assert(wrote == peerAndPointersBytes.len);
-
-        return;
     }
-
-    files.writePieceData(piece.index, torrent.pieceLen, piece.written()) catch |err| {
-        @branchHint(.unlikely);
-
-        std.log.warn("piece: {d} failed writing with {t}", .{ piece.index, err });
-
-        // mark as errored
-        piece.fetched = 0;
-
-        const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
-        utils.assert(wrote == peerAndPointersBytes.len);
-
-        return;
-    };
 
     const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
     utils.assert(wrote == peerAndPointersBytes.len);
