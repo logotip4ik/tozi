@@ -7,9 +7,9 @@ const Torrent = @import("torrent.zig");
 pieces: []State,
 
 /// used to track if isEndgame
-missingCount: usize,
+missing_count: usize,
 
-completedCount: usize,
+completed_count: usize,
 
 /// downloaded bytes, instead of iterating each time over "pieces", use this to check how many is
 /// already downloaded
@@ -17,7 +17,7 @@ downloaded: usize,
 
 buffers: std.hash_map.AutoHashMapUnmanaged(u32, *PieceBuf) = .empty,
 
-buffersPool: std.array_list.Aligned(*PieceBuf, null),
+buffers_pool: std.array_list.Aligned(*PieceBuf, null),
 
 const PieceManager = @This();
 
@@ -60,49 +60,49 @@ pub const PieceBuf = struct {
 };
 
 pub fn init(alloc: std.mem.Allocator, pieces: []const u8) !PieceManager {
-    const numberOfPieces = pieces.len / 20;
+    const number_of_pieces = pieces.len / 20;
 
-    const arr = try alloc.alloc(State, numberOfPieces);
+    const arr = try alloc.alloc(State, number_of_pieces);
     errdefer alloc.free(arr);
 
     for (arr) |*piece| piece.* = .missing;
 
     return .{
         .pieces = arr,
-        .missingCount = numberOfPieces,
-        .completedCount = 0,
+        .missing_count = number_of_pieces,
+        .completed_count = 0,
         .downloaded = 0,
-        .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
+        .buffers_pool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
 
 pub fn fromBitset(alloc: std.mem.Allocator, torrent: *const Torrent, bitset: std.bit_set.DynamicBitSetUnmanaged) !PieceManager {
-    const numberOfPieces = bitset.bit_length;
+    const number_of_pieces = bitset.bit_length;
 
-    const arr = try alloc.alloc(State, numberOfPieces);
+    const arr = try alloc.alloc(State, number_of_pieces);
     errdefer alloc.free(arr);
 
-    var missingCount: usize = 0;
-    var completedCount: usize = 0;
+    var missing_count: usize = 0;
+    var completed_count: usize = 0;
     var downloaded: usize = 0;
 
     for (arr, 0..) |*piece, i| {
         if (bitset.isSet(i)) {
             piece.* = .have;
-            completedCount += 1;
+            completed_count += 1;
             downloaded += torrent.getPieceSize(i);
         } else {
             piece.* = .missing;
-            missingCount += 1;
+            missing_count += 1;
         }
     }
 
     return .{
         .pieces = arr,
-        .missingCount = missingCount,
-        .completedCount = completedCount,
+        .missing_count = missing_count,
+        .completed_count = completed_count,
         .downloaded = downloaded,
-        .buffersPool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
+        .buffers_pool = try .initCapacity(alloc, MAX_STALE_BUFFERS_COUNT),
     };
 }
 
@@ -116,11 +116,11 @@ pub fn deinit(self: *PieceManager, alloc: std.mem.Allocator) void {
     }
     self.buffers.deinit(alloc);
 
-    for (self.buffersPool.items) |buf| {
+    for (self.buffers_pool.items) |buf| {
         buf.deinit(alloc);
         alloc.destroy(buf);
     }
-    self.buffersPool.deinit(alloc);
+    self.buffers_pool.deinit(alloc);
 }
 
 pub fn writePiece(
@@ -159,7 +159,7 @@ pub fn getPieceBuf(
     const res = try self.buffers.getOrPut(alloc, index);
 
     if (!res.found_existing) {
-        if (self.buffersPool.pop()) |buf| {
+        if (self.buffers_pool.pop()) |buf| {
             buf.index = index;
             res.value_ptr.* = buf;
         } else {
@@ -184,18 +184,18 @@ pub fn consumePieceBuf(self: *PieceManager, alloc: std.mem.Allocator, piece: *Pi
     piece.fetched = 0;
     piece.received = .initEmpty();
 
-    self.buffersPool.appendBounded(piece) catch {
+    self.buffers_pool.appendBounded(piece) catch {
         piece.deinit(alloc);
         alloc.destroy(piece);
     };
 }
 
 pub fn suggstPiece(self: *PieceManager) ?usize {
-    if (self.missingCount == 0) {
+    if (self.missing_count == 0) {
         return null;
     }
 
-    const maybeMissingPiece = self.pieces.len - self.missingCount;
+    const maybeMissingPiece = self.pieces.len - self.missing_count;
 
     return switch (self.pieces[maybeMissingPiece]) {
         .missing => maybeMissingPiece,
@@ -215,15 +215,15 @@ pub fn canFetch(self: *PieceManager, index: usize) bool {
 }
 
 pub fn isEndgame(self: *const PieceManager) bool {
-    return self.missingCount < 20;
+    return self.missing_count < 20;
 }
 
 pub fn isDownloadComplete(self: PieceManager) bool {
-    return self.completedCount == self.pieces.len;
+    return self.completed_count == self.pieces.len;
 }
 
 pub fn downloading(self: *PieceManager, index: u32) void {
-    self.missingCount -= 1;
+    self.missing_count -= 1;
     self.pieces[index] = .downloading;
 
     if (VERY_VERBOSE) std.log.debug("pieces: downloading {d}", .{index});
@@ -231,14 +231,14 @@ pub fn downloading(self: *PieceManager, index: u32) void {
 
 pub fn reset(self: *PieceManager, piece: *PieceBuf) void {
     self.pieces[piece.index] = .missing;
-    self.missingCount += 1;
+    self.missing_count += 1;
 
     if (VERY_VERBOSE) std.log.debug("pieces: reseting {d}", .{piece.index});
 }
 
 pub fn complete(self: *PieceManager, piece: *PieceBuf) void {
     self.pieces[piece.index] = .have;
-    self.completedCount += 1;
+    self.completed_count += 1;
     self.downloaded += piece.fetched;
 
     if (VERY_VERBOSE) std.log.debug("pieces: finished {d}", .{piece.index});

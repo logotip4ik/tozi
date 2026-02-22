@@ -106,7 +106,7 @@ pub fn downloadTorrent(
                 continue;
             },
             .ticker => |t| {
-                t.onTick(peers.items, pieces.completedCount);
+                t.onTick(peers.items, pieces.completed_count);
                 continue;
             },
             .trackerClient => |client| {
