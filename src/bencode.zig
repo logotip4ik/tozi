@@ -144,7 +144,7 @@ pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize) !V
 
         else => {
             @branchHint(.unlikely);
-            std.debug.print("unrecognized bencode: {s}", .{
+            std.log.err("unrecognized bencode: {s}", .{
                 reader.peek(20) catch reader.buffered(),
             });
             return error.UnrecognisedBencode;
@@ -229,7 +229,7 @@ pub fn format(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!vo
     }
 }
 
-pub fn dumpWithOptions(self: Value, writer: *std.Io.Writer, indent: u8) void {
+fn dumpWithOptions(self: Value, writer: *std.Io.Writer, indent: u8) void {
     switch (self.inner) {
         .int => |int| {
             for (0..indent) |_| writer.writeByte(' ') catch unreachable;

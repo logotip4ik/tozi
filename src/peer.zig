@@ -45,9 +45,39 @@ pub const State = union(enum) {
     messageStart,
     message: proto.Message,
     dead,
+
+    pub fn isDead(self: *const State) bool {
+        return switch (self.*) {
+            .dead => true,
+            else => false,
+        };
+    }
+
+    pub fn isConnected(self: *const State) bool {
+        return switch (self.*) {
+            .message, .messageStart => true,
+            else => false,
+        };
+    }
 };
 
-pub fn init(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Peer {
+pub fn init(alloc: std.mem.Allocator, in: [6]u8) !Peer {
+    const fd = try std.posix.socket(
+        std.posix.AF.INET,
+        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+        std.posix.IPPROTO.TCP,
+    );
+    errdefer std.posix.close(fd);
+
+    const port = std.mem.readInt(u16, in[4..6], .big);
+    const addr = std.net.Address.initIp4(in[0..4].*, port);
+
+    std.log.debug("peer: {d} connecting to {f}", .{ fd, addr });
+    std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
+
     return .{
         .socket = .init(fd),
         .readBuf = .init(alloc),

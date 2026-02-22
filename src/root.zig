@@ -197,15 +197,10 @@ pub fn downloadTorrent(
 
                     pieces.complete(piece);
 
-                    for (peers.items) |otherPeer| {
-                        switch (otherPeer.state) {
-                            .readHandshake, .writeHandshake, .dead => continue,
-                            .messageStart, .message => {},
-                        }
-
+                    for (peers.items) |otherPeer| if (!otherPeer.state.isConnected()) {
                         const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
                         if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
-                    }
+                    };
 
                     if (pieces.isDownloadComplete()) {
                         tracker.downloaded = pieces.downloaded;
@@ -270,25 +265,12 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(@intFromEnum(Timer.tracker), timer, .{ .periodic = false });
 
-                        while (tracker.nextNewPeer()) |addr| {
+                        while (tracker.nextNewPeer()) |addr_packed| {
                             const peer = try alloc.create(Peer);
                             errdefer alloc.destroy(peer);
 
-                            const fd = try std.posix.socket(
-                                std.posix.AF.INET,
-                                std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-                                std.posix.IPPROTO.TCP,
-                            );
-                            errdefer std.posix.close(fd);
-
-                            std.log.debug("peer: {d} connecting to {f}", .{ fd, addr });
-                            std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-                                error.WouldBlock => {},
-                                else => return err,
-                            };
-
-                            peer.* = Peer.init(alloc, fd) catch |err| {
-                                std.log.err("failed connecting to {f} with {t}", .{ addr, err });
+                            peer.* = Peer.init(alloc, addr_packed) catch |err| {
+                                std.log.err("failed connecting with {t}", .{err});
                                 alloc.destroy(peer);
                                 continue;
                             };
@@ -317,9 +299,7 @@ pub fn downloadTorrent(
             std.log.err("peer: {d} received {t}", .{ peer.socket.fd, err });
         }
 
-        const isDead = peer.state == .dead;
-
-        if (event.kind == .write and !isDead) sw: switch (peer.state) {
+        if (event.kind == .write and !peer.state.isDead()) sw: switch (peer.state) {
             .readHandshake, .dead => {},
             .writeHandshake => {
                 if (peer.writeBuf.written().len == 0) {
@@ -350,7 +330,7 @@ pub fn downloadTorrent(
             },
         };
 
-        if (event.kind == .read and !isDead) readblk: {
+        if (event.kind == .read and !peer.state.isDead()) readblk: {
             peer.fillReadBuffer(alloc, Torrent.BLOCK_SIZE * 8) catch |err| switch (err) {
                 error.EndOfStream => {
                     peer.state = .dead;
@@ -397,7 +377,7 @@ pub fn downloadTorrent(
                     if (matched.extended) {
                         std.log.debug("peer: {d} sending extended handshake message", .{peer.socket.fd});
 
-                        var extended: Handshake.Extended = .{};
+                        var extended: Handshake.Extended = .{ .v = "Tozi 0.1" };
 
                         var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
                         defer w.deinit();
@@ -697,7 +677,7 @@ pub fn downloadTorrent(
             };
         }
 
-        if (peer.state == .dead) {
+        if (peer.state.isDead()) {
             kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);

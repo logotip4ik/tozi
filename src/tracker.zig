@@ -356,14 +356,12 @@ pub fn nextUsed(self: *Tracker) ?Source {
     return null;
 }
 
-pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
+pub fn nextNewPeer(self: *Tracker) ?[6]u8 {
     const newPeer = self.newAddrs.pop() orelse return null;
 
     self.oldAddrs.appendAssumeCapacity(newPeer);
 
-    const port = std.mem.readInt(u16, newPeer[4..6], .big);
-
-    return std.net.Address.initIp4(newPeer[0..4].*, port);
+    return newPeer;
 }
 
 /// in milliseconds
