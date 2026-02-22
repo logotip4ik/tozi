@@ -50,6 +50,26 @@ pub fn addTimer(self: *KQ, id: usize, ms: usize, opts: struct { periodic: bool =
     });
 }
 
+pub fn deleteTimer(self: *KQ, id: usize) !void {
+    var i = self.evs.count;
+    while (i > 0) {
+        i -= 1;
+        const ev = self.evs.get(i);
+        if (ev.ident == id and ev.filter == std.c.EVFILT.TIMER) {
+            self.evs.removeIndex(i);
+        }
+    }
+
+    try self.changeList.append(self.alloc, KEvent{
+        .ident = @intCast(id),
+        .filter = std.c.EVFILT.TIMER,
+        .flags = std.c.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    });
+}
+
 /// subscribe to read or write of socket (`ident`)
 pub fn subscribe(self: *KQ, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
@@ -74,7 +94,7 @@ pub fn delete(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
-        .timer => std.c.EVFILT.TIMER,
+        .timer => unreachable,
     };
 
     var i = self.evs.count;

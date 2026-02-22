@@ -9,6 +9,7 @@ pub const Peer = @import("peer.zig");
 pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
 pub const Socket = @import("socket.zig");
+pub const Ticker = @import("ticker.zig");
 
 const hasher = @import("hasher");
 const utils = @import("utils");
@@ -20,19 +21,11 @@ const ENABLE_EXTENSION = true;
 
 const TaggedPointer = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
+    trackerClient: *Tracker.Client,
     peer: *Peer,
     pieces: *PieceManager,
+    ticker: *Ticker,
 });
-
-const Timer = enum(usize) {
-    tracker = std.math.maxInt(usize) - 1,
-    tick = std.math.maxInt(usize),
-    _,
-
-    pub fn fromInt(int: usize) Timer {
-        return @enumFromInt(int);
-    }
-};
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
 /// requests doesn't track when the request was done, so we don't have a way to check if this chunk
@@ -43,6 +36,7 @@ pub fn downloadTorrent(
     torrent: Torrent,
     files: *Files,
     pieces: *PieceManager,
+    ticker: ?*Ticker,
 ) !void {
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
@@ -79,8 +73,10 @@ pub fn downloadTorrent(
     const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
     var prevTrackerOperation: trackerUtils.Operation = .{ .timer = 0 };
 
-    try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
-    try kq.addTimer(@intFromEnum(Timer.tick), 3 * std.time.ms_per_s, .{ .periodic = true });
+    try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), 0, .{ .periodic = false });
+    if (ticker) |t| {
+        try kq.addTimer(TaggedPointer.pack(.{ .ticker = t }), @as(usize, t.tick) * std.time.ms_per_s, .{ .periodic = true });
+    }
 
     const handshake = Handshake.init(peerId, torrent.infoHash, .{
         .fast = ENABLE_FAST,
@@ -90,7 +86,7 @@ pub fn downloadTorrent(
     const totalPieces = torrent.pieces.len / 20;
 
     while (try kq.next()) |event| {
-        if (event.kind == .timer) switch (Timer.fromInt(event.ident)) {
+        if (event.kind == .timer) switch (TaggedPointer.unpack(event.ident)) {
             .tracker => {
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.totalLen - tracker.downloaded;
@@ -102,66 +98,23 @@ pub fn downloadTorrent(
                 }
 
                 try kq.addTimer(
-                    @intCast(tracker.client.socket()),
+                    TaggedPointer.pack(.{ .trackerClient = &tracker.client }),
                     tracker.timeout(),
                     .{ .periodic = false },
                 );
 
                 continue;
             },
-            .tick => {
-                var bytesPerTick: usize = 0;
-                var activePeers: usize = 0;
-
-                const maxPeersToUnchoke = 5;
-                var unchokedCount: usize = 0;
-
-                std.mem.sortUnstable(*Peer, peers.items, {}, Peer.compareBytesReceived);
-
-                for (peers.items) |peer| {
-                    defer {
-                        peer.bytesReceived = 0;
-                        peer.requestsPerTick = 0;
-                    }
-
-                    const shouldUnchoke = peer.isInterested and unchokedCount < maxPeersToUnchoke;
-                    if (shouldUnchoke) {
-                        if (!peer.isUnchoked) {
-                            peer.isUnchoked = true;
-                            const ready = try peer.addMessage(.unchoke, &.{});
-                            if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
-                        }
-                        unchokedCount += 1;
-                    } else if (peer.isUnchoked) {
-                        peer.isUnchoked = false;
-                        const ready = try peer.addMessage(.choke, &.{});
-                        if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
-                    }
-
-                    bytesPerTick += peer.bytesReceived;
-                    activePeers += if (peer.bytesReceived > 0) 1 else 0;
-                }
-
-                const percent = (pieces.completedCount * 100) / totalPieces;
-                const bytesPerSecond = bytesPerTick / 3;
-
-                std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
-                    percent,
-                    pieces.completedCount,
-                    totalPieces,
-                    activePeers,
-                    bytesPerSecond,
-                });
-
+            .ticker => |t| {
+                t.onTick(peers.items, pieces.completedCount);
                 continue;
             },
-            else => |socket_| {
-                const socket: std.posix.socket_t = @intCast(@intFromEnum(socket_));
-                defer kq.killSocket(socket);
+            .trackerClient => |client| {
+                kq.killSocket(client.socket());
+                client.deinit(alloc);
 
                 std.log.info("tracker timeout, trying next one...", .{});
 
-                tracker.client.deinit(alloc);
                 tracker.client = .none;
                 tracker.used = tracker.nextUsed() orelse {
                     std.log.info("all tracker urls are dead", .{});
@@ -170,10 +123,12 @@ pub fn downloadTorrent(
 
                 continue;
             },
+            .pieces, .peer => unreachable,
         };
 
         const taggedPointer = TaggedPointer.unpack(event.udata);
         switch (taggedPointer) {
+            .ticker, .trackerClient => unreachable,
             .peer => {},
             .pieces => {
                 var buf: [256]u8 = undefined;
@@ -236,7 +191,7 @@ pub fn downloadTorrent(
                         return;
                     };
 
-                    try kq.addTimer(@intFromEnum(Timer.tracker), 0, .{ .periodic = false });
+                    try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), 0, .{ .periodic = false });
                     prevTrackerOperation = .{ .timer = 0 };
 
                     continue;
@@ -257,13 +212,13 @@ pub fn downloadTorrent(
 
                         // closing socket will close "read/write"
                         // pipes, but we have our custom timer with "socket" id
-                        try kq.delete(socket, .timer);
+                        try kq.deleteTimer(TaggedPointer.pack(.{ .trackerClient = &tracker.client }));
 
                         if (pieces.isDownloadComplete()) {
                             return;
                         }
 
-                        try kq.addTimer(@intFromEnum(Timer.tracker), timer, .{ .periodic = false });
+                        try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), timer, .{ .periodic = false });
 
                         while (tracker.nextNewPeer()) |addr_packed| {
                             const peer = try alloc.create(Peer);

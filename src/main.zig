@@ -100,7 +100,9 @@ pub fn main() !void {
 
     var start = std.time.Timer.start() catch unreachable;
 
-    try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces);
+    var ticker = tozi.Ticker{ .tick = 3, .total_pieces = torrent.pieces.len / 20 };
+
+    try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces, &ticker);
 
     std.log.info("downloaded in: {D}", .{start.read()});
 }

@@ -4,6 +4,7 @@ const utils = @import("utils");
 const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
+const Socket = @import("socket.zig");
 
 const TrackerHttp = @import("tracker-http.zig");
 const TrackerUdp = @import("tracker-udp.zig");
@@ -43,7 +44,7 @@ const Source = packed struct {
     i: u32,
 };
 
-const Client = union(enum) {
+pub const Client = union(enum) {
     none,
     http: TrackerHttp,
     udp: TrackerUdp,
