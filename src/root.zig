@@ -117,10 +117,6 @@ pub fn downloadTorrent(
 
                 continue;
             },
-            .ticker => |t| {
-                t.onTick(peers.items, pieces.completed_count);
-                continue;
-            },
             .trackerClient => |client| {
                 kq.killSocket(client.socket());
                 client.deinit(alloc);
@@ -133,6 +129,10 @@ pub fn downloadTorrent(
                     return;
                 };
 
+                continue;
+            },
+            .ticker => |t| {
+                t.onTick(peers.items, pieces.completed_count);
                 continue;
             },
             .pieces, .peer => unreachable,
@@ -267,7 +267,7 @@ pub fn downloadTorrent(
         }
 
         if (event.kind == .write and !peer.state.isDead()) sw: switch (peer.state) {
-            .readHandshake, .dead => {},
+            .readHandshake, .dead => unreachable,
             .writeHandshake => {
                 if (peer.writeBuf.written().len == 0) {
                     try peer.writeBuf.writer.writeAll(&handshake.asBytes());
@@ -307,7 +307,7 @@ pub fn downloadTorrent(
             } orelse {};
 
             while (peer.readBuf.writer.end > 0) switch (peer.state) {
-                .writeHandshake, .dead => {},
+                .writeHandshake, .dead => unreachable,
                 .readHandshake => {
                     const bytes = peer.read(alloc, Handshake.HANDSHAKE_LEN) catch |err| switch (err) {
                         error.EndOfStream => {
