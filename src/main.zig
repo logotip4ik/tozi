@@ -102,7 +102,12 @@ pub fn main() !void {
 
     var ticker = tozi.Ticker{ .tick = 3, .total_pieces = torrent.pieces.len / 20 };
 
-    try tozi.downloadTorrent(alloc, peerId, torrent, &files, &pieces, &ticker);
+    try tozi.downloadTorrent(.{
+        .alloc = alloc,
+        .files = &files,
+        .pieces = &pieces,
+        .ticker = &ticker,
+    }, peerId, torrent);
 
-    std.log.info("downloaded in: {D}", .{start.read()});
+    std.log.info("finished in: {D}", .{start.read()});
 }

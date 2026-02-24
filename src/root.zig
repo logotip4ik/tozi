@@ -27,17 +27,25 @@ const tg = utils.TaggedPointer(union(enum) {
     ticker: *Ticker,
 });
 
+pub const DownloadTorrentContext = struct {
+    alloc: std.mem.Allocator,
+    files: *Files,
+    pieces: *PieceManager,
+    ticker: ?*Ticker = null,
+};
+
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
 /// requests doesn't track when the request was done, so we don't have a way to check if this chunk
 /// is "stale" and all our download could be broken by one chunk that is "lost"...
 pub fn downloadTorrent(
-    alloc: std.mem.Allocator,
+    ctx: DownloadTorrentContext,
     peerId: [20]u8,
     torrent: Torrent,
-    files: *Files,
-    pieces: *PieceManager,
-    ticker: ?*Ticker,
 ) !void {
+    const alloc = ctx.alloc;
+    const files = ctx.files;
+    const pieces = ctx.pieces;
+
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
@@ -74,8 +82,12 @@ pub fn downloadTorrent(
     var prevTrackerOperation: trackerUtils.Operation = .{ .timer = 0 };
 
     try kq.addTimer(trackerTaggedPointer, 0, .{ .periodic = false });
-    if (ticker) |t| {
-        try kq.addTimer(tg.pack(.{ .ticker = t }), @as(usize, t.tick) * std.time.ms_per_s, .{ .periodic = true });
+    if (ctx.ticker) |ticker| {
+        try kq.addTimer(
+            tg.pack(.{ .ticker = ticker }),
+            @as(usize, ticker.tick) * std.time.ms_per_s,
+            .{ .periodic = true },
+        );
     }
 
     const handshake = Handshake.init(peerId, torrent.infoHash, .{
