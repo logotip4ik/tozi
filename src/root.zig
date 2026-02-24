@@ -19,7 +19,7 @@ const trackerUtils = @import("tracker-utils.zig");
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
 
-const TaggedPointer = utils.TaggedPointer(union(enum) {
+const tg = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
     trackerClient: *Tracker.Client,
     peer: *Peer,
@@ -49,7 +49,7 @@ pub fn downloadTorrent(
     defer for (threadPipes) |fd| std.posix.close(fd);
 
     const readPipe, const writePipe = threadPipes;
-    try kq.subscribe(readPipe, .read, TaggedPointer.pack(.{ .pieces = pieces }));
+    try kq.subscribe(readPipe, .read, tg.pack(.{ .pieces = pieces }));
 
     var peers: std.array_list.Aligned(*Peer, null) = .empty;
     defer {
@@ -70,12 +70,12 @@ pub fn downloadTorrent(
         &torrent,
     );
     defer tracker.deinit(alloc);
-    const trackerTaggedPointer = TaggedPointer.pack(.{ .tracker = &tracker });
+    const trackerTaggedPointer = tg.pack(.{ .tracker = &tracker });
     var prevTrackerOperation: trackerUtils.Operation = .{ .timer = 0 };
 
-    try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), 0, .{ .periodic = false });
+    try kq.addTimer(trackerTaggedPointer, 0, .{ .periodic = false });
     if (ticker) |t| {
-        try kq.addTimer(TaggedPointer.pack(.{ .ticker = t }), @as(usize, t.tick) * std.time.ms_per_s, .{ .periodic = true });
+        try kq.addTimer(tg.pack(.{ .ticker = t }), @as(usize, t.tick) * std.time.ms_per_s, .{ .periodic = true });
     }
 
     const handshake = Handshake.init(peerId, torrent.infoHash, .{
@@ -86,7 +86,7 @@ pub fn downloadTorrent(
     const totalPieces = torrent.pieces.len / 20;
 
     while (try kq.next()) |event| {
-        if (event.kind == .timer) switch (TaggedPointer.unpack(event.ident)) {
+        if (event.kind == .timer) switch (tg.unpack(event.ident)) {
             .tracker => {
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.totalLen - tracker.downloaded;
@@ -98,7 +98,7 @@ pub fn downloadTorrent(
                 }
 
                 try kq.addTimer(
-                    TaggedPointer.pack(.{ .trackerClient = &tracker.client }),
+                    tg.pack(.{ .trackerClient = &tracker.client }),
                     tracker.timeout(),
                     .{ .periodic = false },
                 );
@@ -126,7 +126,7 @@ pub fn downloadTorrent(
             .pieces, .peer => unreachable,
         };
 
-        const taggedPointer = TaggedPointer.unpack(event.udata);
+        const taggedPointer = tg.unpack(event.udata);
         switch (taggedPointer) {
             .ticker, .trackerClient => unreachable,
             .peer => {},
@@ -191,7 +191,7 @@ pub fn downloadTorrent(
                         return;
                     };
 
-                    try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), 0, .{ .periodic = false });
+                    try kq.addTimer(trackerTaggedPointer, 0, .{ .periodic = false });
                     prevTrackerOperation = .{ .timer = 0 };
 
                     continue;
@@ -212,13 +212,13 @@ pub fn downloadTorrent(
 
                         // closing socket will close "read/write"
                         // pipes, but we have our custom timer with "socket" id
-                        try kq.deleteTimer(TaggedPointer.pack(.{ .trackerClient = &tracker.client }));
+                        try kq.deleteTimer(tg.pack(.{ .trackerClient = &tracker.client }));
 
                         if (pieces.isDownloadComplete()) {
                             return;
                         }
 
-                        try kq.addTimer(TaggedPointer.pack(.{ .tracker = &tracker }), timer, .{ .periodic = false });
+                        try kq.addTimer(trackerTaggedPointer, timer, .{ .periodic = false });
 
                         while (tracker.nextNewPeer()) |addr_packed| {
                             const peer = try alloc.create(Peer);
@@ -231,7 +231,7 @@ pub fn downloadTorrent(
                             };
                             errdefer peer.deinit(alloc);
 
-                            try kq.subscribe(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
+                            try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                             errdefer kq.killSocket(peer.socket.fd);
 
                             try peers.append(alloc, peer);
