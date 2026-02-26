@@ -470,13 +470,20 @@ pub fn downloadTorrent(
                                     continue;
                                 };
                                 defer pex.deinit(alloc);
+
+                                var i: u8 = 0;
+                                while (i < pex.added.items.len) : (i += 1) {
+                                    if (i > Pex.ADDED_MAX_DEFAULT) break;
+                                    try tracker.addNewAddr(alloc, pex.added.items[i].addr);
+                                }
+
+                                try tracker.oldAddrs.ensureTotalCapacity(alloc, tracker.newAddrs.items.len);
+
                                 std.log.debug("peer: {d}, received PEX message, added {d}, dropped {d}", .{
                                     peer.socket.fd,
                                     pex.added.items.len,
                                     pex.dropped.items.len,
                                 });
-
-                                try tracker.oldAddrs.ensureTotalCapacity(alloc, tracker.newAddrs.items.len);
 
                                 initializeNewPeers(alloc, &peers, &tracker, &kq) catch |err| switch (err) {
                                     error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,

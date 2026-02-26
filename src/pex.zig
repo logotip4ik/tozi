@@ -13,6 +13,8 @@ const AddedEntry = struct { addr: std.net.Address, flags: PexFlagByte };
 
 pub const TIMEOUT_DEFAULT = 60 * std.time.ms_per_s;
 
+pub const ADDED_MAX_DEFAULT = 50;
+
 pub const PexFlagByte = packed struct(u8) {
     /// Prefers encryption
     encryption: bool = false,
