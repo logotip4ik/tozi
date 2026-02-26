@@ -113,18 +113,20 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
 
 /// NOTE: after adding new address ensure `oldAddrs` have the same length as the `newAddrs`
 pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Address) !void {
-    if (peer.any.family == std.posix.AF.INET) {
-        const ip = peer.in.sa.addr;
-
-        // 0.0.0.0 is 0
-        // 255.255.255.255 is 0xFFFFFFFF (4294967295)
-        if (ip == 0 or ip == 0xFFFFFFFF) {
-            return;
-        }
-
-        // Block loopback (127.0.0.1)
-        if (builtin.mode != .Debug and ip == 0x0100007f) return;
+    if (peer.any.family != std.posix.AF.INET) {
+        return;
     }
+
+    const ip = peer.in.sa.addr;
+
+    // 0.0.0.0 is 0
+    // 255.255.255.255 is 0xFFFFFFFF (4294967295)
+    if (ip == 0 or ip == 0xFFFFFFFF) {
+        return;
+    }
+
+    // Block loopback (127.0.0.1)
+    if (builtin.mode != .Debug and ip == 0x0100007f) return;
 
     for (self.newAddrs.items) |addr| if (addr.eql(peer)) return;
     for (self.oldAddrs.items) |addr| if (addr.eql(peer)) return;

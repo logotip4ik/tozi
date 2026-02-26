@@ -90,10 +90,13 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Protoc
         return ValidateError.InvalidInfoHash;
     }
 
-    return Protocols{
-        .fast = self.reserved.fast and reserved.fast,
-        .extended = self.reserved.extended and reserved.extended,
-    };
+    var proto: Protocols = .{};
+
+    inline for (comptime std.meta.fieldNames(Protocols)) |field| {
+        @field(proto, field) = @field(self.reserved, field) and @field(reserved, field);
+    }
+
+    return proto;
 }
 
 test "reserved byte positions" {
@@ -254,7 +257,7 @@ pub const Extended = struct {
         try m.fill(alloc, &map);
 
         const value = map.get("ut_pex") orelse unreachable;
-        try std.testing.expectEqualDeep(Bencode{.inner = .{ .int = 1 } }, value);
+        try std.testing.expectEqualDeep(Bencode{ .inner = .{ .int = 1 } }, value);
 
         const value_null = map.get("ut_holepunch");
         try std.testing.expectEqual(null, value_null);
