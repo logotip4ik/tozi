@@ -42,3 +42,4 @@ zig build
 - BEP-015: UDP Tracker Protocol for BitTorrent (TODO: add reties)
 - BEP-020: Peer ID Conventions
 - BEP-023: Tracker Returns Compact Peer Lists
+- BEP-040: Canonical Peer Priority

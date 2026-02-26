@@ -360,10 +360,7 @@ pub fn downloadTorrent(
 
                         var extended: Handshake.Extended = .{
                             .client_name = "Tozi 0.1",
-                            .your_ip = if (peer.address.any.family == std.posix.AF.INET)
-                                std.mem.asBytes(&peer.address.in.sa.addr).*
-                            else
-                                null,
+                            .your_ip = utils.addressToYourIp(peer.address),
                             .map = .{ .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.Key.Pex) else null },
                         };
 
@@ -448,6 +445,10 @@ pub fn downloadTorrent(
                                     peer.inFlight.resize(alloc, req_queue) catch {};
                                 }
 
+                                if (e.your_ip) |your_ip| {
+                                    try tracker.voteForIp(alloc, your_ip, .peer);
+                                }
+
                                 const map = e.map orelse continue;
                                 peer.extendedMap = map;
 
@@ -462,8 +463,6 @@ pub fn downloadTorrent(
 
                                     std.log.debug("peer: {d}, enabled PEX", .{peer.socket.fd});
                                 }
-
-                                continue;
                             },
                             .Pex => {
                                 if (peer.extendedMap.pex) |_| {} else {
@@ -483,6 +482,7 @@ pub fn downloadTorrent(
                                     try tracker.addNewAddr(alloc, pex.added.items[i].addr);
                                 }
 
+                                if (tracker.myIp()) |my_ip| tracker.sortNewAddrs(my_ip);
                                 try tracker.oldAddrs.ensureTotalCapacity(alloc, tracker.newAddrs.items.len);
 
                                 std.log.debug("peer: {d}, received PEX message, added {d}, dropped {d}", .{

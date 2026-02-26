@@ -27,12 +27,12 @@ left: usize,
 
 numWant: u16 = 100,
 
-port: u16 = 6889,
+port: u16 = MY_PORT_DEFAULT,
 
 client: Client = .none,
 
+newAddrs: std.array_list.Aligned(NewAddr, null) = .empty,
 oldAddrs: std.array_list.Aligned(std.net.Address, null) = .empty,
-newAddrs: std.array_list.Aligned(std.net.Address, null) = .empty,
 
 tiers: Torrent.Tiers,
 
@@ -40,10 +40,20 @@ used: Source = .{ .tier = 0, .i = 0 },
 
 queued: Stats = undefined,
 
-const Source = packed struct {
-    tier: u32,
-    i: u32,
+ip_vote: IpVote = .empty,
+
+const IpVote = std.hash_map.AutoHashMapUnmanaged([4]u8, u16);
+
+const NewAddr = struct {
+    addr: std.net.Address,
+    priority: u32,
+
+    pub fn lessThen(_: void, a: NewAddr, b: NewAddr) bool {
+        return a.priority < b.priority;
+    }
 };
+
+const Source = packed struct { tier: u32, i: u32 };
 
 pub const Client = union(enum) {
     none,
@@ -66,6 +76,7 @@ pub const Client = union(enum) {
 };
 
 pub const defaultNumWant = 20;
+const MY_PORT_DEFAULT = 6889;
 
 pub fn init(
     alloc: std.mem.Allocator,
@@ -104,6 +115,7 @@ pub fn init(
 pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.oldAddrs.deinit(alloc);
     self.newAddrs.deinit(alloc);
+    self.ip_vote.deinit(alloc);
 
     for (self.tiers.items) |*x| x.deinit(alloc);
     self.tiers.deinit(alloc);
@@ -112,6 +124,7 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
 }
 
 /// NOTE: after adding new address ensure `oldAddrs` have the same length as the `newAddrs`
+/// NOTE: ensure to call `sortNewAddrs` after batch call
 pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Address) !void {
     if (peer.any.family != std.posix.AF.INET) {
         return;
@@ -128,10 +141,10 @@ pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Addres
     // Block loopback (127.0.0.1)
     if (builtin.mode != .Debug and ip == 0x0100007f) return;
 
-    for (self.newAddrs.items) |addr| if (addr.eql(peer)) return;
+    for (self.newAddrs.items) |item| if (item.addr.eql(peer)) return;
     for (self.oldAddrs.items) |addr| if (addr.eql(peer)) return;
 
-    try self.newAddrs.append(alloc, peer);
+    try self.newAddrs.append(alloc, .{ .addr = peer, .priority = 0 });
 }
 
 pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.net.Address) !void {
@@ -139,6 +152,52 @@ pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.
 
     std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
     try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
+
+    if (self.myIp()) |my_ip| self.sortNewAddrs(my_ip);
+}
+
+pub fn myIp(self: *const Tracker) ?[4]u8 {
+    var iter = self.ip_vote.iterator();
+
+    var ip: ?[4]u8 = null;
+    var votes: u16 = 0;
+
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* > votes) {
+            ip = entry.key_ptr.*;
+            votes = entry.value_ptr.*;
+        }
+    }
+
+    return ip;
+}
+
+pub fn voteForIp(self: *Tracker, alloc: std.mem.Allocator, ip: [4]u8, source: enum { tracker, peer }) !void {
+    const res = try self.ip_vote.getOrPut(alloc, ip);
+    const points: u8 = switch (source) {
+        .tracker => 5,
+        .peer => 1,
+    };
+
+    if (res.found_existing) {
+        res.value_ptr.* = std.math.add(u16, res.value_ptr.*, points) catch res.value_ptr.*;
+    } else {
+        res.value_ptr.* = points;
+    }
+}
+
+pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
+    for (self.newAddrs.items) |*item| {
+        if (item.priority != 0) continue;
+        item.priority = computeBep40Priority(
+            my_ip,
+            MY_PORT_DEFAULT,
+            utils.addressToYourIp(item.addr) orelse continue,
+            item.addr.getPort(),
+        );
+    }
+
+    std.mem.sortUnstable(NewAddr, self.newAddrs.items, {}, NewAddr.lessThen);
 }
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
@@ -195,9 +254,13 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             defer announce.deinit(alloc);
 
             try TrackerHttp.parseIntoAnnounce(alloc, content, &announce);
-            try self.addNewAddrs(alloc, announce.peers.items);
-
             std.log.debug("received interval of {d}s", .{announce.interval});
+
+            if (announce.external_ip) |your_ip| {
+                try self.voteForIp(alloc, your_ip, .tracker);
+            }
+
+            try self.addNewAddrs(alloc, announce.peers.items);
 
             if (self.used.i != 0) {
                 const tier = self.tiers.items[self.used.tier];
@@ -366,9 +429,9 @@ pub fn nextUsed(self: *Tracker) ?Source {
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
     const newPeer = self.newAddrs.pop() orelse return null;
 
-    self.oldAddrs.appendAssumeCapacity(newPeer);
+    self.oldAddrs.appendAssumeCapacity(newPeer.addr);
 
-    return newPeer;
+    return newPeer.addr;
 }
 
 /// in milliseconds
@@ -404,6 +467,85 @@ pub fn generatePeerId() [20]u8 {
     }
 
     return id;
+}
+
+/// Computes the BEP 40 Canonical Peer Priority between your IP/Port and a Peer's IP/Port.
+/// IPs are represented as 4-byte arrays (IPv4).
+pub fn computeBep40Priority(
+    my_ip: [4]u8,
+    my_port: u16,
+    peer_ip: [4]u8,
+    peer_port: u16,
+) u32 {
+    // 1. Fallback to ports if the IP addresses are identical
+    if (std.mem.eql(u8, &my_ip, &peer_ip)) {
+        var buffer: [4]u8 = undefined;
+
+        const is_smaller = my_port < peer_port;
+        std.mem.writeInt(u16, buffer[0..2], if (is_smaller) my_port else peer_port, .big);
+        std.mem.writeInt(u16, buffer[2..4], if (is_smaller) peer_port else my_port, .big);
+
+        return std.hash.crc.Crc32Iscsi.hash(&buffer);
+    }
+
+    // 2. Determine the mask based on subnet match
+    var mask = [4]u8{ 0xff, 0xff, 0x55, 0x55 }; // Default mask
+
+    if (my_ip[0] == peer_ip[0] and my_ip[1] == peer_ip[1]) {
+        if (my_ip[2] == peer_ip[2]) {
+            mask = [4]u8{ 0xff, 0xff, 0xff, 0xff }; // Same /24
+        } else {
+            mask = [4]u8{ 0xff, 0xff, 0xff, 0x55 }; // Same /16
+        }
+    }
+
+    // 3. Apply the mask
+    var masked_client: [4]u8 = undefined;
+    var masked_peer: [4]u8 = undefined;
+    for (0..4) |i| {
+        masked_client[i] = my_ip[i] & mask[i];
+        masked_peer[i] = peer_ip[i] & mask[i];
+    }
+
+    // 4. Sort and concatenate into an 8-byte buffer
+    const client_val = std.mem.readInt(u32, &masked_client, .big);
+    const peer_val = std.mem.readInt(u32, &masked_peer, .big);
+
+    var buffer: [8]u8 = undefined;
+    if (client_val < peer_val) {
+        @memcpy(buffer[0..4], &masked_client);
+        @memcpy(buffer[4..8], &masked_peer);
+    } else {
+        @memcpy(buffer[0..4], &masked_peer);
+        @memcpy(buffer[4..8], &masked_client);
+    }
+
+    // 5. Calculate and return CRC32-C
+    return std.hash.crc.Crc32Iscsi.hash(&buffer);
+}
+
+test "BEP 40 Official Example 1 - Different /16" {
+    // Client: 123.213.32.10
+    // Peer:   98.76.54.32
+    // Mask applied: FF.FF.55.55
+    // Expected Hash: ec2d7224
+    const client_ip = [_]u8{ 123, 213, 32, 10 };
+    const peer_ip = [_]u8{ 98, 76, 54, 32 };
+
+    const priority = computeBep40Priority(client_ip, 0, peer_ip, 0);
+    try std.testing.expectEqual(@as(u32, 0xec2d7224), priority);
+}
+
+test "BEP 40 Official Example 2 - Same /24" {
+    // Client: 123.213.32.10
+    // Peer:   123.213.32.234
+    // Mask applied: FF.FF.FF.FF
+    // Expected Hash: 99568189
+    const client_ip = [_]u8{ 123, 213, 32, 10 };
+    const peer_ip = [_]u8{ 123, 213, 32, 234 };
+
+    const priority = computeBep40Priority(client_ip, 0, peer_ip, 0);
+    try std.testing.expectEqual(@as(u32, 0x99568189), priority);
 }
 
 test {

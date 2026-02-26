@@ -395,3 +395,11 @@ pub fn compactAddress(addr: std.net.Address, bytes: []u8) void {
 
     std.mem.writeInt(u16, bytes[4..6][0..2], addr.getPort(), .big);
 }
+
+pub fn addressToYourIp(addr: std.net.Address) ?[4]u8 {
+    if (addr.any.family != std.posix.AF.INET) return null;
+
+    const bytes = std.mem.asBytes(&addr.in.sa.addr);
+
+    return bytes[0..4].*;
+}
