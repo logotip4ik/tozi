@@ -264,7 +264,10 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(trackerTaggedPointer, timer, .{ .periodic = false });
 
-                        try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                        initializeNewPeers(alloc, &peers, &tracker, &kq) catch |err| switch (err) {
+                            error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
+                            else => |e| return e,
+                        };
                     },
                 }
 
@@ -476,7 +479,10 @@ pub fn downloadTorrent(
 
                                 try tracker.oldAddrs.ensureTotalCapacity(alloc, tracker.newAddrs.items.len);
 
-                                try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                                initializeNewPeers(alloc, &peers, &tracker, &kq) catch |err| switch (err) {
+                                    error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
+                                    else => |e| return e,
+                                };
                             },
                         }
                     },
@@ -712,7 +718,10 @@ pub fn downloadTorrent(
                 }
             }
 
-            try initializeNewPeers(alloc, &peers, &tracker, &kq);
+            initializeNewPeers(alloc, &peers, &tracker, &kq) catch |err| switch (err) {
+                error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
+                else => |e| return e,
+            };
         }
     }
 }
