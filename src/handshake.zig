@@ -36,9 +36,7 @@ pub fn init(peerId: [20]u8, infoHash: [20]u8, protocols: Protocols) Handshake {
     var reserved: Reserved = .{};
 
     inline for (std.meta.fields(Protocols)) |field| {
-        if (@field(protocols, field.name)) {
-            @field(reserved, field.name) = true;
-        }
+        @field(reserved, field.name) = @field(protocols, field.name);
     }
 
     return Handshake{

@@ -142,10 +142,12 @@ pub fn read(self: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
     try self.fillReadBuffer(alloc, size) orelse return null;
 
     const buffered = self.readBuf.written();
-    const dupe = try alloc.dupe(u8, buffered[0..size]);
-    _ = self.readBuf.writer.consume(size);
 
-    return dupe;
+    return buffered[0..size];
+}
+
+pub fn consumeReadBuf(self: *Peer, buf: []const u8) void {
+    _ = self.readBuf.writer.consume(buf.len);
 }
 
 /// returns `true` when all data was written to socket
@@ -269,7 +271,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
 
     const sizeOfMessageStart = id.messageStartLen();
     const messageStartBytes = try self.read(alloc, sizeOfMessageStart) orelse return null;
-    defer alloc.free(messageStartBytes);
+    defer self.consumeReadBuf(messageStartBytes);
 
     var reader: std.Io.Reader = .fixed(messageStartBytes);
     reader.toss(@sizeOf(@TypeOf(idInt)) + @sizeOf(@TypeOf(len)));

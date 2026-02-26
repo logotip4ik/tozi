@@ -331,7 +331,7 @@ pub fn downloadTorrent(
                         },
                         else => |e| return e,
                     } orelse break :readblk;
-                    defer alloc.free(bytes);
+                    defer peer.consumeReadBuf(bytes);
 
                     const matched = handshake.matchExtensions(bytes) catch |err| {
                         std.log.err("peer: {d} bad handshake {s}", .{ peer.socket.fd, @errorName(err) });
@@ -426,7 +426,7 @@ pub fn downloadTorrent(
                             },
                             else => |e| return e,
                         } orelse break :readblk;
-                        defer alloc.free(bytes);
+                        defer peer.consumeReadBuf(bytes);
 
                         peer.state = .messageStart;
 
@@ -559,7 +559,7 @@ pub fn downloadTorrent(
                             },
                             else => |e| return e,
                         } orelse break :readblk;
-                        defer alloc.free(bytes);
+                        defer peer.consumeReadBuf(bytes);
 
                         peer.state = .messageStart;
 
@@ -588,8 +588,6 @@ pub fn downloadTorrent(
                         }
 
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
-
-                        std.log.debug("peer: {d} received allowed fast for {d}", .{ peer.socket.fd, allowedFast });
 
                         const ready = try peer.fillRqPool(alloc, &torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
@@ -625,7 +623,7 @@ pub fn downloadTorrent(
                             },
                             else => |e| return e,
                         } orelse break :readblk;
-                        defer alloc.free(chunkBytes);
+                        defer peer.consumeReadBuf(chunkBytes);
 
                         peer.state = .messageStart;
                         peer.bytesReceived += chunkBytes.len;

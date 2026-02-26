@@ -33,8 +33,6 @@ pub const RqPool = struct {
 
         self.buf = try alloc.realloc(self.buf, cappedSize);
         self.size = cappedSize;
-
-        std.log.debug("resized pool to {d}", .{cappedSize});
     }
 
     pub fn push(self: *RqPool, r: Piece) !void {
