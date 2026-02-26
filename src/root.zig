@@ -340,8 +340,7 @@ pub fn downloadTorrent(
                     };
 
                     peer.state = .messageStart;
-                    peer.protocols.fast = matched.fast;
-                    peer.protocols.extended = matched.extended;
+                    peer.protocols = matched;
 
                     if (matched.fast and pieces.downloaded == 0) {
                         const ready = try peer.addMessage(.haveNone, &.{});

@@ -281,14 +281,9 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
         .unchoke => .unchoke,
         .interested => .interested,
         .notInterested => .notInterested,
-        .haveAll => .haveAll,
-        .haveNone => .haveNone,
 
         .have => .{ .have = reader.takeInt(u32, .big) catch unreachable },
         .bitfield => .{ .bitfield = len - 1 },
-
-        .suggestPiece => .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable },
-        .allowedFast => .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable },
 
         .piece => .{ .piece = .{
             .index = reader.takeInt(u32, .big) catch unreachable,
@@ -296,13 +291,16 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
             .len = len - 9,
         } },
 
-        .extended => if (self.protocols.extended)
-            .{ .extended = .{
-                .id = reader.takeByte() catch unreachable,
-                .len = len - 2,
-            } }
+        .haveAll => if (self.protocols.fast) .haveAll else error.Dead,
+        .haveNone => if (self.protocols.fast) .haveNone else error.Dead,
+        .suggestPiece => if (self.protocols.fast)
+            .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable }
         else
-            return error.Dead,
+            error.Dead,
+        .allowedFast => if (self.protocols.fast)
+            .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable }
+        else
+            error.Dead,
 
         .request, .cancel, .rejectRequest => blk: {
             const index = reader.takeInt(u32, .big) catch unreachable;
@@ -326,14 +324,22 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
                     .begin = begin,
                     .len = mLen,
                 } };
-            } else {
+            } else if (self.protocols.fast) {
                 break :blk .{ .rejectRequest = .{
                     .index = index,
                     .begin = begin,
                     .len = mLen,
                 } };
-            }
+            } else break :blk error.Dead;
         },
+
+        .extended => if (self.protocols.extended)
+            .{ .extended = .{
+                .id = reader.takeByte() catch unreachable,
+                .len = len - 2,
+            } }
+        else
+            error.Dead,
 
         .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
     };
