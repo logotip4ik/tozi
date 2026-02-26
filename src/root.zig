@@ -359,8 +359,12 @@ pub fn downloadTorrent(
                         std.log.debug("peer: {d} sending extended handshake message", .{peer.socket.fd});
 
                         var extended: Handshake.Extended = .{
-                            .v = "Tozi 0.1",
-                            .m = .{ .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.MKey.Pex) else null },
+                            .client_name = "Tozi 0.1",
+                            .your_ip = if (peer.address.any.family == std.posix.AF.INET)
+                                std.mem.asBytes(&peer.address.in.sa.addr).*
+                            else
+                                null,
+                            .map = .{ .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.Key.Pex) else null },
                         };
 
                         var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
@@ -429,7 +433,7 @@ pub fn downloadTorrent(
 
                         peer.state = .messageStart;
 
-                        const m_key = std.enums.fromInt(Handshake.Extended.MKey, extended.id) orelse {
+                        const m_key = std.enums.fromInt(Handshake.Extended.Key, extended.id) orelse {
                             std.log.warn("peer: {d} received unrecognized extended message id {d}", .{ peer.socket.fd, extended.id });
                             continue;
                         };
@@ -440,14 +444,16 @@ pub fn downloadTorrent(
                                 const e = Handshake.Extended.decode(alloc, &reader) catch continue; // `while` read loop
                                 defer e.deinit(alloc);
 
-                                if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
+                                if (e.req_queue) |req_queue| {
+                                    peer.inFlight.resize(alloc, req_queue) catch {};
+                                }
 
-                                const m = e.m orelse continue;
-                                peer.extendedMap = m;
+                                const map = e.map orelse continue;
+                                peer.extendedMap = map;
 
-                                std.log.debug("peer: {d}, extendedMap: {any}", .{ peer.socket.fd, m });
+                                std.log.debug("peer: {d}, extendedMap: {any}", .{ peer.socket.fd, map });
 
-                                if (m.pex) |_| {
+                                if (map.pex) |_| {
                                     try kq.addTimer(
                                         tg.pack(.{ .peer = peer }),
                                         Pex.TIMEOUT_DEFAULT,

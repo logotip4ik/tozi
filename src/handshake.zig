@@ -1,4 +1,6 @@
 const std = @import("std");
+
+const utils = @import("utils");
 const Bencode = @import("bencode.zig");
 
 const Handshake = @This();
@@ -129,14 +131,14 @@ test "reserved byte positions with 'asBytes'" {
 }
 
 pub const Extended = struct {
-    m: ?Map = .{},
+    map: ?Map = .{},
+    client_name: ?[]const u8 = null,
+    req_queue: ?usize = null,
+    your_ip: ?[4]u8 = null,
 
-    v: ?[]const u8,
-    reqq: ?usize = null,
+    const CLIENT_NAME_LEN_MAX = 1024;
 
-    const MAX_V_LEN = 1024;
-
-    pub const MKey = enum(u8) {
+    pub const Key = enum(u8) {
         Handshake = 0,
         Pex = 1,
     };
@@ -184,7 +186,7 @@ pub const Extended = struct {
 
     /// deinit is used when parsing `extended` message from other peers
     pub fn deinit(self: *const Extended, alloc: std.mem.Allocator) void {
-        if (self.v) |v| alloc.free(v);
+        if (self.client_name) |x| alloc.free(x);
     }
 
     pub fn encode(
@@ -195,16 +197,25 @@ pub const Extended = struct {
         var root: std.StringHashMapUnmanaged(Bencode) = .empty;
         defer root.deinit(alloc);
 
-        if (self.v) |v| {
-            try root.putNoClobber(alloc, "v", .{ .inner = .{ .string = v } });
+        if (self.client_name) |client_name| {
+            try root.putNoClobber(alloc, "v", .{ .inner = .{ .string = client_name } });
         }
 
         var m: std.StringHashMapUnmanaged(Bencode) = .empty;
         defer m.deinit(alloc);
 
-        if (self.m) |x| try x.fill(alloc, &m);
+        if (self.map) |map| try map.fill(alloc, &m);
 
         try root.putNoClobber(alloc, "m", .{ .inner = .{ .dict = m } });
+
+        if (self.req_queue) |req_queue| {
+            utils.assert(req_queue > 0);
+            try root.putNoClobber(alloc, "reqq", .{ .inner = .{ .int = @intCast(req_queue) } });
+        }
+
+        if (self.your_ip) |your_ip| {
+            try root.putNoClobber(alloc, "yourip", .{ .inner = .{ .string = &your_ip } });
+        }
 
         var rootValue: Bencode = .{ .inner = .{ .dict = root } };
         try rootValue.encode(writer);
@@ -214,30 +225,37 @@ pub const Extended = struct {
         var v: Bencode = try .decode(alloc, reader, 0);
         defer v.deinit(alloc);
 
-        var extended = Extended{ .m = null, .v = null };
+        var extended = Extended{};
 
         const dict = switch (v.inner) {
             .dict => |d| d,
             else => return error.InvalidExtendBencode,
         };
 
-        if (dict.get("reqq")) |reqq| switch (reqq.inner) {
-            .int => |int| if (int > 0) {
-                extended.reqq = @intCast(int);
+        if (dict.get("reqq")) |x| switch (x.inner) {
+            .int => |req_queue| if (req_queue > 0) {
+                extended.req_queue = @intCast(req_queue);
             },
             else => {},
         };
 
-        if (dict.get("v")) |version| blk: switch (version.inner) {
-            .string => |string| if (string.len < MAX_V_LEN) {
-                extended.v = alloc.dupe(u8, string) catch break :blk;
+        if (dict.get("v")) |x| blk: switch (x.inner) {
+            .string => |client_name| if (client_name.len < CLIENT_NAME_LEN_MAX) {
+                extended.client_name = alloc.dupe(u8, client_name) catch break :blk;
             },
             else => {},
         };
 
-        if (dict.get("m")) |m| switch (m.inner) {
-            .dict => |mPeer| {
-                extended.m = .parse(&mPeer);
+        if (dict.get("m")) |x| switch (x.inner) {
+            .dict => |map| {
+                extended.map = .parse(&map);
+            },
+            else => {},
+        };
+
+        if (dict.get("yourip")) |x| switch (x.inner) {
+            .string => |your_ip| if (your_ip.len == 4) {
+                extended.your_ip = your_ip[0..4].*;
             },
             else => {},
         };
