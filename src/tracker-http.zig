@@ -511,40 +511,65 @@ pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: 
     var value: Bencode = try .decode(alloc, &reader, 0);
     defer value.deinit(alloc);
 
-    if (value.inner.dict.get("failure reason")) |failureReason| {
-        std.log.err("received err from tracker: {s}", .{failureReason.inner.string});
-        return error.FailedAnnouncement;
-    }
-
-    if (value.inner.dict.get("interval")) |interval| {
-        if (interval.inner.int < 0) return error.InvalidInterval;
-
-        announce.interval = @intCast(interval.inner.int);
-    } else return error.MissingInternal;
-
-    if (value.inner.dict.get("peers")) |peers| peers: {
-        if (peers.inner.string.len == 0) break :peers;
-        if (@rem(peers.inner.string.len, 6) != 0) return error.InvalidPeers;
-
-        var iter = std.mem.window(u8, peers.inner.string, 6, 6);
-        while (iter.next()) |peer| {
-            try announce.peers.append(
-                alloc,
-                utils.parseCompactAddress(peer[0..6].*),
-            );
-        }
-    } else return error.MissinPeers;
-
-    if (value.inner.dict.get("min interval")) |minInterval| if (minInterval.inner.int >= 0) {
-        announce.minInterval = @intCast(minInterval.inner.int);
+    if (value.inner.dict.get("failure reason")) |x| switch (x.inner) {
+        .string => |failure_reason| {
+            std.log.err("received err from tracker: {s}", .{failure_reason});
+            return error.FailedAnnouncement;
+        },
+        else => return error.FailedAnnouncement,
     };
 
-    if (value.inner.dict.get("complete")) |complete| if (complete.inner.int >= 0) {
-        announce.complete = @intCast(complete.inner.int);
+    if (value.inner.dict.get("interval")) |x| switch (x.inner) {
+        .int => |interval| {
+            if (interval < 0) return error.InvalidInterval;
+
+            announce.interval = @intCast(interval);
+        },
+        else => return error.MissingInternal,
     };
 
-    if (value.inner.dict.get("incomplete")) |incomplete| if (incomplete.inner.int >= 0) {
-        announce.incomplete = @intCast(incomplete.inner.int);
+    if (value.inner.dict.get("peers")) |x| switch (x.inner) {
+        .string => |peers| blk: {
+            if (peers.len == 0) break :blk;
+            if (@rem(peers.len, 6) != 0) return error.InvalidPeers;
+
+            var iter = std.mem.window(u8, peers, 6, 6);
+            while (iter.next()) |peer| {
+                try announce.peers.append(
+                    alloc,
+                    utils.parseCompactAddress(peer[0..6].*),
+                );
+            }
+        },
+        else => return error.MissinPeers,
+    };
+
+    if (value.inner.dict.get("min interval")) |x| switch (x.inner) {
+        .int => |interval_min| if (interval_min >= 0) {
+            announce.interval_min = @intCast(interval_min);
+        },
+        else => {},
+    };
+
+    if (value.inner.dict.get("complete")) |x| switch (x.inner) {
+        .int => |complete| if (complete >= 0) {
+            announce.complete = @intCast(complete);
+        },
+        else => {},
+    };
+
+    if (value.inner.dict.get("incomplete")) |x| switch (x.inner) {
+        .int => |incomplete| if (incomplete >= 0) {
+            announce.incomplete = @intCast(incomplete);
+        },
+        else => {},
+    };
+
+    if (value.inner.dict.get("external ip")) |x| switch (x.inner) {
+        .string => |external_ip| if (external_ip.len == 4) {
+            announce.external_ip = external_ip[0..4].*;
+        },
+        else => {},
     };
 }
 

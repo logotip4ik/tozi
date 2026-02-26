@@ -35,11 +35,13 @@ pub const AnnounceResponse = struct {
     peers: std.array_list.Aligned(std.net.Address, null) = .empty,
 
     /// Minimum allowed interval
-    minInterval: ?u32 = null,
+    interval_min: ?u32 = null,
     /// Number of seeders
     complete: ?u32 = null,
     /// Number of leechers
     incomplete: ?u32 = null,
+    /// My ip, what tracker sees me as
+    external_ip: ?[4]u8 = null,
 
     pub fn deinit(self: *AnnounceResponse, alloc: std.mem.Allocator) void {
         self.peers.deinit(alloc);
