@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const utils = @import("utils");
 const Peer = @import("peer.zig");
@@ -30,8 +31,8 @@ port: u16 = 6889,
 
 client: Client = .none,
 
-oldAddrs: std.array_list.Aligned([6]u8, null) = .empty,
-newAddrs: std.array_list.Aligned([6]u8, null) = .empty,
+oldAddrs: std.array_list.Aligned(std.net.Address, null) = .empty,
+newAddrs: std.array_list.Aligned(std.net.Address, null) = .empty,
 
 tiers: Torrent.Tiers,
 
@@ -110,26 +111,29 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.client.deinit(alloc);
 }
 
-pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, announce: *const AnnounceResponse) !void {
-    outer: for (announce.peers.items) |peerString| {
-        if (peerString[0] == 0 or peerString[0] == 255) {
-            continue;
+/// NOTE: after adding new address ensure `oldAddrs` have the same length as the `newAddrs`
+pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Address) !void {
+    if (peer.any.family == std.posix.AF.INET) {
+        const ip = peer.in.sa.addr;
+
+        // 0.0.0.0 is 0
+        // 255.255.255.255 is 0xFFFFFFFF (4294967295)
+        if (ip == 0 or ip == 0xFFFFFFFF) {
+            return;
         }
 
-        for (self.newAddrs.items) |addr| {
-            if (std.mem.eql(u8, addr[0..6], peerString[0..6])) {
-                continue :outer;
-            }
-        }
-
-        for (self.oldAddrs.items) |addr| {
-            if (std.mem.eql(u8, addr[0..6], peerString[0..6])) {
-                continue :outer;
-            }
-        }
-
-        try self.newAddrs.append(alloc, peerString[0..6].*);
+        // Block loopback (127.0.0.1)
+        if (builtin.mode != .Debug and ip == 0x0100007f) return;
     }
+
+    for (self.newAddrs.items) |addr| if (addr.eql(peer)) return;
+    for (self.oldAddrs.items) |addr| if (addr.eql(peer)) return;
+
+    try self.newAddrs.append(alloc, peer);
+}
+
+pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.net.Address) !void {
+    for (peers) |peer| try self.addNewAddr(alloc, peer);
 
     std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
     try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
@@ -189,7 +193,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             defer announce.deinit(alloc);
 
             try TrackerHttp.parseIntoAnnounce(alloc, content, &announce);
-            try self.addNewAddrs(alloc, &announce);
+            try self.addNewAddrs(alloc, announce.peers.items);
 
             std.log.debug("received interval of {d}s", .{announce.interval});
 
@@ -250,7 +254,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
 
             try client.readAnnounce(alloc, &announce) orelse return .write;
 
-            try self.addNewAddrs(alloc, &announce);
+            try self.addNewAddrs(alloc, announce.peers.items);
 
             std.log.debug("received interval of {d}s", .{announce.interval});
 
@@ -357,7 +361,7 @@ pub fn nextUsed(self: *Tracker) ?Source {
     return null;
 }
 
-pub fn nextNewPeer(self: *Tracker) ?[6]u8 {
+pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
     const newPeer = self.newAddrs.pop() orelse return null;
 
     self.oldAddrs.appendAssumeCapacity(newPeer);

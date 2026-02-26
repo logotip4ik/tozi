@@ -6,11 +6,14 @@ const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");
 const Handshake = @import("handshake.zig");
 const Socket = @import("socket.zig");
+const Pex = @import("pex.zig");
 
 const Peer = @This();
 
 const DEFAULT_IN_FLIGHT_REQUESTS = 50;
 const DEFAULT_ALLOWED_FAST = 10;
+
+address: std.net.Address,
 
 socket: Socket.Posix,
 
@@ -35,9 +38,11 @@ workingPieceOffset: u32 = 0,
 inFlight: utils.RqPool,
 
 protocols: Handshake.Protocols = .{},
-extended: ?Handshake.Extended = null,
+extendedMap: Handshake.Extended.Map = .{},
 
 allowedFast: std.array_list.Aligned(u32, null),
+
+pex_sent_addresses: std.array_list.Aligned(std.net.Address, null) = .empty,
 
 pub const State = union(enum) {
     readHandshake,
@@ -61,16 +66,13 @@ pub const State = union(enum) {
     }
 };
 
-pub fn init(alloc: std.mem.Allocator, in: [6]u8) !Peer {
+pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !Peer {
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
         std.posix.IPPROTO.TCP,
     );
     errdefer std.posix.close(fd);
-
-    const port = std.mem.readInt(u16, in[4..6], .big);
-    const addr = std.net.Address.initIp4(in[0..4].*, port);
 
     std.log.debug("peer: {d} connecting to {f}", .{ fd, addr });
     std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
@@ -79,6 +81,7 @@ pub fn init(alloc: std.mem.Allocator, in: [6]u8) !Peer {
     };
 
     return .{
+        .address = addr,
         .socket = .init(fd),
         .readBuf = .init(alloc),
         .writeBuf = .init(alloc),
@@ -94,10 +97,10 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     self.writeBuf.deinit();
     self.inFlight.deinit(alloc);
     self.allowedFast.deinit(alloc);
+    self.pex_sent_addresses.deinit(alloc);
 
     if (self.bitfield) |*x| x.deinit(alloc);
     if (self.workingOn) |*x| x.deinit(alloc);
-    if (self.extended) |*x| x.deinit(alloc);
 
     std.posix.close(self.socket.fd);
 }
@@ -291,10 +294,13 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
             .len = len - 9,
         } },
 
-        .extended => .{ .extended = .{
-            .id = reader.takeByte() catch unreachable,
-            .len = len - 2,
-        } },
+        .extended => if (self.protocols.extended)
+            .{ .extended = .{
+                .id = reader.takeByte() catch unreachable,
+                .len = len - 2,
+            } }
+        else
+            return error.Dead,
 
         .request, .cancel, .rejectRequest => blk: {
             const index = reader.takeInt(u32, .big) catch unreachable;
@@ -329,4 +335,44 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
 
         .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
     };
+}
+
+pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !Pex {
+    var pex: Pex = .{};
+    errdefer pex.deinit(alloc);
+
+    outer: for (other_peers) |other_peer| if (other_peer.state.isConnected() and other_peer != self) {
+        for (self.pex_sent_addresses.items) |sent| {
+            if (sent.eql(other_peer.address)) continue :outer;
+        }
+
+        const seed = if (other_peer.bitfield) |bitfield|
+            bitfield.count() == bitfield.bit_length
+        else
+            false;
+
+        try pex.added.append(alloc, .{
+            .addr = other_peer.address,
+            .flags = .{
+                .reachable = true,
+                .seed = seed,
+            },
+        });
+        try self.pex_sent_addresses.append(alloc, other_peer.address);
+    };
+
+    var i = self.pex_sent_addresses.items.len;
+    outer: while (i > 0) {
+        i -= 1;
+
+        const sent = self.pex_sent_addresses.items[i];
+        for (other_peers) |other_peer| {
+            if (other_peer.state.isConnected() and other_peer.address.eql(sent)) continue :outer;
+        }
+
+        try pex.dropped.append(alloc, sent);
+        _ = self.pex_sent_addresses.swapRemove(i);
+    }
+
+    return pex;
 }

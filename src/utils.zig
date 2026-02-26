@@ -200,7 +200,7 @@ pub fn appendQuery(
         const key, const val = query;
 
         switch (val) {
-            .int => |int|  try writer.print("{s}={d}", .{key, int}),
+            .int => |int| try writer.print("{s}={d}", .{ key, int }),
 
             // default zig's query escaping is not enough...
             .string => |string| {
@@ -239,7 +239,7 @@ pub fn writeQueryToStream(
         const key, const val = query;
 
         switch (val) {
-            .int => |int| try w.print("{s}={d}", .{key,int}),
+            .int => |int| try w.print("{s}={d}", .{ key, int }),
 
             // default zig's query escaping is not enough...
             .string => |string| {
@@ -332,7 +332,7 @@ pub fn TaggedPointer(comptime Union: type) type {
 
             assert(tagValue < unionFields.len);
 
-            const valueType: EnumFromU  = @enumFromInt(tagValue);
+            const valueType: EnumFromU = @enumFromInt(tagValue);
 
             switch (valueType) {
                 inline else => |tag| {
@@ -380,4 +380,20 @@ pub fn isHttps(haystack: []const u8) bool {
 
 pub fn isUdp(haystack: []const u8) bool {
     return std.mem.startsWith(u8, haystack, "udp://");
+}
+
+pub fn parseCompactAddress(in: [6]u8) std.net.Address {
+    const port = std.mem.readInt(u16, in[4..6], .big);
+    return std.net.Address.initIp4(in[0..4].*, port);
+}
+
+pub fn compactAddress(addr: std.net.Address, bytes: []u8) void {
+    assert(bytes.len >= 6);
+    // only ipv4
+    assert(addr.any.family == std.posix.AF.INET);
+
+    const ip_bytes: *const [4]u8 = @ptrCast(&addr.in.sa.addr);
+    @memcpy(bytes[0..4], ip_bytes);
+
+    std.mem.writeInt(u16, bytes[4..6][0..2], addr.getPort(), .big);
 }

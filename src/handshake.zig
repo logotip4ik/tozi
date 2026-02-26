@@ -92,6 +92,7 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Protoc
 
     return Protocols{
         .fast = self.reserved.fast and reserved.fast,
+        .extended = self.reserved.extended and reserved.extended,
     };
 }
 
@@ -127,11 +128,58 @@ test "reserved byte positions with 'asBytes'" {
 }
 
 pub const Extended = struct {
-    m: ?struct {} = .{},
-    v: ?[]const u8 = "Tozi 0.1",
+    m: ?Map = .{},
+
+    v: ?[]const u8,
     reqq: ?usize = null,
 
     const MAX_V_LEN = 1024;
+
+    pub const MKey = enum(u8) {
+        Handshake = 0,
+        Pex = 1,
+    };
+
+    pub const Map = struct {
+        pex: ?u8 = null,
+        holepunch: ?u8 = null,
+        metadata: ?u8 = null,
+        donthave: ?u8 = null,
+
+        pub const nameMap = std.StaticStringMap([]const u8).initComptime(&[_]struct { []const u8, []const u8 }{
+            .{ "ut_pex", "pex" },
+            .{ "ut_holepunch", "holepunch" },
+            .{ "ut_metadata", "metadata" },
+            .{ "lt_donthave", "donthave" },
+        });
+
+        pub fn parse(map: *const std.StringHashMapUnmanaged(Bencode)) Map {
+            var self = Map{};
+
+            inline for (comptime nameMap.keys()) |key| {
+                const mappedKey = comptime nameMap.get(key) orelse unreachable;
+
+                if (map.get(key)) |id| switch (id.inner) {
+                    .int => |id_int| if (id_int > 0 and id_int < std.math.maxInt(u8)) {
+                        @field(self, mappedKey) = @intCast(id_int);
+                    },
+                    else => {},
+                };
+            }
+
+            return self;
+        }
+
+        pub fn fill(self: *const Map, alloc: std.mem.Allocator, map: *std.StringHashMapUnmanaged(Bencode)) !void {
+            inline for (comptime nameMap.keys()) |key| {
+                const mappedKey = comptime nameMap.get(key) orelse unreachable;
+
+                if (@field(self, mappedKey)) |id| {
+                    try map.putNoClobber(alloc, key, .{ .inner = .{ .int = id } });
+                }
+            }
+        }
+    };
 
     /// deinit is used when parsing `extended` message from other peers
     pub fn deinit(self: *const Extended, alloc: std.mem.Allocator) void {
@@ -150,7 +198,11 @@ pub const Extended = struct {
             try root.putNoClobber(alloc, "v", .{ .inner = .{ .string = v } });
         }
 
-        const m: std.StringHashMapUnmanaged(Bencode) = .empty;
+        var m: std.StringHashMapUnmanaged(Bencode) = .empty;
+        defer m.deinit(alloc);
+
+        if (self.m) |x| try x.fill(alloc, &m);
+
         try root.putNoClobber(alloc, "m", .{ .inner = .{ .dict = m } });
 
         var rootValue: Bencode = .{ .inner = .{ .dict = root } };
@@ -182,6 +234,33 @@ pub const Extended = struct {
             else => {},
         };
 
+        if (dict.get("m")) |m| switch (m.inner) {
+            .dict => |mPeer| {
+                extended.m = .parse(&mPeer);
+            },
+            else => {},
+        };
+
         return extended;
     }
+
+    test "m filling" {
+        const alloc = std.testing.allocator;
+
+        const m: Map = .{ .pex = 1 };
+        var map: std.hash_map.StringHashMapUnmanaged(Bencode) = .empty;
+        defer map.deinit(alloc);
+
+        try m.fill(alloc, &map);
+
+        const value = map.get("ut_pex") orelse unreachable;
+        try std.testing.expectEqualDeep(Bencode{.inner = .{ .int = 1 } }, value);
+
+        const value_null = map.get("ut_holepunch");
+        try std.testing.expectEqual(null, value_null);
+    }
 };
+
+test {
+    std.testing.refAllDecls(Handshake);
+}

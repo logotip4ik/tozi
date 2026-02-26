@@ -10,6 +10,7 @@ pub const Tracker = @import("tracker.zig");
 pub const Handshake = @import("handshake.zig");
 pub const Socket = @import("socket.zig");
 pub const Ticker = @import("ticker.zig");
+pub const Pex = @import("pex.zig");
 
 const hasher = @import("hasher");
 const utils = @import("utils");
@@ -18,6 +19,7 @@ const trackerUtils = @import("tracker-utils.zig");
 
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
+const ENABLE_PEX = true;
 
 const tg = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
@@ -33,6 +35,8 @@ pub const DownloadTorrentContext = struct {
     pieces: *PieceManager,
     ticker: ?*Ticker = null,
 };
+
+const Peers = std.array_list.Aligned(*Peer, null);
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `inFlight`
 /// requests doesn't track when the request was done, so we don't have a way to check if this chunk
@@ -59,7 +63,7 @@ pub fn downloadTorrent(
     const readPipe, const writePipe = threadPipes;
     try kq.subscribe(readPipe, .read, tg.pack(.{ .pieces = pieces }));
 
-    var peers: std.array_list.Aligned(*Peer, null) = .empty;
+    var peers: Peers = .empty;
     defer {
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
@@ -135,7 +139,34 @@ pub fn downloadTorrent(
                 t.onTick(peers.items, pieces.completed_count);
                 continue;
             },
-            .pieces, .peer => unreachable,
+            .peer => |peer| {
+                if (peer.extendedMap.pex) |pex_key| if (peer.state.isConnected()) blk: {
+                    var pex = try peer.computePex(alloc, peers.items);
+                    defer pex.deinit(alloc);
+
+                    if (pex.added.items.len == 0 and pex.dropped.items.len == 0) {
+                        break :blk;
+                    }
+
+                    const pex_message = try pex.exportMessage(alloc);
+                    defer alloc.free(pex_message);
+
+                    std.log.debug("peer: {d} ({f}) sending pex message, added {d}, dropped {d}", .{
+                        peer.socket.fd,
+                        peer.address,
+                        pex.added.items.len,
+                        pex.dropped.items.len,
+                    });
+
+                    const ready = try peer.addMessage(.{
+                        .extended = .{ .id = pex_key, .len = @intCast(pex_message.len) },
+                    }, pex_message);
+                    if (!ready) try kq.enable(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
+                };
+
+                continue;
+            },
+            .pieces => unreachable,
         };
 
         const taggedPointer = tg.unpack(event.udata);
@@ -164,9 +195,9 @@ pub fn downloadTorrent(
 
                     pieces.complete(piece);
 
-                    for (peers.items) |otherPeer| if (!otherPeer.state.isConnected()) {
-                        const ready = try otherPeer.addMessage(.{ .have = piece.index }, &.{});
-                        if (!ready) try kq.enable(otherPeer.socket.fd, .write, event.udata);
+                    for (peers.items) |other_peer| if (other_peer.state.isConnected()) {
+                        const ready = try other_peer.addMessage(.{ .have = piece.index }, &.{});
+                        if (!ready) try kq.enable(other_peer.socket.fd, .write, tg.pack(.{ .peer = other_peer }));
                     };
 
                     if (pieces.isDownloadComplete()) {
@@ -190,7 +221,8 @@ pub fn downloadTorrent(
                 continue;
             },
             .tracker => {
-                // get socket **before** updating state
+                // get socket **before** updating state, because `nextOperation` will deinit and
+                // unset current client if next operation is last/finishing one
                 const socket = tracker.client.socket();
 
                 const nextOperation = tracker.nextOperation(alloc) catch |err| {
@@ -212,11 +244,11 @@ pub fn downloadTorrent(
 
                 switch (nextOperation) {
                     .read => if (@intFromEnum(nextOperation) != @intFromEnum(prevTrackerOperation)) {
-                        kq.delete(socket, .write) catch {};
+                        try kq.delete(socket, .write);
                         try kq.subscribe(socket, .read, trackerTaggedPointer);
                     },
                     .write => if (@intFromEnum(nextOperation) != @intFromEnum(prevTrackerOperation)) {
-                        kq.delete(socket, .read) catch {};
+                        try kq.delete(socket, .read);
                         try kq.subscribe(socket, .write, trackerTaggedPointer);
                     },
                     .timer => |timer| {
@@ -232,27 +264,7 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(trackerTaggedPointer, timer, .{ .periodic = false });
 
-                        while (tracker.nextNewPeer()) |addr_packed| {
-                            const peer = try alloc.create(Peer);
-                            errdefer alloc.destroy(peer);
-
-                            peer.* = Peer.init(alloc, addr_packed) catch |err| {
-                                std.log.err("failed connecting with {t}", .{err});
-                                alloc.destroy(peer);
-                                continue;
-                            };
-                            errdefer peer.deinit(alloc);
-
-                            try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
-                            errdefer kq.killSocket(peer.socket.fd);
-
-                            try peers.append(alloc, peer);
-                        }
-
-                        if (peers.items.len == 0 and tracker.newAddrs.items.len == 0) {
-                            std.log.info("no pending or alive peers left", .{});
-                            return;
-                        }
+                        try initializeNewPeers(alloc, &peers, &tracker, &kq);
                     },
                 }
 
@@ -344,7 +356,10 @@ pub fn downloadTorrent(
                     if (matched.extended) {
                         std.log.debug("peer: {d} sending extended handshake message", .{peer.socket.fd});
 
-                        var extended: Handshake.Extended = .{ .v = "Tozi 0.1" };
+                        var extended: Handshake.Extended = .{
+                            .v = "Tozi 0.1",
+                            .m = .{ .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.MKey.Pex) else null },
+                        };
 
                         var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
                         defer w.deinit();
@@ -390,7 +405,7 @@ pub fn downloadTorrent(
                     } orelse break :readblk;
 
                     const message = peer.readMessageStart(alloc, idInt, len) catch |err| switch (err) {
-                        error.EndOfStream => {
+                        error.EndOfStream, error.Dead => {
                             peer.state = .dead;
                             break :readblk;
                         },
@@ -412,20 +427,57 @@ pub fn downloadTorrent(
 
                         peer.state = .messageStart;
 
-                        switch (extended.id) {
-                            // 0 - reserved as `handshake`
-                            0 => {
-                                var reader: std.Io.Reader = .fixed(bytes);
-                                const e = Handshake.Extended.decode(alloc, &reader) catch {
-                                    continue; // `while` read loop
-                                };
-                                peer.extended = e;
+                        const m_key = std.enums.fromInt(Handshake.Extended.MKey, extended.id) orelse {
+                            std.log.warn("peer: {d} received unrecognized extended message id {d}", .{ peer.socket.fd, extended.id });
+                            continue;
+                        };
 
-                                std.log.info("peer: {d}, v: {?s}, reqq: {?d}", .{ peer.socket.fd, e.v, e.reqq });
+                        switch (m_key) {
+                            .Handshake => {
+                                var reader: std.Io.Reader = .fixed(bytes);
+                                const e = Handshake.Extended.decode(alloc, &reader) catch continue; // `while` read loop
+                                defer e.deinit(alloc);
 
                                 if (e.reqq) |reqq| peer.inFlight.resize(alloc, reqq) catch {};
+
+                                const m = e.m orelse continue;
+                                peer.extendedMap = m;
+
+                                std.log.debug("peer: {d}, extendedMap: {any}", .{ peer.socket.fd, m });
+
+                                if (m.pex) |_| {
+                                    try kq.addTimer(
+                                        tg.pack(.{ .peer = peer }),
+                                        Pex.TIMEOUT_DEFAULT,
+                                        .{ .periodic = true },
+                                    );
+
+                                    std.log.debug("peer: {d}, enabled PEX", .{peer.socket.fd});
+                                }
+
+                                continue;
                             },
-                            else => {},
+                            .Pex => {
+                                if (peer.extendedMap.pex) |_| {} else {
+                                    peer.state = .dead;
+                                    break :readblk;
+                                }
+
+                                var pex = Pex.parse(alloc, bytes) catch |err| {
+                                    std.log.warn("peer: {d} received invalid pex message, error: {t}", .{ peer.socket.fd, err });
+                                    continue;
+                                };
+                                defer pex.deinit(alloc);
+                                std.log.debug("peer: {d}, received PEX message, added {d}, dropped {d}", .{
+                                    peer.socket.fd,
+                                    pex.added.items.len,
+                                    pex.dropped.items.len,
+                                });
+
+                                try tracker.oldAddrs.ensureTotalCapacity(alloc, tracker.newAddrs.items.len);
+
+                                try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                            },
                         }
                     },
                     .choke => {
@@ -645,15 +697,57 @@ pub fn downloadTorrent(
         }
 
         if (peer.state.isDead()) {
+            if (peer.extendedMap.pex) |_| {
+                try kq.deleteTimer(tg.pack(.{ .peer = peer }));
+            }
+
             kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.workingOn);
             peer.deinit(alloc);
 
-            for (peers.items, 0..) |item, i| if (item == peer) {
-                alloc.destroy(peers.swapRemove(i));
-                break;
-            };
+            for (peers.items, 0..) |other_peer, i| {
+                if (other_peer == peer) {
+                    alloc.destroy(peers.swapRemove(i));
+                    break;
+                }
+            }
+
+            try initializeNewPeers(alloc, &peers, &tracker, &kq);
         }
+    }
+}
+
+fn initializeNewPeers(
+    alloc: std.mem.Allocator,
+    peers: *Peers,
+    tracker: *Tracker,
+    kq: *KQ,
+) !void {
+    if (peers.items.len > 30) return;
+
+    // don't waste returned addr, because it's already moved to `oldAddrs`
+    while (tracker.nextNewPeer()) |addr| {
+        const peer = try alloc.create(Peer);
+        errdefer alloc.destroy(peer);
+
+        peer.* = Peer.init(alloc, addr) catch |err| {
+            std.log.err("failed connecting with {t}", .{err});
+            alloc.destroy(peer);
+            continue;
+        };
+        errdefer peer.deinit(alloc);
+
+        try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
+        errdefer kq.killSocket(peer.socket.fd);
+
+        try peers.append(alloc, peer);
+
+        if (peers.items.len >= 30) break;
+    }
+
+    if (peers.items.len == 0 and tracker.newAddrs.items.len == 0) {
+        std.log.info("no pending or alive peers left", .{});
+        return error.DeadTorrent;
     }
 }
 

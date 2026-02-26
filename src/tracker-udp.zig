@@ -237,8 +237,10 @@ pub fn readAnnounce(self: *TrackerUdp, alloc: std.mem.Allocator, announce: *Anno
             }
 
             while (r.take(6) catch null) |peerString| {
-                const buf = try announce.peers.addOne(alloc);
-                @memcpy(buf[0..6], peerString[0..6]);
+                try announce.peers.append(
+                    alloc,
+                    utils.parseCompactAddress(peerString[0..6].*),
+                );
             }
         },
         2 => return error.WarningMessage,
@@ -414,6 +416,14 @@ test "readAnnounce response" {
     try std.testing.expectEqual(10, announce.incomplete.?);
     try std.testing.expectEqual(5, announce.complete.?);
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 1, 0x1A, 0xE1 }, &announce.peers.items[0]);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 2, 0x1A, 0xE2 }, &announce.peers.items[1]);
+    {
+        const expected = std.net.Ip4Address.init([_]u8{ 192, 168, 1, 1 }, 6881);
+
+        try std.testing.expectEqualDeep(expected, announce.peers.items[0].in);
+    }
+
+    {
+        const expected = std.net.Ip4Address.init([_]u8{ 192, 168, 1, 2 }, 6882);
+        try std.testing.expectEqualDeep(expected, announce.peers.items[1].in);
+    }
 }

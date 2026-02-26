@@ -528,21 +528,22 @@ pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: 
 
         var iter = std.mem.window(u8, peers.inner.string, 6, 6);
         while (iter.next()) |peer| {
-            const buf = try announce.peers.addOne(alloc);
-
-            @memcpy(buf[0..6], peer[0..6]);
+            try announce.peers.append(
+                alloc,
+                utils.parseCompactAddress(peer[0..6].*),
+            );
         }
     } else return error.MissinPeers;
 
-    if (value.inner.dict.get("min interval")) |minInterval| if (minInterval.inner.int >= 0 ){
+    if (value.inner.dict.get("min interval")) |minInterval| if (minInterval.inner.int >= 0) {
         announce.minInterval = @intCast(minInterval.inner.int);
     };
 
-    if (value.inner.dict.get("complete")) |complete| if (complete.inner.int >= 0 ){
+    if (value.inner.dict.get("complete")) |complete| if (complete.inner.int >= 0) {
         announce.complete = @intCast(complete.inner.int);
     };
 
-    if (value.inner.dict.get("incomplete")) |incomplete| if (incomplete.inner.int >= 0 ){
+    if (value.inner.dict.get("incomplete")) |incomplete| if (incomplete.inner.int >= 0) {
         announce.incomplete = @intCast(incomplete.inner.int);
     };
 }

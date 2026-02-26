@@ -106,12 +106,6 @@ pub const Message = union(MessageId) {
         };
     }
 
-    /// length required to write message to buf. It requires 4 bytes more for actual `len` prefix of
-    /// the message
-    pub inline fn wireLen(self: Message) u32 {
-        return 4 + self.len();
-    }
-
     pub inline fn writeMessage(m: Message, w: *std.Io.Writer, data: []const u8) !void {
         try w.writeInt(u32, m.len(), .big);
         try w.writeByte(@intFromEnum(m));

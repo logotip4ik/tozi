@@ -223,7 +223,10 @@ pub fn isDownloadComplete(self: PieceManager) bool {
 }
 
 pub fn downloading(self: *PieceManager, index: u32) void {
-    self.missing_count -= 1;
+    if (self.pieces[index] == .missing) {
+        self.missing_count -= 1;
+    }
+
     self.pieces[index] = .downloading;
 
     if (VERY_VERBOSE) std.log.debug("pieces: downloading {d}", .{index});

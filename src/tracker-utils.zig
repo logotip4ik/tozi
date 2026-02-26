@@ -32,8 +32,7 @@ pub const Stats = struct {
 pub const AnnounceResponse = struct {
     /// Seconds client should wait before next announce
     interval: u32 = undefined,
-    /// Binary blob: 6 bytes per peer (4 byte IP + 2 byte Port)
-    peers: std.array_list.Aligned([6]u8, null) = .empty,
+    peers: std.array_list.Aligned(std.net.Address, null) = .empty,
 
     /// Minimum allowed interval
     minInterval: ?u32 = null,

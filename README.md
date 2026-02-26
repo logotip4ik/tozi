@@ -37,6 +37,7 @@ zig build
 - BEP-003: Core protocol (I'm not entierly sure this is 100% compliant, but it still downloads torrents)
 - BEP-006: Fast extension
 - BEP-010: Extension Protocol
+- BEP-011: Peer Exchange (PEX)
 - BEP-012: Multiple trackers
 - BEP-015: UDP Tracker Protocol for BitTorrent (TODO: add reties)
 - BEP-020: Peer ID Conventions
