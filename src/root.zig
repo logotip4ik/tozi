@@ -99,7 +99,7 @@ pub fn downloadTorrent(
         .extended = ENABLE_EXTENSION,
     });
 
-    const totalPieces = torrent.pieces.len / 20;
+    const total_pieces = torrent.pieces.len / 20;
 
     while (try kq.next()) |event| {
         if (event.kind == .timer) switch (tg.unpack(event.ident)) {
@@ -361,7 +361,10 @@ pub fn downloadTorrent(
                         var extended: Handshake.Extended = .{
                             .client_name = "Tozi 0.1",
                             .your_ip = utils.addressToYourIp(peer.address),
-                            .map = .{ .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.Key.Pex) else null },
+                            .map = .{
+                                .pex = if (ENABLE_PEX) @intFromEnum(Handshake.Extended.Key.Pex) else null,
+                                .donthave = @intFromEnum(Handshake.Extended.Key.Donthave),
+                            },
                         };
 
                         var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
@@ -387,7 +390,7 @@ pub fn downloadTorrent(
                     if (len == 0) {
                         _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
-                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        const ready = try peer.fillRqPool(&torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         continue;
@@ -496,6 +499,36 @@ pub fn downloadTorrent(
                                     else => |e| return e,
                                 };
                             },
+                            .Donthave => {
+                                if (bytes.len != 4) {
+                                    std.log.warn("peer: {d} expected donthave message payload to be 4 bytes len, received: {d}", .{
+                                        peer.socket.fd,
+                                        bytes.len,
+                                    });
+                                    continue;
+                                }
+
+                                const piece = std.mem.readInt(u32, bytes[0..4], .big);
+                                if (piece >= total_pieces) {
+                                    std.log.warn("Peer sent invalid piece index: {d}", .{piece});
+                                    peer.state = .dead;
+                                    break :readblk;
+                                }
+
+                                if (peer.bitfield) |*x| x.unset(piece);
+                                if (peer.workingOn) |*x| x.unset(piece);
+                                if (pieces.buffers.get(piece)) |buf| pieces.reset(buf);
+
+                                var i: u16 = @intCast(peer.inFlight.count);
+                                while (i > 0) {
+                                    i -= 1;
+                                    const req = peer.inFlight.buf[i];
+                                    if (req.index == piece) peer.inFlight.receive(req) catch unreachable;
+                                }
+
+                                const ready = try peer.fillRqPool(&torrent, pieces);
+                                if (!ready) try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
+                            },
                         }
                     },
                     .choke => {
@@ -508,7 +541,7 @@ pub fn downloadTorrent(
                         peer.choked = false;
                         peer.state = .messageStart;
 
-                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        const ready = try peer.fillRqPool(&torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .have => |piece| {
@@ -601,7 +634,7 @@ pub fn downloadTorrent(
 
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
 
-                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        const ready = try peer.fillRqPool(&torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .suggestPiece => |index| {
@@ -624,7 +657,7 @@ pub fn downloadTorrent(
                             peer.workingPieceOffset = 0;
                         }
 
-                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        const ready = try peer.fillRqPool(&torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .piece => |piece| {
@@ -640,7 +673,7 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
                         peer.bytesReceived += chunkBytes.len;
 
-                        if (piece.index > totalPieces) {
+                        if (piece.index > total_pieces) {
                             @branchHint(.unlikely);
                             std.log.err("peer {d} sent unknown piece message: {d}", .{
                                 peer.socket.fd,
@@ -652,7 +685,7 @@ pub fn downloadTorrent(
 
                         peer.inFlight.receive(.{ .index = piece.index, .begin = piece.begin }) catch {};
 
-                        const ready = try peer.fillRqPool(alloc, &torrent, pieces);
+                        const ready = try peer.fillRqPool(&torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         const pieceLen = torrent.getPieceSize(piece.index);
@@ -683,7 +716,7 @@ pub fn downloadTorrent(
                             continue;
                         }
 
-                        if (request.index > totalPieces) {
+                        if (request.index > total_pieces) {
                             @branchHint(.unlikely);
                             std.log.err("peer {d} sent unknown request message: {d}", .{
                                 peer.socket.fd,

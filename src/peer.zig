@@ -219,8 +219,10 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
 }
 
 /// returns `true` when all data was written to socket
-pub fn fillRqPool(self: *Peer, _: std.mem.Allocator, torrent: *const Torrent, pieces: *PieceManager) !bool {
+pub fn fillRqPool(self: *Peer, torrent: *const Torrent, pieces: *PieceManager) !bool {
     while (self.inFlight.count < self.inFlight.size) {
+        if (pieces.isDownloadComplete()) break;
+
         const piece = self.workingPiece orelse blk: {
             self.workingPieceOffset = 0;
             self.workingPiece = self.nextWorkingPiece(pieces) orelse break;

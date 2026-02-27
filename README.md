@@ -43,3 +43,4 @@ zig build
 - BEP-020: Peer ID Conventions
 - BEP-023: Tracker Returns Compact Peer Lists
 - BEP-040: Canonical Peer Priority
+- BEP-054: The lt_donthave extension

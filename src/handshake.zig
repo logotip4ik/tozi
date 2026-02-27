@@ -141,6 +141,7 @@ pub const Extended = struct {
     pub const Key = enum(u8) {
         Handshake = 0,
         Pex = 1,
+        Donthave = 2,
     };
 
     pub const Map = struct {
