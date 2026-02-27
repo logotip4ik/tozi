@@ -107,7 +107,7 @@ pub fn main() !void {
         .files = &files,
         .pieces = &pieces,
         .ticker = &ticker,
-    }, peerId, torrent);
+    }, peerId, &torrent);
 
     std.log.info("finished in: {D}", .{start.read()});
 }

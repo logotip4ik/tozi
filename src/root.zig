@@ -44,7 +44,7 @@ const Peers = std.array_list.Aligned(*Peer, null);
 pub fn downloadTorrent(
     ctx: DownloadTorrentContext,
     peerId: [20]u8,
-    torrent: Torrent,
+    torrent: *const Torrent,
 ) !void {
     const alloc = ctx.alloc;
     const files = ctx.files;
@@ -79,7 +79,7 @@ pub fn downloadTorrent(
         peerId,
         torrent.infoHash,
         pieces.downloaded,
-        &torrent,
+        torrent,
     );
     defer tracker.deinit(alloc);
     const trackerTaggedPointer = tg.pack(.{ .tracker = &tracker });
@@ -390,7 +390,7 @@ pub fn downloadTorrent(
                     if (len == 0) {
                         _ = peer.readBuf.writer.consume(@sizeOf(u32));
 
-                        const ready = try peer.fillRqPool(&torrent, pieces);
+                        const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         continue;
@@ -526,7 +526,7 @@ pub fn downloadTorrent(
                                     if (req.index == piece) peer.inFlight.receive(req) catch unreachable;
                                 }
 
-                                const ready = try peer.fillRqPool(&torrent, pieces);
+                                const ready = try peer.fillRqPool(torrent, pieces);
                                 if (!ready) try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                             },
                         }
@@ -541,7 +541,7 @@ pub fn downloadTorrent(
                         peer.choked = false;
                         peer.state = .messageStart;
 
-                        const ready = try peer.fillRqPool(&torrent, pieces);
+                        const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .have => |piece| {
@@ -634,7 +634,7 @@ pub fn downloadTorrent(
 
                         peer.allowedFast.appendBounded(allowedFast) catch continue;
 
-                        const ready = try peer.fillRqPool(&torrent, pieces);
+                        const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .suggestPiece => |index| {
@@ -657,7 +657,7 @@ pub fn downloadTorrent(
                             peer.workingPieceOffset = 0;
                         }
 
-                        const ready = try peer.fillRqPool(&torrent, pieces);
+                        const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .piece => |piece| {
@@ -685,7 +685,7 @@ pub fn downloadTorrent(
 
                         peer.inFlight.receive(.{ .index = piece.index, .begin = piece.begin }) catch {};
 
-                        const ready = try peer.fillRqPool(&torrent, pieces);
+                        const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         const pieceLen = torrent.getPieceSize(piece.index);
@@ -695,7 +695,7 @@ pub fn downloadTorrent(
                             writePipe,
                             peer,
                             fullPiece,
-                            &torrent,
+                            torrent,
                             files,
                         });
                     },
