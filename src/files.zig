@@ -86,10 +86,7 @@ pub fn collectPieces(
 
         std.crypto.hash.Sha1.hash(piece, &hash, .{});
 
-        const hashVec: @Vector(20, u8) = hash;
-        const expectedVec: @Vector(20, u8) = pieces[i * 20 ..][0..20].*;
-
-        if (@reduce(.And, hashVec == expectedVec)) {
+        if (std.mem.eql(u8, hash[0..20], pieces[i * 20 ..][0..20])) {
             bitset.set(i);
         }
     }

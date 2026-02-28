@@ -190,7 +190,7 @@ pub fn consumePieceBuf(self: *PieceManager, alloc: std.mem.Allocator, piece: *Pi
     };
 }
 
-pub fn suggstPiece(self: *PieceManager) ?usize {
+pub fn suggestPiece(self: *PieceManager) ?usize {
     if (self.missing_count == 0) {
         return null;
     }

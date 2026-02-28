@@ -51,12 +51,14 @@ pub fn main() !void {
     };
     defer file.close();
 
-    var readerBuf: [64 * 1024]u8 = undefined;
-    var reader = file.reader(&readerBuf);
-    const fileContents = try reader.interface.allocRemaining(alloc, .unlimited);
-    defer alloc.free(fileContents);
+    const file_contents = blk: {
+        var readerBuf: [64 * 1024]u8 = undefined;
+        var reader = file.reader(&readerBuf);
+        break :blk try reader.interface.allocRemaining(alloc, .unlimited);
+    };
+    defer alloc.free(file_contents);
 
-    var torrent: tozi.Torrent = try .fromSlice(alloc, fileContents);
+    var torrent: tozi.Torrent = try .fromSlice(alloc, file_contents);
     defer torrent.deinit(alloc);
 
     if (std.mem.eql(u8, command, "info")) {

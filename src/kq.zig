@@ -94,7 +94,7 @@ pub fn delete(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
     const filter: isize = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
-        .timer => unreachable,
+        .timer => return error.UseAddTimer,
     };
 
     var i = self.evs.count;

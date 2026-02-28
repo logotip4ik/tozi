@@ -198,7 +198,7 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
         return null;
     }
 
-    if (pieces.suggstPiece()) |index| {
+    if (pieces.suggestPiece()) |index| {
         if (bitfield.isSet(index) and !workingOn.isSet(index)) {
             return @intCast(index);
         }

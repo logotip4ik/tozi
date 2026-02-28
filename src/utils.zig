@@ -176,48 +176,6 @@ pub const QueryValue = union(enum) {
 
 pub const QueryParam = struct { []const u8, QueryValue };
 
-pub fn appendQuery(
-    alloc: std.mem.Allocator,
-    url: std.Uri,
-    queries: []const QueryParam,
-) !std.array_list.Aligned(u8, null) {
-    var w: std.Io.Writer.Allocating = .init(alloc);
-    errdefer w.deinit();
-
-    var writer = &w.writer;
-
-    if (url.query) |query| {
-        try query.formatRaw(writer);
-
-        if (writer.buffer[writer.end - 1] != '&') {
-            try writer.writeByte('&');
-        }
-    }
-
-    for (queries, 0..) |query, i| {
-        const key, const val = query;
-
-        switch (val) {
-            .int => |int| try writer.print("{s}={d}", .{ key, int }),
-
-            // default zig's query escaping is not enough...
-            .string => |string| {
-                try writer.print("{s}=", .{key});
-                const valComp: std.Uri.Component = .{ .raw = string };
-                try valComp.formatEscaped(writer);
-            },
-
-            .skip => continue,
-        }
-
-        if (i != queries.len - 1) {
-            try writer.writeByte('&');
-        }
-    }
-
-    return w.toArrayList();
-}
-
 pub fn writeQueryToStream(
     w: *std.Io.Writer,
     url: std.Uri,
@@ -253,38 +211,6 @@ pub fn writeQueryToStream(
     }
 
     w.undo(1);
-}
-
-test "appendQuery" {
-    const url1 = try std.Uri.parse("https://toloka.ua/something?else=true");
-
-    var query1 = try appendQuery(std.testing.allocator, url1, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query1.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("else=true&port=456&compact=1", query1.items);
-
-    const url2 = try std.Uri.parse("https://toloka.ua/something");
-
-    var query2 = try appendQuery(std.testing.allocator, url2, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query2.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("port=456&compact=1", query2.items);
-
-    const url3 = try std.Uri.parse("https://toloka.ua/something?testing&");
-
-    var query3 = try appendQuery(std.testing.allocator, url3, &.{
-        .{ "port", .{ .int = 456 } },
-        .{ "compact", .{ .string = "1" } },
-    });
-    defer query3.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("testing&port=456&compact=1", query3.items);
 }
 
 pub fn TaggedPointer(comptime Union: type) type {
@@ -369,15 +295,23 @@ test "TaggedPointer" {
 }
 
 pub fn isHttp(haystack: []const u8) bool {
-    return std.mem.startsWith(u8, haystack, "http://");
+    const prefix = "http://";
+    return std.mem.startsWith(u8, haystack, prefix) and haystack.len > prefix.len;
 }
 
 pub fn isHttps(haystack: []const u8) bool {
-    return std.mem.startsWith(u8, haystack, "https://");
+    const prefix = "https://";
+    return std.mem.startsWith(u8, haystack, prefix) and haystack.len > prefix.len;
 }
 
 pub fn isUdp(haystack: []const u8) bool {
-    return std.mem.startsWith(u8, haystack, "udp://");
+    const prefix = "udp://";
+    return std.mem.startsWith(u8, haystack, prefix) and haystack.len > prefix.len;
+}
+
+pub fn isMagnet(haystack: []const u8) bool {
+    const prefix = "magnet:";
+    return std.mem.startsWith(u8, haystack, prefix) and haystack.len > prefix.len;
 }
 
 pub fn parseCompactAddress(in: [6]u8) std.net.Address {
@@ -402,4 +336,111 @@ pub fn addressToYourIp(addr: std.net.Address) ?[4]u8 {
     const bytes = std.mem.asBytes(&addr.in.sa.addr);
 
     return bytes[0..4].*;
+}
+
+pub fn base32ToBytes(out: []u8, in: []const u8) !void {
+    var buffer: u64 = 0;
+    var bits: u6 = 0;
+    var out_index: usize = 0;
+
+    for (in) |c| {
+        const value = switch (c) {
+            'A'...'Z' => c - 'A',
+            'a'...'z' => c - 'a',
+            '2'...'7' => c - '2' + 26,
+            else => return error.InvalidFormat,
+        };
+
+        buffer = (buffer << 5) | value;
+        bits += 5;
+
+        if (bits >= 8) {
+            bits -= 8;
+
+            if (out_index >= out.len) return error.NoSpaceLeft;
+
+            out[out_index] = @truncate(buffer >> bits);
+            out_index += 1;
+        }
+    }
+}
+
+test "base32ToBytes" {
+    const input = "6MVEC6UU6BXKSAENDIQLTI3NN7QH3AEC";
+    var out: [20]u8 = undefined;
+
+    try base32ToBytes(&out, input);
+
+    try std.testing.expectEqualStrings(&[_]u8{0xF3, 0x2A, 0x41, 0x7A, 0x94, 0xF0, 0x6E, 0xA9, 0x00, 0x8D, 0x1A, 0x20, 0xB9, 0xA3, 0x6D, 0x6F, 0xE0, 0x7D, 0x80, 0x82}, &out);
+}
+
+const Magnet = struct {
+    topic: [20] u8 = undefined,
+    display_name: []const u8 = "",
+    trackers: std.array_list.Aligned([]const u8, null) = .empty,
+
+    pub fn deinit(self: *Magnet, alloc: std.mem.Allocator) void {
+        for (self.trackers.items) |x| alloc.free(x);
+        self.trackers.deinit(alloc);
+    }
+};
+
+pub fn parseMagnetLink(alloc: std.mem.Allocator, link: []const u8) !Magnet {
+    assert(isMagnet(link));
+    assert(link.len > "magnet:?".len);
+
+    var magnet = Magnet{};
+    errdefer magnet.deinit(alloc);
+
+    var buffer: [64]u8 = undefined;
+
+    var iter = std.mem.splitScalar(u8, link["magnet:?".len..], '&');
+    while (iter.next()) |chunk| {
+        if (chunk.len < 4) return error.CorruptMagnetLink;
+
+        const prefix = chunk[0..2];
+        const value = chunk[3..];
+
+        if (std.mem.eql(u8, prefix, "xt")) {
+            const topic_prefix = "urn:btih:";
+            if (!std.mem.startsWith(u8, value, topic_prefix)) {
+                return error.CorruptExactTopic;
+            }
+
+            const topic = value[topic_prefix.len..];
+            if (topic.len == 40) {
+                const bytes = try std.fmt.hexToBytes(&buffer, topic);
+                @memcpy(&magnet.topic, bytes);
+            } else if (topic.len == 32) {
+                try base32ToBytes(&magnet.topic, topic);
+            } else {
+                return error.CorruptTopic;
+            }
+        } else if (std.mem.eql(u8, prefix, "dn")) {
+            magnet.display_name = value;
+        } else if (std.mem.eql(u8, prefix, "tr")) {
+            const tracker_component = std.Uri.Component{ .percent_encoded = value };
+            const decoded_value = try tracker_component.toRawMaybeAlloc(alloc);
+            errdefer alloc.free(decoded_value);
+
+            try magnet.trackers.append(alloc, decoded_value);
+        }
+    }
+
+    return magnet;
+}
+
+test "parse magent link" {
+    const alloc = std.testing.allocator;
+
+    const link = "magnet:?xt=urn:btih:F32A417A94F06EA9008D1A20B9A36D6FE07D8082&dn=Mercy.2026.1080p.WEBRip.AAC5.1.10bits.x265-Rapta&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce";
+    var magnet = try parseMagnetLink(alloc, link);
+    defer magnet.deinit(alloc);
+
+    try std.testing.expectEqualStrings(&[_]u8{0xF3, 0x2A, 0x41, 0x7A, 0x94, 0xF0, 0x6E, 0xA9, 0x00, 0x8D, 0x1A, 0x20, 0xB9, 0xA3, 0x6D, 0x6F, 0xE0, 0x7D, 0x80, 0x82}, &magnet.topic);
+    try std.testing.expectEqualStrings("Mercy.2026.1080p.WEBRip.AAC5.1.10bits.x265-Rapta", magnet.display_name);
+    try std.testing.expectEqualDeep(&[_][]const u8{
+        "udp://open.tracker.cl:1337/announce",
+        "http://nyaa.tracker.wf:7777/announce",
+    }, magnet.trackers.items);
 }
