@@ -41,6 +41,8 @@ used: Source = .{ .tier = 0, .i = 0 },
 
 queued: Stats = undefined,
 
+operation: Operation = .{ .timer = 0 },
+
 ip_vote: IpVote = .empty,
 
 const IpVote = std.hash_map.AutoHashMapUnmanaged([4]u8, u16);
@@ -373,12 +375,20 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
     }
 }
 
-pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !Operation {
-    return switch (self.client) {
+/// null - means no **new** operation is needed
+pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
+    const op = switch (self.client) {
         .http => |*t| try self.nextHttpOperation(alloc, t),
         .udp => |*t| try self.nextUdpOperation(alloc, t),
         .none => unreachable,
     };
+
+    if (@intFromEnum(op) == @intFromEnum(self.operation)) {
+        return null;
+    }
+
+    self.operation = op;
+    return op;
 }
 
 pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(Stats, "event")) !Operation {
@@ -388,7 +398,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         if (utils.isHttp(url) or utils.isHttps(url)) {
             const client = TrackerHttp.init(alloc, url) catch |err| {
                 std.log.debug("failed creating http client with {t} for {s}", .{ err, url });
-                self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+                try self.useNextUrl(alloc);
                 continue;
             };
 
@@ -400,7 +410,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         if (utils.isUdp(url)) {
             const client = TrackerUdp.init(alloc, .{ .url = url }) catch |err| {
                 std.log.debug("failed creating udp client with {t} for {s}", .{ err, url });
-                self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+                try self.useNextUrl(alloc);
                 continue;
             };
 
@@ -409,8 +419,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
             break;
         }
 
-        self.client.deinit(alloc);
-        self.used = self.nextUsed() orelse return error.NoAnnounceUrlAvailable;
+        try self.useNextUrl(alloc);
     }
     errdefer {
         self.client.deinit(alloc);
@@ -427,28 +436,33 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         .event = event,
     };
 
-    return try self.nextOperation(alloc);
+    return try self.nextOperation(alloc) orelse unreachable;
 }
 
-pub fn nextUsed(self: *Tracker) ?Source {
-    for (self.tiers.items[self.used.tier..], 0..) |urls, tier| {
-        if (self.used.tier == tier) {
-            const maxIInTier = urls.items.len;
+pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {
+    self.client.deinit(alloc);
+    self.client = .none;
 
-            if (self.used.i + 1 < maxIInTier) {
-                self.used.i += 1;
+    self.used = blk: {
+        for (self.tiers.items[self.used.tier..], 0..) |urls, tier| {
+            if (self.used.tier == tier) {
+                const maxIInTier = urls.items.len;
 
-                return self.used;
+                if (self.used.i + 1 < maxIInTier) {
+                    self.used.i += 1;
+
+                    break :blk self.used;
+                }
+            } else if (urls.items.len > 0) {
+                self.used.tier = @intCast(tier);
+                self.used.i = 0;
+
+                break :blk self.used;
             }
-        } else if (urls.items.len > 0) {
-            self.used.tier = @intCast(tier);
-            self.used.i = 0;
-
-            return self.used;
         }
-    }
 
-    return null;
+        return error.NoAnnounceUrlAvailable;
+    };
 }
 
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {

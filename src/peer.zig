@@ -175,6 +175,16 @@ pub fn addMessage(self: *Peer, message: proto.Message, data: []const u8) !bool {
     return try self.send();
 }
 
+pub fn writeHandshake(self: *Peer, handshake: *const Handshake) !bool {
+    utils.assert(self.state == .writeHandshake);
+
+    if (self.writeBuf.written().len == 0) {
+        try self.writeBuf.writer.writeAll(&handshake.asBytes());
+    }
+
+    return try self.send();
+}
+
 pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     const workingOn = self.workingOn orelse {
         @branchHint(.cold);
@@ -265,7 +275,23 @@ pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
     return std.math.order(a.bytesReceived, b.bytesReceived) == .gt;
 }
 
-pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u32) !?proto.Message {
+pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { keep_alive, message: proto.Message } {
+    utils.assert(self.state == .messageStart);
+
+    const len = try self.peekInt(alloc, u32, 0) orelse return null;
+
+    if (len == 0) {
+        _ = self.readBuf.writer.consume(@sizeOf(u32));
+
+        return .keep_alive;
+    }
+
+    if (len > Torrent.BLOCK_SIZE * 2) {
+        return error.MessageTooBig;
+    }
+
+    const idInt = try self.peekInt(alloc, u8, @sizeOf(u32)) orelse return null;
+
     const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
         std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket.fd, idInt });
         return error.Dead;
@@ -278,7 +304,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
     var reader: std.Io.Reader = .fixed(messageStartBytes);
     reader.toss(@sizeOf(@TypeOf(idInt)) + @sizeOf(@TypeOf(len)));
 
-    return switch (id) {
+    const message: proto.Message = switch (id) {
         .choke => .choke,
         .unchoke => .unchoke,
         .interested => .interested,
@@ -293,16 +319,16 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
             .len = len - 9,
         } },
 
-        .haveAll => if (self.protocols.fast) .haveAll else error.Dead,
-        .haveNone => if (self.protocols.fast) .haveNone else error.Dead,
+        .haveAll => if (self.protocols.fast) .haveAll else return error.Dead,
+        .haveNone => if (self.protocols.fast) .haveNone else return error.Dead,
         .suggestPiece => if (self.protocols.fast)
             .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable }
         else
-            error.Dead,
+            return error.Dead,
         .allowedFast => if (self.protocols.fast)
             .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable }
         else
-            error.Dead,
+            return error.Dead,
 
         .request, .cancel, .rejectRequest => blk: {
             const index = reader.takeInt(u32, .big) catch unreachable;
@@ -332,7 +358,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
                     .begin = begin,
                     .len = mLen,
                 } };
-            } else break :blk error.Dead;
+            } else return error.Dead;
         },
 
         .extended => if (self.protocols.extended)
@@ -341,10 +367,12 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator, idInt: u8, len: u
                 .len = len - 2,
             } }
         else
-            error.Dead,
+            return error.Dead,
 
         .port => .{ .port = reader.takeInt(u16, .big) catch unreachable },
     };
+
+    return .{ .message = message };
 }
 
 pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !Pex {
