@@ -135,13 +135,15 @@ pub const Extended = struct {
     client_name: ?[]const u8 = null,
     req_queue: ?usize = null,
     your_ip: ?[4]u8 = null,
+    metadata_size: ?u32 = null,
 
     const CLIENT_NAME_LEN_MAX = 1024;
 
     pub const Key = enum(u8) {
         Handshake = 0,
-        Pex = 1,
-        Donthave = 2,
+        Pex,
+        Donthave,
+        Metadata,
     };
 
     pub const Map = struct {
@@ -222,8 +224,10 @@ pub const Extended = struct {
         try rootValue.encode(writer);
     }
 
-    pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader) !Extended {
-        var v: Bencode = try .decode(alloc, reader, 0);
+    pub fn decode(alloc: std.mem.Allocator, bytes: []const u8) !Extended {
+        var reader: std.Io.Reader = .fixed(bytes);
+
+        var v: Bencode = try .decode(alloc, &reader, 0);
         defer v.deinit(alloc);
 
         var extended = Extended{};
@@ -236,6 +240,13 @@ pub const Extended = struct {
         if (dict.get("reqq")) |x| switch (x.inner) {
             .int => |req_queue| if (req_queue > 0) {
                 extended.req_queue = @intCast(req_queue);
+            },
+            else => {},
+        };
+
+        if (dict.get("metadata_size")) |x| switch (x.inner) {
+            .int => |metadata_size| if (metadata_size > 0 and metadata_size < std.math.maxInt(u32)) {
+                extended.metadata_size = @intCast(metadata_size);
             },
             else => {},
         };

@@ -440,8 +440,7 @@ pub fn downloadTorrent(
 
                         switch (m_key) {
                             .Handshake => {
-                                var reader: std.Io.Reader = .fixed(bytes);
-                                const e = Handshake.Extended.decode(alloc, &reader) catch continue; // `while` read loop
+                                const e = Handshake.Extended.decode(alloc, bytes) catch continue; // `while` read loop
                                 defer e.deinit(alloc);
 
                                 if (e.req_queue) |req_queue| {
