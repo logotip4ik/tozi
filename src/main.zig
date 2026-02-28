@@ -44,30 +44,36 @@ pub fn main() !void {
     }
 
     const command = args[1];
-    const torrentPath = args[2];
-    const file = std.fs.cwd().openFile(torrentPath, .{}) catch {
-        std.log.err("failed openning {s} file", .{torrentPath});
-        return;
-    };
-    defer file.close();
+    const torrent_path = args[2];
 
-    const file_contents = blk: {
+    const peer_id = tozi.Tracker.generatePeerId();
+
+    var torrent: tozi.Torrent = if (tozi.utils.isMagnet(torrent_path)) blk: {
+        var magnet: tozi.Magnet = try .parse(alloc, torrent_path);
+        defer magnet.deinit(alloc);
+
+        break :blk try tozi.downloadMagnet(alloc, peer_id, &magnet);
+    } else blk: {
+        const file = std.fs.cwd().openFile(torrent_path, .{}) catch {
+            std.log.err("failed openning {s} file", .{torrent_path});
+            return;
+        };
+        defer file.close();
+
         var readerBuf: [64 * 1024]u8 = undefined;
         var reader = file.reader(&readerBuf);
-        break :blk try reader.interface.allocRemaining(alloc, .unlimited);
-    };
-    defer alloc.free(file_contents);
+        const file_contents = try reader.interface.allocRemaining(alloc, .unlimited);
+        defer alloc.free(file_contents);
 
-    var torrent: tozi.Torrent = try .fromSlice(alloc, file_contents);
+        break :blk try .fromSlice(alloc, file_contents);
+    };
     defer torrent.deinit(alloc);
 
     if (std.mem.eql(u8, command, "info")) {
-        torrent.value.dump();
+        if (torrent.value) |x| x.dump();
         std.debug.print("infohash: {x}\n", .{torrent.infoHash});
         return;
     }
-
-    const peerId = tozi.Tracker.generatePeerId();
 
     var files: tozi.Files = try .init(alloc, torrent.files.items);
     defer files.deinit(alloc);
@@ -109,7 +115,7 @@ pub fn main() !void {
         .files = &files,
         .pieces = &pieces,
         .ticker = &ticker,
-    }, peerId, &torrent);
+    }, peer_id, &torrent);
 
     std.log.info("finished in: {D}", .{start.read()});
 }

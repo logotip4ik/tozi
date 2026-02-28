@@ -442,6 +442,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
 pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {
     self.client.deinit(alloc);
     self.client = .none;
+    self.operation = .{ .timer = 0 };
 
     self.used = blk: {
         for (self.tiers.items[self.used.tier..], 0..) |urls, tier| {

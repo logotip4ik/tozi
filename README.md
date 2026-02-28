@@ -8,7 +8,7 @@
 ## Usage
 
 ```
-tozi download|continue|verify|info ./path/to/file.torrent
+tozi download|continue|verify|info ./path/to/file.torrent|magnet link
 ```
 
 ## Building
@@ -36,6 +36,7 @@ zig build
 
 - BEP-003: Core protocol (I'm not entierly sure this is 100% compliant, but it still downloads torrents)
 - BEP-006: Fast extension
+- BEP-009: Extension for Metadata Files (TODO: add support for sending metadata messages)
 - BEP-010: Extension Protocol
 - BEP-011: Peer Exchange (PEX)
 - BEP-012: Multiple trackers

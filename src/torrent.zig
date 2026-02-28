@@ -35,7 +35,10 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
     for (self.files.items) |file| alloc.free(file.path);
     self.files.deinit(alloc);
 
-    for (self.tiers.items) |*x| x.deinit(alloc);
+    for (self.tiers.items) |*x| {
+        for (x.items) |url| alloc.free(url);
+        x.deinit(alloc);
+    }
     self.tiers.deinit(alloc);
 
     if (self.value) |*x| x.deinit(alloc);
@@ -147,14 +150,14 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
             announces.* = .empty;
 
             for (tierV.inner.list.items) |urlV| {
-                try announces.append(alloc, urlV.inner.string);
+                try announces.append(alloc, try alloc.dupe(u8, urlV.inner.string));
             }
         }
     } else if (dict.get("announce")) |v| {
         var announces = try tiers.addOne(alloc);
         announces.* = .empty;
 
-        try announces.append(alloc, v.inner.string);
+        try announces.append(alloc, try alloc.dupe(u8, v.inner.string));
     } else {
         return error.NoAnnounceUrls;
     }
@@ -238,15 +241,22 @@ pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
     var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
     errdefer tiers.deinit(alloc);
 
+    var urls_cloned = tiers.addOneAssumeCapacity();
+    urls_cloned.* = .empty;
+
+    try urls_cloned.ensureTotalCapacityPrecise(alloc, magnet.trackers.items.len);
+    errdefer {
+        for (urls_cloned.items) |x| alloc.free(x);
+        urls_cloned.deinit(alloc);
+    }
+
+    for (magnet.trackers.items) |item| {
+        urls_cloned.appendAssumeCapacity(try alloc.dupe(u8, item));
+    }
+
     var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
     var random = rand.random();
-
-    var urls_cloned = try magnet.trackers.clone(alloc);
-    errdefer urls_cloned.deinit(alloc);
-
     random.shuffle([]const u8, urls_cloned.items);
-
-    tiers.appendAssumeCapacity(urls_cloned);
 
     var torrent = Torrent{
         .value = v,
@@ -262,7 +272,6 @@ pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
         .files = undefined,
     };
 
-    torrent.value = v;
     try torrent.inheritInfo(alloc, v.inner.dict);
 
     return torrent;

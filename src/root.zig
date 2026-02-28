@@ -14,8 +14,8 @@ pub const Pex = @import("pex.zig");
 pub const Magnet = @import("magnet.zig");
 
 const hasher = @import("hasher");
-const utils = @import("utils");
 const proto = @import("proto.zig");
+pub const utils = @import("utils");
 
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
@@ -810,6 +810,333 @@ fn hashAndWrite(
 
     const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
     utils.assert(wrote == peerAndPointersBytes.len);
+}
+
+const DownloadMagnetContext = struct {
+    alloc: std.mem.Allocator,
+    tracker: *Tracker,
+};
+
+pub fn downloadMagnet(
+    alloc: std.mem.Allocator,
+    peer_id: [20]u8,
+    magnet: *Magnet,
+) !Torrent {
+    var kq: KQ = try .init(alloc);
+    defer kq.deinit();
+
+    var tracker: Tracker = try .fromMagnet(alloc, peer_id, magnet);
+    defer tracker.deinit(alloc);
+    const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
+
+    try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
+
+    var peers: Peers = try .initCapacity(alloc, 1);
+    defer {
+        for (peers.items) |peer| {
+            kq.killSocket(peer.socket.fd);
+            peer.deinit(alloc);
+            alloc.destroy(peer);
+        }
+        peers.deinit(alloc);
+    }
+
+    const handshake = Handshake.init(peer_id, magnet.info_hash, .{ .extended = true });
+
+    while (try kq.next()) |ev| {
+        if (ev.kind == .timer) switch (tg.unpack(ev.ident)) {
+            .tracker => {
+                switch (try tracker.enqueueEvent(alloc, .started)) {
+                    .read => try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer),
+                    .write => try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer),
+                    .timer => unreachable, // shouldn't be available on first call
+                }
+
+                try kq.addTimer(
+                    tg.pack(.{ .trackerClient = &tracker.client }),
+                    tracker.timeout(),
+                    .{ .periodic = false },
+                );
+
+                continue;
+            },
+            .trackerClient => |client| {
+                std.log.info("reached timeout for tracker, trying next one...", .{});
+
+                kq.killSocket(client.socket());
+
+                tracker.useNextUrl(alloc) catch |err| switch (err) {
+                    error.NoAnnounceUrlAvailable => {
+                        std.log.info("all tracker urls are dead", .{});
+                        return error.Dead;
+                    },
+                };
+
+                try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
+
+                continue;
+            },
+            else => unreachable,
+        };
+
+        const tagged_pointer = tg.unpack(ev.udata);
+        switch (tagged_pointer) {
+            .tracker => {
+                // get socket **before** updating state, because `nextOperation` will deinit and
+                // unset current client if next operation is last/finishing one
+                const socket = tracker.client.socket();
+
+                const nextOperation = tracker.nextOperation(alloc) catch |err| {
+                    std.log.warn("failed announcing with {t}", .{err});
+
+                    tracker.useNextUrl(alloc) catch |e| switch (e) {
+                        error.NoAnnounceUrlAvailable => {
+                            std.log.info("all tracker urls are dead", .{});
+                            return error.Dead;
+                        },
+                    };
+
+                    try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
+
+                    continue;
+                };
+
+                if (nextOperation) |x| switch (x) {
+                    .read => {
+                        try kq.delete(socket, .write);
+                        try kq.subscribe(socket, .read, tracker_tagged_pointer);
+                    },
+                    .write => {
+                        try kq.delete(socket, .read);
+                        try kq.subscribe(socket, .write, tracker_tagged_pointer);
+                    },
+                    .timer => {
+                        kq.killSocket(socket);
+
+                        // closing socket will close "read/write"
+                        // pipes, but we have our custom timer with "socket" id
+                        try kq.deleteTimer(tg.pack(.{ .trackerClient = &tracker.client }));
+
+                        try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+                    },
+                };
+
+                continue;
+            },
+            .peer => {},
+            else => unreachable,
+        }
+
+        const peer = tagged_pointer.peer;
+        if (ev.err) |err| {
+            peer.state = .dead;
+            std.log.err("peer: {d} received {t}", .{ peer.socket.fd, err });
+        }
+
+        if (ev.kind == .write and !peer.state.isDead()) sw: switch (peer.state) {
+            .dead, .readHandshake => unreachable,
+            .message, .messageStart => {
+                const ready = peer.send() catch {
+                    peer.state = .dead;
+                    break :sw;
+                };
+
+                if (ready) try kq.disable(peer.socket.fd, .write);
+            },
+            .writeHandshake => {
+                const ready = peer.writeHandshake(&handshake) catch {
+                    peer.state = .dead;
+                    break :sw;
+                };
+
+                if (ready) {
+                    peer.state = .readHandshake;
+                    try kq.disable(peer.socket.fd, .write);
+                    try kq.subscribe(peer.socket.fd, .read, ev.udata);
+                }
+            },
+        };
+
+        if (ev.kind == .read and !peer.state.isDead()) readblk: {
+            peer.fillReadBuffer(alloc, Torrent.BLOCK_SIZE * 8) catch |err| switch (err) {
+                error.EndOfStream => {
+                    peer.state = .dead;
+                    break :readblk;
+                },
+                else => |e| return e,
+            } orelse {};
+
+            while (peer.readBuf.writer.end > 0) switch (peer.state) {
+                .dead, .writeHandshake => unreachable,
+                .readHandshake => {
+                    const bytes = peer.read(alloc, Handshake.HANDSHAKE_LEN) catch |err| switch (err) {
+                        error.EndOfStream => {
+                            peer.state = .dead;
+                            break :readblk;
+                        },
+                        else => |e| return e,
+                    } orelse break :readblk;
+                    defer peer.consumeReadBuf(bytes);
+
+                    const matched = handshake.matchExtensions(bytes) catch |err| {
+                        std.log.err("peer: {d} bad handshake {s}", .{ peer.socket.fd, @errorName(err) });
+                        peer.state = .dead;
+                        break :readblk;
+                    };
+
+                    peer.state = .messageStart;
+                    peer.protocols = matched;
+
+                    if (!matched.extended) {
+                        peer.state = .dead;
+                        break :readblk;
+                    }
+
+                    std.log.debug("peer: {d} sending extended handshake message", .{peer.socket.fd});
+
+                    var extended: Handshake.Extended = .{
+                        .client_name = CLIENT_NAME,
+                        .your_ip = utils.addressToYourIp(peer.address),
+                        .map = .{ .metadata = @intFromEnum(Handshake.Extended.Key.Metadata) },
+                    };
+
+                    var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
+                    defer w.deinit();
+
+                    try extended.encode(alloc, &w.writer);
+
+                    const ready = try peer.addMessage(.{
+                        .extended = .{ .id = 0, .len = @intCast(w.written().len) },
+                    }, w.written());
+                    if (!ready) try kq.subscribe(peer.socket.fd, .write, ev.udata);
+                },
+                .messageStart => {
+                    const res = peer.readMessageStart(alloc) catch |err| switch (err) {
+                        error.EndOfStream, error.Dead, error.MessageTooBig => {
+                            peer.state = .dead;
+                            break :readblk;
+                        },
+                        else => |e| return e,
+                    } orelse break :readblk;
+
+                    switch (res) {
+                        .keep_alive => {},
+                        .message => |message| {
+                            peer.state = .{ .message = message };
+                        },
+                    }
+                },
+                .message => |message| switch (message) {
+                    else => |msg| {
+                        peer.state = .messageStart;
+                        std.log.debug("peer: {d} received {t}", .{ peer.socket.fd, msg });
+                    },
+                    .bitfield => |len| {
+                        const bytes = peer.read(alloc, len) catch |err| switch (err) {
+                            error.EndOfStream => {
+                                peer.state = .dead;
+                                break :readblk;
+                            },
+                            else => |e| return e,
+                        } orelse break :readblk;
+                        defer peer.consumeReadBuf(bytes);
+
+                        std.log.debug("peer: {d} received bitfield", .{peer.socket.fd});
+                        peer.state = .messageStart;
+                    },
+                    .piece => |piece| {
+                        const bytes = peer.read(alloc, piece.len) catch |err| switch (err) {
+                            error.EndOfStream => {
+                                peer.state = .dead;
+                                break :readblk;
+                            },
+                            else => |e| return e,
+                        } orelse break :readblk;
+                        defer peer.consumeReadBuf(bytes);
+                        std.log.debug("peer: {d} received piece", .{peer.socket.fd});
+                    },
+                    .extended => |extended| {
+                        const bytes = peer.read(alloc, extended.len) catch |err| switch (err) {
+                            error.EndOfStream => {
+                                peer.state = .dead;
+                                break :readblk;
+                            },
+                            else => |e| return e,
+                        } orelse break :readblk;
+                        defer peer.consumeReadBuf(bytes);
+
+                        peer.state = .messageStart;
+
+                        const id = std.enums.fromInt(Handshake.Extended.Key, extended.id) orelse {
+                            std.log.warn("peer: {d} received unrecognized extended message id {d}", .{ peer.socket.fd, extended.id });
+                            continue;
+                        };
+
+                        switch (id) {
+                            .Handshake => {
+                                const e = Handshake.Extended.decode(alloc, bytes) catch continue; // `while` read loop
+                                defer e.deinit(alloc);
+
+                                std.log.debug("peer: {d}, client name: {?s}, e: {?any}", .{ peer.socket.fd, e.client_name, e.map });
+
+                                peer.extendedMap = e.map orelse {
+                                    peer.state = .dead;
+                                    break :readblk;
+                                };
+
+                                if (e.metadata_size == null) {
+                                    peer.state = .dead;
+                                    break :readblk;
+                                }
+
+                                if (peer.extendedMap.metadata) |metadata_id| {
+                                    try magnet.writeInfoTableRequests(alloc, metadata_id, e.metadata_size.?, &peer.writeBuf.writer);
+
+                                    const ready = try peer.send();
+                                    if (!ready) try kq.subscribe(peer.socket.fd, .write, ev.udata);
+
+                                    std.log.debug("peer: {d} wrote metadata requests for metadata (id: {d}, size: {d})", .{
+                                        peer.socket.fd,
+                                        metadata_id,
+                                        e.metadata_size.?,
+                                    });
+                                } else {
+                                    peer.state = .dead;
+                                    break :readblk;
+                                }
+                            },
+                            .Metadata => {
+                                std.log.debug("peer: {d} received metadata message {d}", .{ peer.socket.fd, bytes.len });
+
+                                try magnet.receivePiece(alloc, bytes);
+
+                                if (magnet.isComplete() and magnet.isValid()) {
+                                    return try .fromMagnet(alloc, magnet);
+                                }
+                            },
+                            else => {},
+                        }
+                    },
+                },
+            };
+        }
+
+        if (peer.state.isDead()) {
+            kq.killSocket(peer.socket.fd);
+            peer.deinit(alloc);
+
+            for (peers.items, 0..) |other_peer, i| {
+                if (other_peer == peer) {
+                    alloc.destroy(peers.swapRemove(i));
+                    break;
+                }
+            }
+
+            try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+        }
+    }
+
+    unreachable;
 }
 
 test {
