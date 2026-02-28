@@ -9,10 +9,10 @@ pub const Operation = union(enum) {
 };
 
 pub const Stats = struct {
-    infoHash: [20]u8,
-    peerId: [20]u8,
+    info_hash: [20]u8,
+    peer_id: [20]u8,
     port: u16 = 6889,
-    numWant: u16,
+    num_want: u16,
     downloaded: usize,
     uploaded: usize,
     left: usize,

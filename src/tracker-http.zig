@@ -275,15 +275,15 @@ pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *cons
 
     try self.uri.writeToStream(w, .{ .path = true });
     try utils.writeQueryToStream(w, self.uri, &[_]utils.QueryParam{
-        .{ "info_hash", .{ .string = &stats.infoHash } },
-        .{ "peer_id", .{ .string = &stats.peerId } },
+        .{ "info_hash", .{ .string = &stats.info_hash } },
+        .{ "peer_id", .{ .string = &stats.peer_id } },
         .{ "port", .{ .int = stats.port } },
         .{ "uploaded", .{ .int = stats.uploaded } },
         .{ "downloaded", .{ .int = stats.downloaded } },
         .{ "left", .{ .int = stats.left } },
         .{ "compact", .{ .int = 1 } },
-        .{ "key", .{ .string = stats.peerId[16..20] } },
-        .{ "numwant", .{ .int = stats.numWant } },
+        .{ "key", .{ .string = stats.peer_id[16..20] } },
+        .{ "numwant", .{ .int = stats.num_want } },
         .{
             "event",
             if (stats.event == .none) .skip else .{ .string = @tagName(stats.event) },
@@ -601,9 +601,9 @@ test "writes correct http request" {
     defer t.buffer.deinit();
 
     try t.prepareRequest(alloc, &.{
-        .infoHash = .{1} ** 20,
-        .peerId = .{1} ** 20,
-        .numWant = 0,
+        .info_hash = .{1} ** 20,
+        .peer_id = .{1} ** 20,
+        .num_want = 0,
         .downloaded = 0,
         .uploaded = 0,
         .left = 0,
@@ -640,9 +640,9 @@ test "make request" {
     const socket = t.socketPosix.?.fd;
 
     const stats: Stats = .{
-        .infoHash = torrent.infoHash,
-        .peerId = .{1} ** 20,
-        .numWant = 50,
+        .info_hash = torrent.infoHash,
+        .peer_id = .{1} ** 20,
+        .num_want = 50,
         .downloaded = 0,
         .uploaded = 0,
         .left = torrent.totalLen,
@@ -700,9 +700,9 @@ test "make https request" {
     const socket = t.socketPosix.?.fd;
 
     const stats: Stats = .{
-        .infoHash = torrent.infoHash,
-        .peerId = .{1} ** 20,
-        .numWant = 50,
+        .info_hash = torrent.infoHash,
+        .peer_id = .{1} ** 20,
+        .num_want = 50,
         .downloaded = 0,
         .uploaded = 0,
         .left = torrent.totalLen,

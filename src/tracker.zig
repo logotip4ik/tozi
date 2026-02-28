@@ -15,9 +15,9 @@ const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
 
 const Tracker = @This();
 
-peerId: [20]u8,
+peer_id: [20]u8,
 
-infoHash: [20]u8,
+info_hash: [20]u8,
 
 uploaded: usize,
 
@@ -25,14 +25,14 @@ downloaded: usize,
 
 left: usize,
 
-numWant: u16 = 100,
+num_want: u16 = 100,
 
 port: u16 = MY_PORT_DEFAULT,
 
 client: Client = .none,
 
-newAddrs: std.array_list.Aligned(NewAddr, null) = .empty,
-oldAddrs: std.array_list.Aligned(std.net.Address, null) = .empty,
+addrs_new: std.array_list.Aligned(NewAddr, null) = .empty,
+addrs_old: std.array_list.Aligned(std.net.Address, null) = .empty,
 
 tiers: Torrent.Tiers,
 
@@ -80,8 +80,8 @@ const MY_PORT_DEFAULT = 6889;
 
 pub fn init(
     alloc: std.mem.Allocator,
-    peerId: [20]u8,
-    infoHash: [20]u8,
+    peer_id: [20]u8,
+    info_hash: [20]u8,
     downloaded: u64,
     torrent: *const Torrent,
 ) !Tracker {
@@ -103,8 +103,8 @@ pub fn init(
     }
 
     return .{
-        .peerId = peerId,
-        .infoHash = infoHash,
+        .peer_id = peer_id,
+        .info_hash = info_hash,
         .downloaded = downloaded,
         .uploaded = 0,
         .left = torrent.totalLen - downloaded,
@@ -113,8 +113,8 @@ pub fn init(
 }
 
 pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
-    self.oldAddrs.deinit(alloc);
-    self.newAddrs.deinit(alloc);
+    self.addrs_old.deinit(alloc);
+    self.addrs_new.deinit(alloc);
     self.ip_vote.deinit(alloc);
 
     for (self.tiers.items) |*x| x.deinit(alloc);
@@ -141,17 +141,17 @@ pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Addres
     // Block loopback (127.0.0.1)
     if (builtin.mode != .Debug and ip == 0x0100007f) return;
 
-    for (self.newAddrs.items) |item| if (item.addr.eql(peer)) return;
-    for (self.oldAddrs.items) |addr| if (addr.eql(peer)) return;
+    for (self.addrs_new.items) |item| if (item.addr.eql(peer)) return;
+    for (self.addrs_old.items) |addr| if (addr.eql(peer)) return;
 
-    try self.newAddrs.append(alloc, .{ .addr = peer, .priority = 0 });
+    try self.addrs_new.append(alloc, .{ .addr = peer, .priority = 0 });
 }
 
 pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.net.Address) !void {
     for (peers) |peer| try self.addNewAddr(alloc, peer);
 
-    std.log.debug("tracker: added {d} new addrs", .{self.newAddrs.items.len});
-    try self.oldAddrs.ensureUnusedCapacity(alloc, self.newAddrs.items.len);
+    std.log.debug("tracker: added {d} new addrs", .{self.addrs_new.items.len});
+    try self.addrs_old.ensureUnusedCapacity(alloc, self.addrs_new.items.len);
 
     if (self.myIp()) |my_ip| self.sortNewAddrs(my_ip);
 }
@@ -187,7 +187,7 @@ pub fn voteForIp(self: *Tracker, alloc: std.mem.Allocator, ip: [4]u8, source: en
 }
 
 pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
-    for (self.newAddrs.items) |*item| {
+    for (self.addrs_new.items) |*item| {
         if (item.priority != 0) continue;
         item.priority = computeBep40Priority(
             my_ip,
@@ -197,7 +197,7 @@ pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
         );
     }
 
-    std.mem.sortUnstable(NewAddr, self.newAddrs.items, {}, NewAddr.lessThen);
+    std.mem.sortUnstable(NewAddr, self.addrs_new.items, {}, NewAddr.lessThen);
 }
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
@@ -273,8 +273,6 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
                 );
 
                 tier.items[0] = workingUrl;
-
-                std.log.debug("updated tier: {any}", .{tier});
             }
 
             client.deinit(alloc);
@@ -334,8 +332,6 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
                 );
 
                 tier.items[0] = workingUrl;
-
-                std.log.debug("updated tier: {any}", .{tier});
             }
 
             client.deinit(alloc);
@@ -393,12 +389,12 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
     }
 
     self.queued = .{
-        .infoHash = self.infoHash,
-        .peerId = self.peerId,
+        .info_hash = self.info_hash,
+        .peer_id = self.peer_id,
         .left = self.left,
         .downloaded = self.downloaded,
         .uploaded = self.uploaded,
-        .numWant = self.numWant,
+        .num_want = self.num_want,
         .event = event,
     };
 
@@ -427,9 +423,9 @@ pub fn nextUsed(self: *Tracker) ?Source {
 }
 
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
-    const newPeer = self.newAddrs.pop() orelse return null;
+    const newPeer = self.addrs_new.pop() orelse return null;
 
-    self.oldAddrs.appendAssumeCapacity(newPeer.addr);
+    self.addrs_old.appendAssumeCapacity(newPeer.addr);
 
     return newPeer.addr;
 }

@@ -170,7 +170,7 @@ pub fn prepareAnnounce(self: *TrackerUdp, stats: *const Stats) !void {
     const w = &self.buffer.writer;
     _ = w.consumeAll();
 
-    const key = std.mem.readInt(u32, stats.peerId[16..20], .big);
+    const key = std.mem.readInt(u32, stats.peer_id[16..20], .big);
 
     // TODO: maybe we need to update `lastUseTime`
     self.transactionId = generateTransactionId(self.lastUseTime);
@@ -179,8 +179,8 @@ pub fn prepareAnnounce(self: *TrackerUdp, stats: *const Stats) !void {
     try w.writeInt(u32, @intFromEnum(Action.announce), .big);
     try w.writeInt(u32, self.transactionId, .big);
 
-    try w.writeAll(&stats.infoHash);
-    try w.writeAll(&stats.peerId);
+    try w.writeAll(&stats.info_hash);
+    try w.writeAll(&stats.peer_id);
     try w.writeInt(u64, stats.downloaded, .big);
     try w.writeInt(u64, stats.left, .big);
     try w.writeInt(u64, stats.uploaded, .big);
@@ -188,7 +188,7 @@ pub fn prepareAnnounce(self: *TrackerUdp, stats: *const Stats) !void {
 
     try w.writeInt(u32, 0, .big); // 84: IP address (0 = use source)
     try w.writeInt(u32, key, .big); // 88: Key (unique per client)
-    try w.writeInt(i32, @intCast(stats.numWant), .big); // 92: num_want
+    try w.writeInt(i32, @intCast(stats.num_want), .big); // 92: num_want
     try w.writeInt(u16, stats.port, .big); // 96: port
 
     self.state = .send_announce;
@@ -307,13 +307,13 @@ test "prepareAnnounce" {
     @memcpy(&peerId, &([_]u8{2} ** 20));
 
     const stats: Stats = .{
-        .infoHash = infoHash,
-        .peerId = peerId,
+        .info_hash = infoHash,
+        .peer_id = peerId,
         .port = 6881,
         .downloaded = 100,
         .uploaded = 50,
         .left = 200,
-        .numWant = 50,
+        .num_want = 50,
         .event = .started,
     };
 
