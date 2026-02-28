@@ -6,6 +6,7 @@ const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
 const Socket = @import("socket.zig");
+const Magnet = @import("magnet.zig");
 
 const TrackerHttp = @import("tracker-http.zig");
 const TrackerUdp = @import("tracker-udp.zig");
@@ -109,6 +110,34 @@ pub fn init(
         .uploaded = 0,
         .left = torrent.totalLen - downloaded,
         .tiers = cloned,
+    };
+}
+
+pub fn fromMagnet(
+    alloc: std.mem.Allocator,
+    peerId: [20]u8,
+    magnet: *const Magnet,
+) !Tracker {
+    var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
+    errdefer tiers.deinit(alloc);
+
+    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var random = rand.random();
+
+    var urls_cloned = try magnet.trackers.clone(alloc);
+    errdefer urls_cloned.deinit(alloc);
+
+    random.shuffle([]const u8, urls_cloned.items);
+
+    tiers.appendAssumeCapacity(urls_cloned);
+
+    return .{
+        .peer_id = peerId,
+        .info_hash = magnet.info_hash,
+        .downloaded = 0,
+        .left = 1,
+        .uploaded = 0,
+        .tiers = tiers,
     };
 }
 

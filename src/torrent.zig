@@ -1,5 +1,7 @@
 const std = @import("std");
+
 const Bencode = @import("bencode.zig");
+const Magnet = @import("magnet.zig");
 
 pub const File = struct {
     /// should include `dirname` from torrent if there was one
@@ -15,7 +17,7 @@ pub const BLOCK_SIZE = 1024 * 16;
 pub const Announces = std.array_list.Aligned([]const u8, null);
 pub const Tiers = std.array_list.Aligned(Announces, null);
 
-value: Bencode,
+value: ?Bencode,
 
 files: Files,
 pieces: []const u8,
@@ -36,7 +38,7 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
     for (self.tiers.items) |*x| x.deinit(alloc);
     self.tiers.deinit(alloc);
 
-    self.value.deinit(alloc);
+    if (self.value) |*x| x.deinit(alloc);
 }
 
 pub fn getPieceSize(self: Torrent, index: usize) u32 {
@@ -65,6 +67,64 @@ pub fn computeInfoHash(info: Bencode, reader: *std.Io.Reader) ![std.crypto.hash.
     }
 
     return hash.finalResult();
+}
+
+pub fn inheritInfo(
+    self: *Torrent,
+    alloc: std.mem.Allocator,
+    info: std.hash_map.StringHashMapUnmanaged(Bencode),
+) !void {
+    var files: Files = .empty;
+    errdefer files.deinit(alloc);
+
+    var totalLen: usize = 0;
+
+    if (info.get("files")) |infoFiles| {
+        const dirnameValue = info.get("name") orelse return error.NoDirName;
+        const dirname = dirnameValue.inner.string;
+
+        for (infoFiles.inner.list.items) |file| {
+            const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
+            const len = file.inner.dict.get("length") orelse return error.NoFileLength;
+
+            totalLen += @max(0, len.inner.int);
+
+            const path = try alloc.alloc([]const u8, chunks.inner.list.items.len + 1);
+
+            path[0] = dirname;
+            for (chunks.inner.list.items, 1..) |filename, i| {
+                path[i] = filename.inner.string;
+            }
+
+            try files.append(alloc, .{
+                .path = path,
+                .len = @max(0, len.inner.int),
+            });
+        }
+    } else {
+        const filename = info.get("name") orelse return error.NoFileName;
+        const len = info.get("length") orelse return error.NoFileLength;
+
+        totalLen += @max(0, len.inner.int);
+
+        const path = try alloc.alloc([]const u8, 1);
+        path[0] = filename.inner.string;
+
+        try files.append(alloc, .{
+            .path = path,
+            .len = @max(0, len.inner.int),
+        });
+    }
+
+    const pieces = info.get("pieces") orelse return error.NoPiencesField;
+    const pieceLen = info.get("piece length") orelse return error.NoPieceLenField;
+    const private = if (info.get("private")) |p| p.inner.int == 1 else false;
+
+    self.totalLen = totalLen;
+    self.pieces = pieces.inner.string;
+    self.pieceLen = @intCast(pieceLen.inner.int);
+    self.private = private;
+    self.files = files;
 }
 
 pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
@@ -104,67 +164,26 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         return error.MissingInfo;
     };
 
-    var files: Files = .empty;
-    errdefer files.deinit(alloc);
-
-    var totalLen: usize = 0;
-
-    if (info.inner.dict.get("files")) |infoFiles| {
-        const dirnameValue = info.inner.dict.get("name") orelse return error.NoDirName;
-        const dirname = dirnameValue.inner.string;
-
-        for (infoFiles.inner.list.items) |file| {
-            const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
-            const len = file.inner.dict.get("length") orelse return error.NoFileLength;
-
-            totalLen += @max(0, len.inner.int);
-
-            const path = try alloc.alloc([]const u8, chunks.inner.list.items.len + 1);
-
-            path[0] = dirname;
-            for (chunks.inner.list.items, 1..) |filename, i| {
-                path[i] = filename.inner.string;
-            }
-
-            try files.append(alloc, .{
-                .path = path,
-                .len = @max(0, len.inner.int),
-            });
-        }
-    } else {
-        const filename = info.inner.dict.get("name") orelse return error.NoFileName;
-        const len = info.inner.dict.get("length") orelse return error.NoFileLength;
-
-        totalLen += @max(0, len.inner.int);
-
-        const path = try alloc.alloc([]const u8, 1);
-        path[0] = filename.inner.string;
-
-        try files.append(alloc, .{
-            .path = path,
-            .len = @max(0, len.inner.int),
-        });
-    }
-
     reader.seek = 0;
     const infoHash = try computeInfoHash(info, &reader);
 
-    const pieces = info.inner.dict.get("pieces") orelse return error.NoPiencesField;
-    const pieceLen = info.inner.dict.get("piece length") orelse return error.NoPieceLenField;
-    const private = if (info.inner.dict.get("private")) |p| p.inner.int == 1 else false;
-
-    return Torrent{
+    var torrent = Torrent{
         .value = value,
         .tiers = tiers,
         .created_by = null,
         .creation_date = null,
-        .files = files,
-        .pieces = pieces.inner.string,
-        .pieceLen = @intCast(pieceLen.inner.int),
         .infoHash = infoHash,
-        .totalLen = totalLen,
-        .private = private,
+
+        .files = undefined,
+        .pieces = undefined,
+        .pieceLen = undefined,
+        .totalLen = undefined,
+        .private = undefined,
     };
+
+    try torrent.inheritInfo(alloc, info.inner.dict);
+
+    return torrent;
 }
 
 test "parseTorrent - simple" {
@@ -208,4 +227,43 @@ test "parseTorrent - info hash" {
         "f0c4cb2d359b74a5f418344749c7441ae2639d33",
         &std.fmt.bytesToHex(&torrent.infoHash, .lower),
     );
+}
+
+pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
+    var r: std.Io.Reader = .fixed(magnet.buffer.?);
+
+    var v = try Bencode.decode(alloc, &r, 0);
+    errdefer v.deinit(alloc);
+
+    var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
+    errdefer tiers.deinit(alloc);
+
+    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var random = rand.random();
+
+    var urls_cloned = try magnet.trackers.clone(alloc);
+    errdefer urls_cloned.deinit(alloc);
+
+    random.shuffle([]const u8, urls_cloned.items);
+
+    tiers.appendAssumeCapacity(urls_cloned);
+
+    var torrent = Torrent{
+        .value = v,
+        .infoHash = magnet.info_hash,
+        .created_by = null,
+        .creation_date = null,
+        .tiers = tiers,
+
+        .totalLen = undefined,
+        .pieces = undefined,
+        .pieceLen = undefined,
+        .private = undefined,
+        .files = undefined,
+    };
+
+    torrent.value = v;
+    try torrent.inheritInfo(alloc, v.inner.dict);
+
+    return torrent;
 }
