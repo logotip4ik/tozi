@@ -123,12 +123,11 @@ pub fn fromMagnet(
     var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
     errdefer tiers.deinit(alloc);
 
-    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
-    var random = rand.random();
-
     var urls_cloned = try magnet.trackers.clone(alloc);
     errdefer urls_cloned.deinit(alloc);
 
+    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var random = rand.random();
     random.shuffle([]const u8, urls_cloned.items);
 
     tiers.appendAssumeCapacity(urls_cloned);

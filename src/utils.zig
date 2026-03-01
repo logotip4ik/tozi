@@ -63,7 +63,7 @@ pub const RqPool = struct {
 
     pub fn format(self: *const RqPool, w: *std.Io.Writer) !void {
         for (self.buf[0..self.count], 0..) |r, i| {
-            try w.print("(piece: {d} + {d})", .{ r.index, r.begin });
+            try w.print("{d}+{d}", .{ r.index, r.begin });
 
             if (i != self.count - 1) {
                 try w.writeAll(", ");

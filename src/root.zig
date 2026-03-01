@@ -65,7 +65,7 @@ pub fn downloadTorrent(
     const readPipe, const writePipe = threadPipes;
     try kq.subscribe(readPipe, .read, tg.pack(.{ .pieces = pieces }));
 
-    var peers: Peers = .empty;
+    var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
     defer {
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
@@ -360,14 +360,14 @@ pub fn downloadTorrent(
                             },
                         };
 
-                        var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
-                        defer w.deinit();
+                        var buffer: [256]u8 = undefined;
+                        var w: std.Io.Writer = .fixed(&buffer);
 
-                        try extended.encode(alloc, &w.writer);
+                        try extended.encode(alloc, &w);
 
                         const ready = try peer.addMessage(.{
-                            .extended = .{ .id = 0, .len = @intCast(w.written().len) },
-                        }, w.written());
+                            .extended = .{ .id = 0, .len = @intCast(w.buffered().len) },
+                        }, w.buffered());
                         if (!ready) try kq.subscribe(peer.socket.fd, .write, event.udata);
                     }
                 },
@@ -508,13 +508,13 @@ pub fn downloadTorrent(
                         peer.state = .messageStart;
                     },
                     .unchoke => {
-                        std.log.info("peer: {d}, received unchoke message", .{peer.socket.fd});
-
                         peer.choked = false;
                         peer.state = .messageStart;
 
                         const ready = try peer.fillRqPool(torrent, pieces);
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
+
+                        std.log.info("peer: {d}, received unchoke message, {d} in flight requests", .{peer.socket.fd, peer.inFlight.count});
                     },
                     .have => |piece| {
                         peer.state = .messageStart;
@@ -765,7 +765,7 @@ fn initializeNewPeers(
         try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
         errdefer kq.killSocket(peer.socket.fd);
 
-        try peers.append(alloc, peer);
+        peers.appendAssumeCapacity(peer);
 
         if (peers.items.len >= peers_max) break;
     }
@@ -821,7 +821,7 @@ pub fn downloadMagnet(
     alloc: std.mem.Allocator,
     peer_id: [20]u8,
     magnet: *Magnet,
-) !Torrent {
+) !void {
     var kq: KQ = try .init(alloc);
     defer kq.deinit();
 
@@ -829,9 +829,7 @@ pub fn downloadMagnet(
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
-    try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
-
-    var peers: Peers = try .initCapacity(alloc, 1);
+    var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
     defer {
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
@@ -839,6 +837,28 @@ pub fn downloadMagnet(
             alloc.destroy(peer);
         }
         peers.deinit(alloc);
+    }
+
+    if (magnet.peers.items.len == 0) {
+        try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
+    } else {
+        for (magnet.peers.items, 0..) |addr, i| {
+            const p = try alloc.create(Peer);
+            errdefer alloc.destroy(p);
+
+            p.* = Peer.init(alloc, addr) catch |err| {
+                std.log.err("failed connecting with {t}", .{err});
+                continue;
+            };
+            errdefer p.deinit(alloc);
+
+            try kq.subscribe(p.socket.fd, .write, tg.pack(.{ .peer = p }));
+            errdefer kq.killSocket(kq);
+
+            peers.appendAssumeCapacity(p);
+
+            if (i == PEERS_MAX) break;
+        }
     }
 
     const handshake = Handshake.init(peer_id, magnet.info_hash, .{ .extended = true });
@@ -1000,14 +1020,14 @@ pub fn downloadMagnet(
                         .map = .{ .metadata = @intFromEnum(Handshake.Extended.Key.Metadata) },
                     };
 
-                    var w: std.Io.Writer.Allocating = try .initCapacity(alloc, 128);
-                    defer w.deinit();
+                    var buffer: [256]u8 = undefined;
+                    var w: std.Io.Writer = .fixed(&buffer);
 
-                    try extended.encode(alloc, &w.writer);
+                    try extended.encode(alloc, &w);
 
                     const ready = try peer.addMessage(.{
-                        .extended = .{ .id = 0, .len = @intCast(w.written().len) },
-                    }, w.written());
+                        .extended = .{ .id = 0, .len = @intCast(w.buffered().len) },
+                    }, w.buffered());
                     if (!ready) try kq.subscribe(peer.socket.fd, .write, ev.udata);
                 },
                 .messageStart => {
@@ -1110,8 +1130,10 @@ pub fn downloadMagnet(
 
                                 try magnet.receivePiece(alloc, bytes);
 
-                                if (magnet.isComplete() and magnet.isValid()) {
-                                    return try .fromMagnet(alloc, magnet);
+                                if (magnet.isComplete()) {
+                                    if (magnet.isValid()) {
+                                        return;
+                                    } else return error.MagnetNotValid;
                                 }
                             },
                             else => {},
@@ -1132,11 +1154,13 @@ pub fn downloadMagnet(
                 }
             }
 
-            try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+            if (peers.items.len == 0 and tracker.addrs_old.items.len == 0) {
+                try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
+            } else {
+                try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+            }
         }
     }
-
-    unreachable;
 }
 
 test {

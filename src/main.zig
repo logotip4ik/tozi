@@ -52,7 +52,9 @@ pub fn main() !void {
         var magnet: tozi.Magnet = try .parse(alloc, torrent_path);
         defer magnet.deinit(alloc);
 
-        break :blk try tozi.downloadMagnet(alloc, peer_id, &magnet);
+        try tozi.downloadMagnet(alloc, peer_id, &magnet);
+
+        break :blk try .fromMagnet(alloc, &magnet);
     } else blk: {
         const file = std.fs.cwd().openFile(torrent_path, .{}) catch {
             std.log.err("failed openning {s} file", .{torrent_path});

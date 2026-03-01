@@ -13,6 +13,8 @@ display_name: []const u8 = "",
 
 trackers: std.array_list.Aligned([]const u8, null) = .empty,
 
+peers: std.array_list.Aligned(std.net.Address, null) = .empty,
+
 buffer: ?[]u8 = null,
 
 received: ?std.bit_set.DynamicBitSetUnmanaged = null,
@@ -29,6 +31,8 @@ pub fn deinit(self: *Magnet, alloc: std.mem.Allocator) void {
     for (self.trackers.items) |x| alloc.free(x);
     self.trackers.deinit(alloc);
 
+    self.peers.deinit(alloc);
+
     if (self.buffer) |x| alloc.free(x);
     if (self.received) |*x| x.deinit(alloc);
 }
@@ -40,31 +44,35 @@ pub fn parse(alloc: std.mem.Allocator, link: []const u8) !Magnet {
     var magnet = Magnet{};
     errdefer magnet.deinit(alloc);
 
-    var buffer: [64]u8 = undefined;
+    var buffer: [512]u8 = undefined;
 
     var iter = std.mem.splitScalar(u8, link["magnet:?".len..], '&');
     while (iter.next()) |chunk| {
         if (chunk.len < 4) return error.CorruptMagnetLink;
 
-        // TODO: not all prefixes are 2 chars length
-        const prefix = chunk[0..2];
-        const value = chunk[3..];
+        const equal_index = std.mem.indexOfScalar(u8, chunk, '=') orelse return error.CorruptMagnetLink;
+
+        const prefix = chunk[0..equal_index];
+        const value = chunk[equal_index + 1 ..];
 
         if (std.mem.eql(u8, prefix, "xt")) {
-            // TODO: there are different prefixes for different encodings
-            const topic_prefix = "urn:btih:";
-            if (!std.mem.startsWith(u8, value, topic_prefix)) {
-                return error.CorruptExactTopic;
-            }
+            const prefix_v1 = "urn:btih:";
+            const prefix_v2 = "urn:btmh:";
 
-            const topic = value[topic_prefix.len..];
-            if (topic.len == 40) {
-                const bytes = try std.fmt.hexToBytes(&buffer, topic);
-                @memcpy(&magnet.info_hash, bytes);
-            } else if (topic.len == 32) {
-                try utils.base32ToBytes(&magnet.info_hash, topic);
+            if (std.mem.startsWith(u8, value, prefix_v1)) {
+                const topic = value[prefix_v1.len..];
+                if (topic.len == 40) {
+                    const bytes = try std.fmt.hexToBytes(&buffer, topic);
+                    @memcpy(&magnet.info_hash, bytes);
+                } else if (topic.len == 32) {
+                    try utils.base32ToBytes(&magnet.info_hash, topic);
+                } else {
+                    return error.CorruptTopic;
+                }
+            } else if (std.mem.startsWith(u8, value, prefix_v2)) {
+                return error.UnsupportedMagnetLink;
             } else {
-                return error.CorruptTopic;
+                return error.CorruptMagnetLink;
             }
         } else if (std.mem.eql(u8, prefix, "dn")) {
             magnet.display_name = value;
@@ -74,6 +82,24 @@ pub fn parse(alloc: std.mem.Allocator, link: []const u8) !Magnet {
             errdefer alloc.free(decoded_value);
 
             try magnet.trackers.append(alloc, decoded_value);
+        } else if (std.mem.eql(u8, prefix, "x.pe")) {
+            const peer_component = std.Uri.Component{ .percent_encoded = value };
+            const decoded_peer = try peer_component.toRaw(&buffer);
+
+            const last_colon = std.mem.lastIndexOfScalar(u8, decoded_peer, ':') orelse return error.CorruptMagnetLink;
+
+            const host = decoded_peer[0..last_colon];
+            const port_str = decoded_peer[last_colon + 1 ..];
+
+            if (host.len > 2 and host[0] == '[' and host[host.len - 1] == ']') {
+                // TODO: add support for ip v6
+                continue;
+            }
+
+            const port = std.fmt.parseInt(u16, port_str, 10) catch return error.CorruptMagnetLink;
+            const address = std.net.Address.parseIp(host, port) catch return error.CorruptMagnetLink;
+
+            try magnet.peers.append(alloc, address);
         }
     }
 
@@ -83,7 +109,12 @@ pub fn parse(alloc: std.mem.Allocator, link: []const u8) !Magnet {
 test "parse magent link" {
     const alloc = std.testing.allocator;
 
-    const link = "magnet:?xt=urn:btih:F32A417A94F06EA9008D1A20B9A36D6FE07D8082&dn=Mercy.2026.1080p.WEBRip.AAC5.1.10bits.x265-Rapta&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce";
+    const link = "magnet:?xt=urn:btih:F32A417A94F06EA9008D1A20B9A36D6FE07D8082" // prevent zls
+        ++ "&dn=Mercy.2026.1080p.WEBRip.AAC5.1.10bits.x265-Rapta" // from
+        ++ "&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce" // formatting
+        ++ "&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce" // this
+        ++ "&x.pe=127.0.0.1:8080";
+
     var magnet: Magnet = try .parse(alloc, link);
     defer magnet.deinit(alloc);
 
@@ -93,6 +124,9 @@ test "parse magent link" {
         "udp://open.tracker.cl:1337/announce",
         "http://nyaa.tracker.wf:7777/announce",
     }, magnet.trackers.items);
+
+    try std.testing.expectEqual(1, magnet.peers.items.len);
+    try std.testing.expectEqualDeep(std.net.Ip4Address.init([_]u8{ 127, 0, 0, 1 }, 8080), magnet.peers.items[0].in);
 }
 
 pub fn writeInfoTableRequests(
