@@ -27,8 +27,8 @@ pub fn onTick(
 
     for (peers) |peer| {
         defer {
-            peer.bytesReceived = 0;
-            peer.requestsPerTick = 0;
+            peer.bytes_received = 0;
+            peer.requests_per_tick = 0;
         }
 
         // const shouldUnchoke = peer.isInterested and unchokedCount < maxPeersToUnchoke;
@@ -45,8 +45,8 @@ pub fn onTick(
         //     if (!ready) try kq.enable(peer.socket.fd, .write, TaggedPointer.pack(.{ .peer = peer }));
         // }
 
-        bytes_per_tick += peer.bytesReceived;
-        peers_alive_count += if (peer.bytesReceived > 0) 1 else 0;
+        bytes_per_tick += peer.bytes_received;
+        peers_alive_count += if (peer.bytes_received > 0) 1 else 0;
     }
 
     const percent = (completed_count * 100) / self.total_pieces;

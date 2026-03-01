@@ -21,26 +21,26 @@ state: State = .writeHandshake,
 
 choked: bool = true,
 
-isInterested: bool = false,
-isUnchoked: bool = false,
+is_interested: bool = false,
+is_unchoked: bool = false,
 
-bytesReceived: usize = 0,
-requestsPerTick: usize = 0,
+bytes_received: usize = 0,
+requests_per_tick: usize = 0,
 
-readBuf: std.Io.Writer.Allocating,
-writeBuf: std.Io.Writer.Allocating,
+buf_read: std.Io.Writer.Allocating,
+buf_write: std.Io.Writer.Allocating,
 
 bitfield: ?std.DynamicBitSetUnmanaged = null,
-workingOn: ?std.DynamicBitSetUnmanaged = null,
+working_on: ?std.DynamicBitSetUnmanaged = null,
 
-workingPiece: ?u32 = null,
-workingPieceOffset: u32 = 0,
-inFlight: utils.RqPool,
+working_piece: ?u32 = null,
+working_piece_offset: u32 = 0,
+in_flight: utils.RqPool,
 
 protocols: Handshake.Protocols = .{},
-extendedMap: Handshake.Extended.Map = .{},
+extended_map: Handshake.Extended.Map = .{},
 
-allowedFast: std.array_list.Aligned(u32, null),
+allowed_fast: std.array_list.Aligned(u32, null),
 
 pex_sent_addresses: std.array_list.Aligned(std.net.Address, null) = .empty,
 
@@ -83,24 +83,22 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !Peer {
     return .{
         .address = addr,
         .socket = .init(fd),
-        .readBuf = .init(alloc),
-        .writeBuf = .init(alloc),
-        .inFlight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
-        .allowedFast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST),
+        .buf_read = .init(alloc),
+        .buf_write = .init(alloc),
+        .in_flight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
+        .allowed_fast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST),
     };
 }
 
 pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
-    self.state = .dead;
-
-    self.readBuf.deinit();
-    self.writeBuf.deinit();
-    self.inFlight.deinit(alloc);
-    self.allowedFast.deinit(alloc);
+    self.buf_read.deinit();
+    self.buf_write.deinit();
+    self.in_flight.deinit(alloc);
+    self.allowed_fast.deinit(alloc);
     self.pex_sent_addresses.deinit(alloc);
 
     if (self.bitfield) |*x| x.deinit(alloc);
-    if (self.workingOn) |*x| x.deinit(alloc);
+    if (self.working_on) |*x| x.deinit(alloc);
 
     std.posix.close(self.socket.fd);
 }
@@ -108,12 +106,12 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
     utils.assert(size <= Torrent.BLOCK_SIZE * 10);
 
-    if (self.readBuf.writer.end >= size) {
+    if (self.buf_read.writer.end >= size) {
         return;
     }
 
-    var list = self.readBuf.toArrayList();
-    defer self.readBuf = .fromArrayList(alloc, &list);
+    var list = self.buf_read.toArrayList();
+    defer self.buf_read = .fromArrayList(alloc, &list);
 
     try list.ensureTotalCapacity(alloc, size);
 
@@ -133,7 +131,7 @@ pub inline fn peekInt(self: *Peer, alloc: std.mem.Allocator, comptime T: type, o
 
     try self.fillReadBuffer(alloc, n + offset) orelse return null;
 
-    const buffered = self.readBuf.written();
+    const buffered = self.buf_read.written();
 
     return std.mem.readInt(T, buffered[offset .. offset + n][0..n], .big);
 }
@@ -141,18 +139,18 @@ pub inline fn peekInt(self: *Peer, alloc: std.mem.Allocator, comptime T: type, o
 pub fn read(self: *Peer, alloc: std.mem.Allocator, size: usize) !?[]u8 {
     try self.fillReadBuffer(alloc, size) orelse return null;
 
-    const buffered = self.readBuf.written();
+    const buffered = self.buf_read.written();
 
     return buffered[0..size];
 }
 
 pub fn consumeReadBuf(self: *Peer, buf: []const u8) void {
-    _ = self.readBuf.writer.consume(buf.len);
+    _ = self.buf_read.writer.consume(buf.len);
 }
 
 /// returns `true` when all data was written to socket
 pub fn send(self: *Peer) !bool {
-    const toWrite = self.writeBuf.written();
+    const toWrite = self.buf_write.written();
 
     if (toWrite.len == 0) {
         return true;
@@ -160,17 +158,17 @@ pub fn send(self: *Peer) !bool {
 
     const wrote = try self.socket.interface.write(toWrite) orelse return false;
 
-    _ = self.writeBuf.writer.consume(wrote);
+    _ = self.buf_write.writer.consume(wrote);
 
-    const stillBuffered = self.writeBuf.written();
-    return stillBuffered.len == 0;
+    const still_buffered = self.buf_write.written();
+    return still_buffered.len == 0;
 }
 
 /// returns `true` when all data was written to socket
 pub fn addMessage(self: *Peer, message: proto.Message, data: []const u8) !bool {
-    utils.assert(self.state == .messageStart or self.state == .message);
+    utils.assert(self.state.isConnected());
 
-    try message.writeMessage(&self.writeBuf.writer, data);
+    try message.writeMessage(&self.buf_write.writer, data);
 
     return try self.send();
 }
@@ -178,15 +176,15 @@ pub fn addMessage(self: *Peer, message: proto.Message, data: []const u8) !bool {
 pub fn writeHandshake(self: *Peer, handshake: *const Handshake) !bool {
     utils.assert(self.state == .writeHandshake);
 
-    if (self.writeBuf.written().len == 0) {
-        try self.writeBuf.writer.writeAll(&handshake.asBytes());
+    if (self.buf_write.written().len == 0) {
+        try self.buf_write.writer.writeAll(&handshake.asBytes());
     }
 
     return try self.send();
 }
 
 pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
-    const workingOn = self.workingOn orelse {
+    const working_on = self.working_on orelse {
         @branchHint(.cold);
         std.log.err("peer: {d} doesn't have workingOn bitset", .{self.socket.fd});
         return null;
@@ -199,8 +197,8 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     };
 
     if (self.choked) {
-        for (self.allowedFast.items) |index| {
-            if (pieces.canFetch(index) and !workingOn.isSet(index)) {
+        for (self.allowed_fast.items) |index| {
+            if (pieces.canFetch(index) and !working_on.isSet(index)) {
                 return @intCast(index);
             }
         }
@@ -209,7 +207,7 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     }
 
     if (pieces.suggestPiece()) |index| {
-        if (bitfield.isSet(index) and !workingOn.isSet(index)) {
+        if (bitfield.isSet(index) and !working_on.isSet(index)) {
             return @intCast(index);
         }
     }
@@ -220,7 +218,7 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
     });
 
     while (iter.next()) |index| {
-        if (pieces.canFetch(index) and !workingOn.isSet(index)) {
+        if (pieces.canFetch(index) and !working_on.isSet(index)) {
             return @intCast(index);
         }
     }
@@ -230,41 +228,41 @@ pub fn nextWorkingPiece(self: *Peer, pieces: *PieceManager) ?u32 {
 
 /// returns `true` when all data was written to socket
 pub fn fillRqPool(self: *Peer, torrent: *const Torrent, pieces: *PieceManager) !bool {
-    while (self.inFlight.count < self.inFlight.size) {
+    while (self.in_flight.count < self.in_flight.size) {
         if (pieces.isDownloadComplete()) break;
 
-        const piece = self.workingPiece orelse blk: {
-            self.workingPieceOffset = 0;
-            self.workingPiece = self.nextWorkingPiece(pieces) orelse break;
+        const piece = self.working_piece orelse blk: {
+            self.working_piece_offset = 0;
+            self.working_piece = self.nextWorkingPiece(pieces) orelse break;
 
-            self.workingOn.?.set(self.workingPiece.?);
-            pieces.downloading(self.workingPiece.?);
+            self.working_on.?.set(self.working_piece.?);
+            pieces.downloading(self.working_piece.?);
 
-            break :blk self.workingPiece.?;
+            break :blk self.working_piece.?;
         };
 
         const pieceLen = torrent.getPieceSize(piece);
 
-        self.inFlight.push(.{
+        self.in_flight.push(.{
             .index = piece,
-            .begin = self.workingPieceOffset,
+            .begin = self.working_piece_offset,
         }) catch break;
 
-        const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - self.workingPieceOffset);
+        const chunkLen = @min(Torrent.BLOCK_SIZE, pieceLen - self.working_piece_offset);
 
         const m: proto.Message = .{ .request = .{
             .index = piece,
-            .begin = self.workingPieceOffset,
+            .begin = self.working_piece_offset,
             .len = chunkLen,
         } };
 
-        try m.writeMessage(&self.writeBuf.writer, &.{});
+        try m.writeMessage(&self.buf_write.writer, &.{});
 
-        self.workingPieceOffset += chunkLen;
+        self.working_piece_offset += chunkLen;
 
-        if (self.workingPieceOffset >= pieceLen) {
-            self.workingPiece = null;
-            self.workingPieceOffset = 0;
+        if (self.working_piece_offset >= pieceLen) {
+            self.working_piece = null;
+            self.working_piece_offset = 0;
         }
     }
 
@@ -272,7 +270,7 @@ pub fn fillRqPool(self: *Peer, torrent: *const Torrent, pieces: *PieceManager) !
 }
 
 pub fn compareBytesReceived(_: void, a: *Peer, b: *Peer) bool {
-    return std.math.order(a.bytesReceived, b.bytesReceived) == .gt;
+    return std.math.order(a.bytes_received, b.bytes_received) == .gt;
 }
 
 pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { keep_alive, message: proto.Message } {
@@ -281,7 +279,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
     const len = try self.peekInt(alloc, u32, 0) orelse return null;
 
     if (len == 0) {
-        _ = self.readBuf.writer.consume(@sizeOf(u32));
+        _ = self.buf_read.writer.consume(@sizeOf(u32));
 
         return .keep_alive;
     }
@@ -290,19 +288,19 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
         return error.MessageTooBig;
     }
 
-    const idInt = try self.peekInt(alloc, u8, @sizeOf(u32)) orelse return null;
+    const id_int = try self.peekInt(alloc, u8, @sizeOf(u32)) orelse return null;
 
-    const id = std.enums.fromInt(proto.MessageId, idInt) orelse {
-        std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket.fd, idInt });
+    const id = std.enums.fromInt(proto.MessageId, id_int) orelse {
+        std.log.warn("peer: {d} unknown msg id {d}", .{ self.socket.fd, id_int });
         return error.Dead;
     };
 
-    const sizeOfMessageStart = id.messageStartLen();
-    const messageStartBytes = try self.read(alloc, sizeOfMessageStart) orelse return null;
-    defer self.consumeReadBuf(messageStartBytes);
+    const message_start_size = id.messageStartLen();
+    const messaage_start = try self.read(alloc, message_start_size) orelse return null;
+    defer self.consumeReadBuf(messaage_start);
 
-    var reader: std.Io.Reader = .fixed(messageStartBytes);
-    reader.toss(@sizeOf(@TypeOf(idInt)) + @sizeOf(@TypeOf(len)));
+    var reader: std.Io.Reader = .fixed(messaage_start);
+    reader.toss(@sizeOf(@TypeOf(id_int)) + @sizeOf(@TypeOf(len)));
 
     const message: proto.Message = switch (id) {
         .choke => .choke,
@@ -333,9 +331,9 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
         .request, .cancel, .rejectRequest => blk: {
             const index = reader.takeInt(u32, .big) catch unreachable;
             const begin = reader.takeInt(u32, .big) catch unreachable;
-            const mLen = reader.takeInt(u32, .big) catch unreachable;
+            const message_len = reader.takeInt(u32, .big) catch unreachable;
 
-            if (mLen > Torrent.BLOCK_SIZE) {
+            if (message_len > Torrent.BLOCK_SIZE) {
                 std.log.err("peer: {d} dropped (msg too big: {d})", .{ self.socket.fd, len });
                 return error.Dead;
             }
@@ -344,19 +342,19 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
                 break :blk .{ .request = .{
                     .index = index,
                     .begin = begin,
-                    .len = mLen,
+                    .len = message_len,
                 } };
             } else if (id == .cancel) {
                 break :blk .{ .cancel = .{
                     .index = index,
                     .begin = begin,
-                    .len = mLen,
+                    .len = message_len,
                 } };
-            } else if (self.protocols.fast) {
+            } else if (self.protocols.fast and id == .rejectRequest) {
                 break :blk .{ .rejectRequest = .{
                     .index = index,
                     .begin = begin,
-                    .len = mLen,
+                    .len = message_len,
                 } };
             } else return error.Dead;
         },
@@ -379,7 +377,9 @@ pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !
     var pex: Pex = .{};
     errdefer pex.deinit(alloc);
 
-    outer: for (other_peers) |other_peer| if (other_peer.state.isConnected() and other_peer != self) {
+    outer: for (other_peers) |other_peer| {
+        if (!other_peer.state.isConnected() or other_peer == self) continue;
+
         for (self.pex_sent_addresses.items) |sent| {
             if (sent.eql(other_peer.address)) continue :outer;
         }
@@ -397,7 +397,7 @@ pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !
             },
         });
         try self.pex_sent_addresses.append(alloc, other_peer.address);
-    };
+    }
 
     var i = self.pex_sent_addresses.items.len;
     outer: while (i > 0) {
