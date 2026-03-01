@@ -52,7 +52,7 @@ pub fn downloadTorrent(
     const files = ctx.files;
     const pieces = ctx.pieces;
 
-    var kq: KQ = try .init(alloc);
+    var kq: KQ = try .init();
     defer kq.deinit();
 
     var pool: std.Thread.Pool = undefined;
@@ -822,7 +822,7 @@ pub fn downloadMagnet(
     peer_id: [20]u8,
     magnet: *Magnet,
 ) !void {
-    var kq: KQ = try .init(alloc);
+    var kq: KQ = try .init();
     defer kq.deinit();
 
     var tracker: Tracker = try .fromMagnet(alloc, peer_id, magnet);

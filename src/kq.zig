@@ -3,13 +3,14 @@ const builtin = @import("builtin");
 
 const utils = @import("utils");
 
-alloc: std.mem.Allocator,
-
 fd: std.posix.fd_t,
 
-evs: utils.Queue(KEvent, MAX_EVENTS) = .{},
+evs: [MAX_EVENTS]KEvent = undefined,
+evs_index: u16 = 0,
+evs_count: u16 = 0,
 
-changeList: std.array_list.Aligned(KEvent, null) = .empty,
+changes: [MAX_CHANGE_EVENTS]KEvent = undefined,
+changes_count: usize = 0,
 
 const KQ = @This();
 
@@ -18,147 +19,175 @@ const KEvent = std.posix.Kevent;
 pub const Kind = enum(u2) { timer, read, write };
 
 const MAX_EVENTS = 256;
+const MAX_CHANGE_EVENTS = 64;
 
-pub fn init(alloc: std.mem.Allocator) !KQ {
+pub fn init() !KQ {
     comptime utils.assert(builtin.os.tag == .macos);
 
     const kqueue = try std.posix.kqueue();
     errdefer std.posix.close(kqueue);
 
-    return .{ .alloc = alloc, .fd = kqueue };
+    return .{ .fd = kqueue };
 }
 
 pub fn deinit(self: *KQ) void {
     std.posix.close(self.fd);
-    self.changeList.deinit(self.alloc);
 }
 
 /// adds one time timer, that will fire event after `wait` in **milliseconds**
-pub fn addTimer(self: *KQ, id: usize, ms: usize, opts: struct { periodic: bool = false }) !void {
-    const flags: usize = if (opts.periodic)
+pub inline fn addTimer(
+    self: *KQ,
+    id: usize,
+    ms: usize,
+    comptime opts: struct { periodic: bool = false },
+) !void {
+    const flags = if (opts.periodic)
         std.c.EV.ADD | std.c.EV.ENABLE
     else
         std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT;
 
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(id),
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
+    }
+
+    self.changes[self.changes_count] = KEvent{
+        .ident = id,
         .filter = std.c.EVFILT.TIMER,
-        .flags = @intCast(flags),
+        .flags = flags,
         .fflags = 0, // default is milliseconds
         .data = @intCast(ms),
         .udata = 1, // prevents `udata != 0` assert
-    });
+    };
+    self.changes_count += 1;
 }
 
 pub fn deleteTimer(self: *KQ, id: usize) !void {
-    var i = self.evs.count;
-    while (i > 0) {
-        i -= 1;
-        const ev = self.evs.get(i);
-        if (ev.ident == id and ev.filter == std.c.EVFILT.TIMER) {
-            self.evs.removeIndex(i);
-        }
+    self.removeEv(id, .timer);
+
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
     }
 
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(id),
+    self.changes[self.changes_count] = KEvent{
+        .ident = id,
         .filter = std.c.EVFILT.TIMER,
         .flags = std.c.EV.DELETE,
         .fflags = 0,
         .data = 0,
         .udata = 0,
-    });
+    };
+    self.changes_count += 1;
 }
 
-/// subscribe to read or write of socket (`ident`)
-pub fn subscribe(self: *KQ, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
+/// subscribe to read or write of socket
+pub inline fn subscribe(self: *KQ, socket: std.posix.fd_t, comptime kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
-    const filter: isize = switch (kind) {
+    const filter = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
-        .timer => return error.UseAddTimer,
+        .timer => @compileError("use addTimer"),
     };
 
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(ident),
-        .filter = @intCast(filter),
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
+    }
+
+    self.changes[self.changes_count] = KEvent{
+        .ident = @intCast(socket),
+        .filter = filter,
         .flags = std.c.EV.ADD | std.c.EV.ENABLE,
         .fflags = 0,
         .data = 0,
         .udata = udata,
-    });
-}
-
-pub fn delete(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
-    const filter: isize = switch (kind) {
-        .read => std.c.EVFILT.READ,
-        .write => std.c.EVFILT.WRITE,
-        .timer => return error.UseAddTimer,
     };
-
-    var i = self.evs.count;
-    while (i > 0) {
-        i -= 1;
-        const ev = self.evs.get(i);
-        if (ev.ident == ident and ev.filter == filter) {
-            self.evs.removeIndex(i);
-        }
-    }
-
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(ident),
-        .filter = @intCast(filter),
-        .flags = std.c.EV.DELETE,
-        .fflags = 0,
-        .data = 0,
-        .udata = 0,
-    });
+    self.changes_count += 1;
 }
 
-pub fn enable(self: *KQ, ident: std.posix.fd_t, kind: Kind, udata: usize) !void {
+pub inline fn enable(self: *KQ, socket: std.posix.fd_t, comptime kind: Kind, udata: usize) !void {
     utils.assert(udata != 0);
 
-    const filter: isize = switch (kind) {
+    const filter = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
-        .timer => return error.UseAddTimer,
+        .timer => @compileError("use addTimer"),
     };
 
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(ident),
-        .filter = @intCast(filter),
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
+    }
+
+    self.changes[self.changes_count] = KEvent{
+        .ident = @intCast(socket),
+        .filter = filter,
         .flags = std.c.EV.ENABLE,
         .fflags = 0,
         .data = 0,
         .udata = udata,
-    });
+    };
+    self.changes_count += 1;
 }
 
-pub fn disable(self: *KQ, ident: std.posix.fd_t, kind: Kind) !void {
-    const filter: isize = switch (kind) {
+pub inline fn delete(self: *KQ, socket: std.posix.fd_t, comptime kind: Kind) !void {
+    const filter = switch (kind) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
-        .timer => return error.UseAddTimer,
+        .timer => @compileError("use deleteTimer"),
     };
 
-    var i = self.evs.count;
-    while (i > 0) {
-        i -= 1;
-        const ev = self.evs.get(i);
-        if (ev.ident == ident and ev.filter == filter) {
-            self.evs.removeIndex(i);
-        }
+    const ident: usize = @intCast(socket);
+    self.removeEv(ident, kind);
+
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
     }
 
-    try self.changeList.append(self.alloc, KEvent{
-        .ident = @intCast(ident),
-        .filter = @intCast(filter),
+    self.changes[self.changes_count] = KEvent{
+        .ident = ident,
+        .filter = filter,
+        .flags = std.c.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    };
+    self.changes_count += 1;
+}
+
+pub inline fn disable(self: *KQ, socket: std.posix.fd_t, comptime kind: Kind) !void {
+    const filter = switch (kind) {
+        .read => std.c.EVFILT.READ,
+        .write => std.c.EVFILT.WRITE,
+        .timer => @compileError("use deleteTimer"),
+    };
+
+    const ident: usize = @intCast(socket);
+    self.removeEv(ident, kind);
+
+    if (self.changes_count == self.changes.len) {
+        @branchHint(.unlikely);
+
+        try self.emptyChangeList();
+    }
+
+    self.changes[self.changes_count] = KEvent{
+        .ident = ident,
+        .filter = filter,
         .flags = std.c.EV.DISABLE,
         .fflags = 0,
         .data = 0,
         .udata = 0,
-    });
+    };
+    self.changes_count += 1;
 }
 
 const NextError = error{
@@ -173,21 +202,19 @@ const CustomEvent = struct {
     err: ?std.c.E,
 };
 
-const FALLBACK_ERROR = std.c.E.CONNREFUSED;
-var intermidiateKqBuf: [MAX_EVENTS]KEvent = undefined;
+const FALLBACK_ERROR = std.c.E.CONNRESET;
 
 pub fn next(self: *KQ) NextError!?CustomEvent {
-    if (self.evs.count == 0) {
-        defer self.changeList.clearRetainingCapacity();
+    while (self.evs_index >= self.evs_count) {
+        const count = try std.posix.kevent(self.fd, self.changes[0..self.changes_count], &self.evs, null);
 
-        const readyCount = try std.posix.kevent(self.fd, self.changeList.items, &intermidiateKqBuf, null);
-
-        for (intermidiateKqBuf[0..readyCount]) |e| {
-            self.evs.add(e) catch unreachable;
-        }
+        self.evs_index = 0;
+        self.evs_count = @intCast(count);
+        self.changes_count = 0;
     }
 
-    const ev = self.evs.remove() orelse unreachable;
+    const ev = self.evs[self.evs_index];
+    self.evs_index += 1;
 
     utils.assert(ev.udata != 0);
 
@@ -195,15 +222,18 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
 
     if (ev.flags & std.c.EV.ERROR != 0) {
         const code: i32 = @intCast(ev.data);
-        err = std.enums.fromInt(std.posix.E, code);
-        if (err == null) std.log.err("unknown registration error: {d}", .{code});
+        err = std.enums.fromInt(std.posix.E, code) orelse blk: {
+            std.log.err("unknown registration error: {d}", .{code});
+            break :blk FALLBACK_ERROR;
+        };
     } else if (ev.flags & std.c.EV.EOF != 0) { // Check for socket errors/disconnects
-        if (ev.fflags != 0) {
-            const code: i32 = @intCast(ev.fflags);
-            err = std.enums.fromInt(std.posix.E, code);
-            if (err == null) std.log.err("unknown socket error: {d}", .{code});
-        } else {
+        if (ev.fflags == 0) {
             err = .CONNRESET;
+        } else {
+            err = std.enums.fromInt(std.posix.E, ev.fflags) orelse blk: {
+                std.log.err("unknown socket error: {d}", .{ev.fflags});
+                break :blk FALLBACK_ERROR;
+            };
         }
     }
 
@@ -217,13 +247,42 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
     return .{ .ident = ev.ident, .udata = ev.udata, .kind = kind, .err = err };
 }
 
-pub fn killSocket(self: *KQ, socket: std.posix.fd_t) void {
-    var i = self.evs.count;
-    while (i > 0) {
+fn emptyChangeList(self: *KQ) !void {
+    utils.assert(self.changes_count == self.changes.len);
+
+    _ = try std.posix.kevent(self.fd, &self.changes, &.{}, null);
+    self.changes_count = 0;
+}
+
+inline fn removeEv(self: *KQ, ident: usize, comptime kind: Kind) void {
+    const filter = switch (kind) {
+        .read => std.c.EVFILT.READ,
+        .write => std.c.EVFILT.WRITE,
+        .timer => std.c.EVFILT.TIMER,
+    };
+
+    var i = self.evs_count;
+    while (i > self.evs_index) {
         i -= 1;
-        const ev = self.evs.get(i);
+
+        const ev = self.evs[i];
+        if (ev.ident == ident and ev.filter == filter) {
+            self.evs[i] = self.evs[self.evs_count - 1];
+            self.evs_count -= 1;
+            break;
+        }
+    }
+}
+
+pub fn killSocket(self: *KQ, socket: std.posix.fd_t) void {
+    var i = self.evs_count;
+    while (i > self.evs_index) {
+        i -= 1;
+
+        const ev = self.evs[i];
         if (ev.ident == socket) {
-            self.evs.removeIndex(i);
+            self.evs[i] = self.evs[self.evs_count - 1];
+            self.evs_count -= 1;
         }
     }
 }
