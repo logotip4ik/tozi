@@ -8,8 +8,8 @@ const Handshake = @This();
 pub const HANDSHAKE_LEN = 68;
 
 reserved: Reserved,
-infoHash: [20]u8,
-peerId: [20]u8,
+info_hash: [20]u8,
+peer_id: [20]u8,
 
 const Reserved = packed struct(u64) {
     _: u40 = 0,
@@ -34,7 +34,7 @@ pub const Protocols = packed struct {
     extended: bool = false,
 };
 
-pub fn init(peerId: [20]u8, infoHash: [20]u8, protocols: Protocols) Handshake {
+pub fn init(peer_id: [20]u8, info_hash: [20]u8, protocols: Protocols) Handshake {
     var reserved: Reserved = .{};
 
     inline for (std.meta.fields(Protocols)) |field| {
@@ -42,8 +42,8 @@ pub fn init(peerId: [20]u8, infoHash: [20]u8, protocols: Protocols) Handshake {
     }
 
     return Handshake{
-        .peerId = peerId,
-        .infoHash = infoHash,
+        .peer_id = peer_id,
+        .info_hash = info_hash,
         .reserved = reserved,
     };
 }
@@ -58,8 +58,8 @@ pub fn asBytes(self: Handshake) [HANDSHAKE_LEN]u8 {
     const reserved: u64 = @bitCast(self.reserved);
     writer.writeInt(u64, reserved, .little) catch unreachable;
 
-    writer.writeAll(&self.infoHash) catch unreachable;
-    writer.writeAll(&self.peerId) catch unreachable;
+    writer.writeAll(&self.info_hash) catch unreachable;
+    writer.writeAll(&self.peer_id) catch unreachable;
 
     return buffer;
 }
@@ -82,18 +82,18 @@ pub fn matchExtensions(self: Handshake, buffer: []const u8) ValidateError!Protoc
         return ValidateError.InvalidPstr;
     }
 
-    const reservedBytes = reader.take(8) catch return ValidateError.InvalidBuffer;
-    const reserved = std.mem.bytesToValue(Reserved, reservedBytes[0..8]);
+    const reserved_bytes = reader.take(8) catch return ValidateError.InvalidBuffer;
+    const reserved = std.mem.bytesToValue(Reserved, reserved_bytes[0..8]);
 
-    const infoHash = reader.take(20) catch return ValidateError.InvalidBuffer;
-    if (!std.mem.eql(u8, self.infoHash[0..20], infoHash[0..20])) {
+    const info_hash = reader.take(20) catch return ValidateError.InvalidBuffer;
+    if (!std.mem.eql(u8, self.info_hash[0..20], info_hash[0..20])) {
         return ValidateError.InvalidInfoHash;
     }
 
     var proto: Protocols = .{};
 
-    inline for (comptime std.meta.fieldNames(Protocols)) |field| {
-        @field(proto, field) = @field(self.reserved, field) and @field(reserved, field);
+    inline for (std.meta.fields(Protocols)) |field| {
+        @field(proto, field.name) = @field(self.reserved, field.name) and @field(reserved, field.name);
     }
 
     return proto;
@@ -117,8 +117,8 @@ test "reserved byte positions" {
 test "reserved byte positions with 'asBytes'" {
     const h: Handshake = .{
         .reserved = .{ .extended = true, .dht = true, .fast = true },
-        .infoHash = undefined,
-        .peerId = undefined,
+        .info_hash = undefined,
+        .peer_id = undefined,
     };
 
     const bytes = h.asBytes();
@@ -152,7 +152,7 @@ pub const Extended = struct {
         metadata: ?u8 = null,
         donthave: ?u8 = null,
 
-        pub const nameMap = std.StaticStringMap([]const u8).initComptime(&[_]struct { []const u8, []const u8 }{
+        pub const name_map = std.StaticStringMap([]const u8).initComptime(&[_]struct { []const u8, []const u8 }{
             .{ "ut_pex", "pex" },
             .{ "ut_holepunch", "holepunch" },
             .{ "ut_metadata", "metadata" },
@@ -162,12 +162,12 @@ pub const Extended = struct {
         pub fn parse(map: *const std.StringHashMapUnmanaged(Bencode)) Map {
             var self = Map{};
 
-            inline for (comptime nameMap.keys()) |key| {
-                const mappedKey = comptime nameMap.get(key) orelse unreachable;
+            inline for (comptime name_map.keys()) |key| {
+                const self_key = comptime name_map.get(key) orelse unreachable;
 
                 if (map.get(key)) |id| switch (id.inner) {
                     .int => |id_int| if (id_int > 0 and id_int < std.math.maxInt(u8)) {
-                        @field(self, mappedKey) = @intCast(id_int);
+                        @field(self, self_key) = @intCast(id_int);
                     },
                     else => {},
                 };
@@ -177,10 +177,10 @@ pub const Extended = struct {
         }
 
         pub fn fill(self: *const Map, alloc: std.mem.Allocator, map: *std.StringHashMapUnmanaged(Bencode)) !void {
-            inline for (comptime nameMap.keys()) |key| {
-                const mappedKey = comptime nameMap.get(key) orelse unreachable;
+            inline for (comptime name_map.keys()) |key| {
+                const self_key = comptime name_map.get(key) orelse unreachable;
 
-                if (@field(self, mappedKey)) |id| {
+                if (@field(self, self_key)) |id| {
                     try map.putNoClobber(alloc, key, .{ .inner = .{ .int = id } });
                 }
             }
@@ -220,8 +220,8 @@ pub const Extended = struct {
             try root.putNoClobber(alloc, "yourip", .{ .inner = .{ .string = &your_ip } });
         }
 
-        var rootValue: Bencode = .{ .inner = .{ .dict = root } };
-        try rootValue.encode(writer);
+        var value: Bencode = .{ .inner = .{ .dict = root } };
+        try value.encode(writer);
     }
 
     pub fn decode(alloc: std.mem.Allocator, bytes: []const u8) !Extended {
