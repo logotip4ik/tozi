@@ -21,9 +21,9 @@ value: ?Bencode,
 
 files: Files,
 pieces: []const u8,
-pieceLen: u32,
-infoHash: [std.crypto.hash.Sha1.digest_length]u8,
-totalLen: usize,
+piece_len: u32,
+info_hash: [std.crypto.hash.Sha1.digest_length]u8,
+total_len: usize,
 private: bool,
 
 tiers: std.array_list.Aligned(Announces, null),
@@ -45,31 +45,10 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
 }
 
 pub fn getPieceSize(self: Torrent, index: usize) u32 {
-    const offset = @as(u64, index) * self.pieceLen;
-    const remaining = self.totalLen - offset;
+    const offset = @as(u64, index) * self.piece_len;
+    const remaining = self.total_len - offset;
 
-    return @intCast(@min(@as(u64, self.pieceLen), remaining));
-}
-
-pub fn computeInfoHash(info: Bencode, reader: *std.Io.Reader) ![std.crypto.hash.Sha1.digest_length]u8 {
-    _ = try reader.discardShort(info.start);
-
-    var hash: std.crypto.hash.Sha1 = .init(.{});
-
-    var read: usize = 0;
-    while (true) {
-        const readSize = @min(std.crypto.hash.Sha1.block_length, info.len - read);
-        const chunk = try reader.take(readSize);
-
-        hash.update(chunk);
-        read += readSize;
-
-        if (read == info.len) {
-            break;
-        }
-    }
-
-    return hash.finalResult();
+    return @intCast(@min(@as(u64, self.piece_len), remaining));
 }
 
 pub fn inheritInfo(
@@ -80,17 +59,17 @@ pub fn inheritInfo(
     var files: Files = .empty;
     errdefer files.deinit(alloc);
 
-    var totalLen: usize = 0;
+    var total_len: usize = 0;
 
     if (info.get("files")) |infoFiles| {
-        const dirnameValue = info.get("name") orelse return error.NoDirName;
-        const dirname = dirnameValue.inner.string;
+        const dirname_value = info.get("name") orelse return error.NoDirName;
+        const dirname = dirname_value.inner.string;
 
         for (infoFiles.inner.list.items) |file| {
             const chunks = file.inner.dict.get("path") orelse return error.NoFilePath;
             const len = file.inner.dict.get("length") orelse return error.NoFileLength;
 
-            totalLen += @max(0, len.inner.int);
+            total_len += @max(0, len.inner.int);
 
             const path = try alloc.alloc([]const u8, chunks.inner.list.items.len + 1);
 
@@ -108,7 +87,7 @@ pub fn inheritInfo(
         const filename = info.get("name") orelse return error.NoFileName;
         const len = info.get("length") orelse return error.NoFileLength;
 
-        totalLen += @max(0, len.inner.int);
+        total_len += @max(0, len.inner.int);
 
         const path = try alloc.alloc([]const u8, 1);
         path[0] = filename.inner.string;
@@ -120,12 +99,12 @@ pub fn inheritInfo(
     }
 
     const pieces = info.get("pieces") orelse return error.NoPiencesField;
-    const pieceLen = info.get("piece length") orelse return error.NoPieceLenField;
+    const piece_len = info.get("piece length") orelse return error.NoPieceLenField;
     const private = if (info.get("private")) |p| p.inner.int == 1 else false;
 
-    self.totalLen = totalLen;
+    self.total_len = total_len;
     self.pieces = pieces.inner.string;
-    self.pieceLen = @intCast(pieceLen.inner.int);
+    self.piece_len = @intCast(piece_len.inner.int);
     self.private = private;
     self.files = files;
 }
@@ -167,22 +146,21 @@ pub fn fromSlice(alloc: std.mem.Allocator, noalias slice: []const u8) !Torrent {
         return error.MissingInfo;
     };
 
-    reader.seek = 0;
-    const infoHash = try computeInfoHash(info, &reader);
-
     var torrent = Torrent{
         .value = value,
         .tiers = tiers,
         .created_by = null,
         .creation_date = null,
-        .infoHash = infoHash,
+        .info_hash = undefined,
 
         .files = undefined,
         .pieces = undefined,
-        .pieceLen = undefined,
-        .totalLen = undefined,
+        .piece_len = undefined,
+        .total_len = undefined,
         .private = undefined,
     };
+
+    std.crypto.hash.Sha1.hash(slice[info.start .. info.start + info.len], &torrent.info_hash, .{});
 
     try torrent.inheritInfo(alloc, info.inner.dict);
 
@@ -216,7 +194,7 @@ test "parseTorrent - info hash for simple torrent" {
 
     try std.testing.expectEqualStrings(
         "9e947546139508901953291490941744bf9395bc",
-        &std.fmt.bytesToHex(&torrent.infoHash, .lower),
+        &std.fmt.bytesToHex(&torrent.info_hash, .lower),
     );
 }
 
@@ -228,7 +206,7 @@ test "parseTorrent - info hash" {
 
     try std.testing.expectEqualStrings(
         "f0c4cb2d359b74a5f418344749c7441ae2639d33",
-        &std.fmt.bytesToHex(&torrent.infoHash, .lower),
+        &std.fmt.bytesToHex(&torrent.info_hash, .lower),
     );
 }
 
@@ -260,14 +238,14 @@ pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
 
     var torrent = Torrent{
         .value = v,
-        .infoHash = magnet.info_hash,
+        .info_hash = magnet.info_hash,
         .created_by = null,
         .creation_date = null,
         .tiers = tiers,
 
-        .totalLen = undefined,
+        .total_len = undefined,
         .pieces = undefined,
-        .pieceLen = undefined,
+        .piece_len = undefined,
         .private = undefined,
         .files = undefined,
     };

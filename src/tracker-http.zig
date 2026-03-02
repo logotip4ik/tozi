@@ -219,16 +219,17 @@ pub const TlsHandshake = struct {
         const handshake = try t.tlsHandshake(alloc);
 
         const KQ = @import("kq.zig");
-        var kq: KQ = try .init(alloc);
+        var kq: KQ = try .init();
         defer kq.deinit();
 
         try kq.subscribe(socket, .write, 1);
         try kq.subscribe(socket, .read, 1);
-        try kq.disable(socket, switch (handshake.state) {
-            .write => .read,
-            .read => .write,
-            .done => unreachable,
-        });
+        switch (handshake.state) {
+            .write => try kq.disable(socket, .read),
+            .read => try kq.disable(socket, .write),
+            .done => unreachable
+        }
+
         try kq.addTimer(0, 250, .{ .periodic = false });
 
         while (try kq.next()) |ev| {
@@ -640,12 +641,12 @@ test "make request" {
     const socket = t.socketPosix.?.fd;
 
     const stats: Stats = .{
-        .info_hash = torrent.infoHash,
+        .info_hash = torrent.info_hash,
         .peer_id = .{1} ** 20,
         .num_want = 50,
         .downloaded = 0,
         .uploaded = 0,
-        .left = torrent.totalLen,
+        .left = torrent.total_len,
         .event = .started,
     };
 
@@ -653,7 +654,7 @@ test "make request" {
 
     const KQ = @import("./kq.zig");
 
-    var kq: KQ = try .init(alloc);
+    var kq: KQ = try .init();
     defer kq.deinit();
 
     try kq.subscribe(socket, .write, 1);
@@ -700,16 +701,16 @@ test "make https request" {
     const socket = t.socketPosix.?.fd;
 
     const stats: Stats = .{
-        .info_hash = torrent.infoHash,
+        .info_hash = torrent.info_hash,
         .peer_id = .{1} ** 20,
         .num_want = 50,
         .downloaded = 0,
         .uploaded = 0,
-        .left = torrent.totalLen,
+        .left = torrent.total_len,
         .event = .started,
     };
 
-    var kq: KQ = try .init(alloc);
+    var kq: KQ = try .init();
     defer kq.deinit();
 
     try kq.subscribe(socket, .write, 1);

@@ -84,9 +84,8 @@ const MY_PORT_DEFAULT = 6889;
 pub fn init(
     alloc: std.mem.Allocator,
     peer_id: [20]u8,
-    info_hash: [20]u8,
-    downloaded: u64,
     torrent: *const Torrent,
+    downloaded: usize,
 ) !Tracker {
     var cloned: Torrent.Tiers = try .initCapacity(alloc, torrent.tiers.items.len);
     errdefer {
@@ -107,11 +106,11 @@ pub fn init(
 
     return .{
         .peer_id = peer_id,
-        .info_hash = info_hash,
-        .downloaded = downloaded,
-        .uploaded = 0,
-        .left = torrent.totalLen - downloaded,
+        .info_hash = torrent.info_hash,
         .tiers = cloned,
+        .uploaded = 0,
+        .downloaded = downloaded,
+        .left = torrent.total_len - downloaded,
     };
 }
 

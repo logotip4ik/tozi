@@ -79,9 +79,8 @@ pub fn downloadTorrent(
     var tracker: Tracker = try .init(
         alloc,
         peerId,
-        torrent.infoHash,
-        pieces.downloaded,
         torrent,
+        pieces.downloaded,
     );
     defer tracker.deinit(alloc);
     const trackerTaggedPointer = tg.pack(.{ .tracker = &tracker });
@@ -95,7 +94,7 @@ pub fn downloadTorrent(
         );
     }
 
-    const handshake = Handshake.init(peerId, torrent.infoHash, .{
+    const handshake = Handshake.init(peerId, torrent.info_hash, .{
         .fast = ENABLE_FAST,
         .extended = ENABLE_EXTENSION,
     });
@@ -106,7 +105,7 @@ pub fn downloadTorrent(
         if (event.kind == .timer) switch (tg.unpack(event.ident)) {
             .tracker => {
                 tracker.downloaded = pieces.downloaded;
-                tracker.left = torrent.totalLen - tracker.downloaded;
+                tracker.left = torrent.total_len - tracker.downloaded;
 
                 switch (try tracker.enqueueEvent(alloc, if (tracker.addrs_old.items.len == 0) .started else .none)) {
                     .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
@@ -203,7 +202,7 @@ pub fn downloadTorrent(
 
                     if (pieces.isDownloadComplete()) {
                         tracker.downloaded = pieces.downloaded;
-                        tracker.left = torrent.totalLen - tracker.downloaded;
+                        tracker.left = torrent.total_len - tracker.downloaded;
                         const op = tracker.enqueueEvent(alloc, .completed) catch return;
                         switch (op) {
                             .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
@@ -701,7 +700,7 @@ pub fn downloadTorrent(
                         peer.requests_per_tick += 1;
 
                         std.log.info("peer: {d} sending {any}", .{ peer.socket.fd, request });
-                        const data = try files.readPieceData(alloc, request, torrent.pieceLen);
+                        const data = try files.readPieceData(alloc, request, torrent.piece_len);
                         defer alloc.free(data);
 
                         const ready = try peer.addMessage(.{ .piece = request }, data);
@@ -790,7 +789,7 @@ fn hashAndWrite(
     const computedHash = hasher.hash(piece.written());
 
     if (std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
-        files.writePieceData(piece.index, torrent.pieceLen, piece.written()) catch |err| {
+        files.writePieceData(piece.index, torrent.piece_len, piece.written()) catch |err| {
             @branchHint(.unlikely);
 
             std.log.warn("piece: {d} failed writing with {t}", .{ piece.index, err });

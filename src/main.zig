@@ -75,7 +75,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "info")) {
         if (torrent.value) |x| x.dump();
-        std.debug.print("infohash: {x}\n", .{torrent.infoHash});
+        std.debug.print("infohash: {x}\n", .{torrent.info_hash});
         return;
     }
 
@@ -87,7 +87,7 @@ pub fn main() !void {
     var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue") or isverify) blk: {
         var start = std.time.Timer.start() catch unreachable;
 
-        var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.pieceLen);
+        var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.piece_len);
         defer bitset.deinit(alloc);
 
         const duration = start.read();
