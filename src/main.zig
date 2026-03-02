@@ -62,12 +62,14 @@ pub fn main() !void {
         };
         defer file.close();
 
-        var readerBuf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(&readerBuf);
-        const file_contents = try reader.interface.allocRemaining(alloc, .unlimited);
-        defer alloc.free(file_contents);
+        const read_buf_size = 32 * 1024;
+        var read_buf: std.Io.Writer.Allocating = try .initCapacity(alloc, read_buf_size);
+        defer read_buf.deinit();
 
-        break :blk try .fromSlice(alloc, file_contents);
+        var reader = file.reader(&.{});
+        _ = try reader.interface.stream(&read_buf.writer, .limited(read_buf_size));
+
+        break :blk try .fromSlice(alloc, read_buf.written());
     };
     defer torrent.deinit(alloc);
 
@@ -98,9 +100,9 @@ pub fn main() !void {
             mb / durationInS,
         });
 
-        if (bitset.findLastSet()) |last| if (last == bitset.bit_length - 1) {
+        if (bitset.count() == bitset.bit_length) {
             std.log.info("whole torrent is downloaded.", .{});
-        };
+        }
 
         break :blk try .fromBitset(alloc, &torrent, bitset);
     } else try .init(alloc, torrent.pieces);
