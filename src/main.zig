@@ -74,7 +74,7 @@ pub fn main() !void {
     defer torrent.deinit(alloc);
 
     if (std.mem.eql(u8, command, "info")) {
-        if (torrent.value) |x| x.dump();
+        torrent.value.dump();
         std.debug.print("infohash: {x}\n", .{torrent.info_hash});
         return;
     }

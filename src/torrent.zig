@@ -17,7 +17,7 @@ pub const BLOCK_SIZE = 1024 * 16;
 pub const Announces = std.array_list.Aligned([]const u8, null);
 pub const Tiers = std.array_list.Aligned(Announces, null);
 
-value: ?Bencode,
+value: Bencode,
 
 files: Files,
 pieces: []const u8,
@@ -41,7 +41,7 @@ pub fn deinit(self: *Torrent, alloc: std.mem.Allocator) void {
     }
     self.tiers.deinit(alloc);
 
-    if (self.value) |*x| x.deinit(alloc);
+    self.value.deinit(alloc);
 }
 
 pub fn getPieceSize(self: Torrent, index: usize) u32 {
