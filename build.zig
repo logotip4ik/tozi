@@ -14,14 +14,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .single_threaded = true,
-        .strip = true,
-    });
-
-    const utilsMod = b.addModule("utils", .{
-        .root_source_file = b.path("src/utils.zig"),
-        .target = target,
-        .optimize = optimize,
-        .single_threaded = true,
     });
 
     const toziMod = b.addModule("tozi", .{
@@ -30,7 +22,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "hasher", .module = hasherMod },
-            .{ .name = "utils", .module = utilsMod },
             .{ .name = "tls", .module = tlsDep.module("tls") },
         },
     });
@@ -71,9 +62,6 @@ pub fn build(b: *std.Build) void {
     }
 
     const run_mod_tests = b.addRunArtifact(b.addTest(.{ .root_module = toziMod }));
-
-    const utils_tests = b.addRunArtifact(b.addTest(.{ .root_module = utilsMod }));
-    run_mod_tests.step.dependOn(&utils_tests.step);
 
     const run_exe_tests = b.addRunArtifact(b.addTest(.{ .root_module = exe.root_module }));
 

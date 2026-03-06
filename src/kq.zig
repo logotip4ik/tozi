@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 
 fd: std.posix.fd_t,
 

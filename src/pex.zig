@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Bencode = @import("bencode.zig");
-const utils = @import("utils");
+const utils = @import("utils.zig");
 
 added: std.array_list.Aligned(AddedEntry, null) = .empty,
 

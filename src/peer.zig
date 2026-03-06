@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const proto = @import("proto.zig");
 const Torrent = @import("torrent.zig");
 const PieceManager = @import("piece-manager.zig");

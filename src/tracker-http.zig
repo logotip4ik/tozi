@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Tls = @import("tls");
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const Socket = @import("socket.zig");
 const Bencode = @import("bencode.zig");
 const Stats = @import("tracker-utils.zig").Stats;

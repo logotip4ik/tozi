@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const Bencode = @import("bencode.zig");
 
 const Handshake = @This();

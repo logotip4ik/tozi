@@ -15,7 +15,7 @@ pub const Magnet = @import("magnet.zig");
 
 const hasher = @import("hasher");
 const proto = @import("proto.zig");
-pub const utils = @import("utils");
+pub const utils = @import("utils.zig");
 
 const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;

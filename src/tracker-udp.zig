@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const Socket = @import("socket.zig");
 const Stats = @import("tracker-utils.zig").Stats;
 const connectToAddress = @import("tracker-utils.zig").connectToAddress;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const Peer = @import("peer.zig");
 const Torrent = @import("torrent.zig");
 const Bencode = @import("bencode.zig");
@@ -78,8 +78,8 @@ pub const Client = union(enum) {
     }
 };
 
-pub const defaultNumWant = 20;
 const MY_PORT_DEFAULT = 6889;
+pub const NUM_WANT_DEFAULT = 20;
 
 pub fn init(
     alloc: std.mem.Allocator,

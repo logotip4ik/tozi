@@ -3,7 +3,7 @@ const std = @import("std");
 const Bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig");
 
-const utils = @import("utils");
+const utils = @import("utils.zig");
 const hasher = @import("hasher");
 const proto = @import("proto.zig");
 
