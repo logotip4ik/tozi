@@ -71,7 +71,6 @@ pub fn downloadTorrent(
             kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.working_on);
             peer.deinit(alloc);
-            alloc.destroy(peer);
         }
         peers.deinit(alloc);
     }
@@ -726,7 +725,7 @@ pub fn downloadTorrent(
 
             for (peers.items, 0..) |other_peer, i| {
                 if (other_peer == peer) {
-                    alloc.destroy(peers.swapRemove(i));
+                    _ = peers.swapRemove(i);
                     break;
                 }
             }
@@ -750,12 +749,8 @@ fn initializeNewPeers(
 
     // don't waste returned addr, because it's already moved to `oldAddrs`
     while (tracker.nextNewPeer()) |addr| {
-        const peer = try alloc.create(Peer);
-        errdefer alloc.destroy(peer);
-
-        peer.* = Peer.init(alloc, addr) catch |err| {
+        const peer = Peer.init(alloc, addr) catch |err| {
             std.log.err("failed connecting with {t}", .{err});
-            alloc.destroy(peer);
             continue;
         };
         errdefer peer.deinit(alloc);
@@ -832,7 +827,6 @@ pub fn downloadMagnet(
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
             peer.deinit(alloc);
-            alloc.destroy(peer);
         }
         peers.deinit(alloc);
     }
@@ -841,19 +835,16 @@ pub fn downloadMagnet(
         try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
     } else {
         for (magnet.peers.items, 0..) |addr, i| {
-            const p = try alloc.create(Peer);
-            errdefer alloc.destroy(p);
-
-            p.* = Peer.init(alloc, addr) catch |err| {
+            const peer = Peer.init(alloc, addr) catch |err| {
                 std.log.err("failed connecting with {t}", .{err});
                 continue;
             };
-            errdefer p.deinit(alloc);
+            errdefer peer.deinit(alloc);
 
-            try kq.subscribe(p.socket.fd, .write, tg.pack(.{ .peer = p }));
+            try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
             errdefer kq.killSocket(kq);
 
-            peers.appendAssumeCapacity(p);
+            peers.appendAssumeCapacity(peer);
 
             if (i == PEERS_MAX) break;
         }
@@ -1147,7 +1138,7 @@ pub fn downloadMagnet(
 
             for (peers.items, 0..) |other_peer, i| {
                 if (other_peer == peer) {
-                    alloc.destroy(peers.swapRemove(i));
+                    _ = peers.swapRemove(i);
                     break;
                 }
             }

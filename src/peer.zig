@@ -66,7 +66,10 @@ pub const State = union(enum) {
     }
 };
 
-pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !Peer {
+pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !*Peer {
+    const self = try alloc.create(Peer);
+    errdefer alloc.destroy(self);
+
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
@@ -80,7 +83,7 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !Peer {
         else => return err,
     };
 
-    return .{
+    self.* = .{
         .address = addr,
         .socket = .init(fd),
         .buf_read = .init(alloc),
@@ -88,6 +91,8 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !Peer {
         .in_flight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
         .allowed_fast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST),
     };
+
+    return self;
 }
 
 pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
@@ -101,6 +106,7 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     if (self.working_on) |*x| x.deinit(alloc);
 
     std.posix.close(self.socket.fd);
+    alloc.destroy(self);
 }
 
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
