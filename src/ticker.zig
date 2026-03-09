@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Peer = @import("peer.zig");
+const PieceManager = @import("piece-manager.zig");
 
 /// in seconds
 tick: u8,
@@ -12,7 +13,7 @@ const Ticker = @This();
 pub fn onTick(
     self: *const Ticker,
     peers: []*Peer,
-    completed_count: usize,
+    pieces: *const PieceManager,
 ) void {
     var bytes_per_tick: usize = 0;
     var peers_alive_count: usize = 0;
@@ -23,12 +24,10 @@ pub fn onTick(
     // const maxPeersToUnchoke = 5;
     // var unchokedCount: usize = 0;
 
-    std.mem.sortUnstable(*Peer, peers, {}, Peer.compareBytesReceived);
-
     for (peers) |peer| {
         defer {
             peer.bytes_received = 0;
-            peer.requests_per_tick = 0;
+            peer.bytes_sent = 0;
         }
 
         // const shouldUnchoke = peer.isInterested and unchokedCount < maxPeersToUnchoke;
@@ -46,15 +45,15 @@ pub fn onTick(
         // }
 
         bytes_per_tick += peer.bytes_received;
-        peers_alive_count += if (peer.bytes_received > 0) 1 else 0;
+        peers_alive_count += @intFromBool(peer.bytes_received > 0);
     }
 
-    const percent = (completed_count * 100) / self.total_pieces;
+    const percent = (pieces.completed_count * 100) / self.total_pieces;
     const bytes_per_second = bytes_per_tick / 3;
 
     std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
         percent,
-        completed_count,
+        pieces.completed_count,
         self.total_pieces,
         peers_alive_count,
         bytes_per_second,

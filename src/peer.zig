@@ -25,7 +25,7 @@ is_interested: bool = false,
 is_unchoked: bool = false,
 
 bytes_received: usize = 0,
-requests_per_tick: usize = 0,
+bytes_sent: usize = 0,
 
 buf_read: std.Io.Writer.Allocating,
 buf_write: std.Io.Writer.Allocating,
@@ -312,7 +312,7 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
         .choke => .choke,
         .unchoke => .unchoke,
         .interested => .interested,
-        .notInterested => .notInterested,
+        .not_interested => .not_interested,
 
         .have => .{ .have = reader.takeInt(u32, .big) catch unreachable },
         .bitfield => .{ .bitfield = len - 1 },
@@ -323,18 +323,18 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
             .len = len - 9,
         } },
 
-        .haveAll => if (self.protocols.fast) .haveAll else return error.Dead,
-        .haveNone => if (self.protocols.fast) .haveNone else return error.Dead,
-        .suggestPiece => if (self.protocols.fast)
-            .{ .suggestPiece = reader.takeInt(u32, .big) catch unreachable }
+        .have_all => if (self.protocols.fast) .have_all else return error.Dead,
+        .have_none => if (self.protocols.fast) .have_none else return error.Dead,
+        .suggest_piece => if (self.protocols.fast)
+            .{ .suggest_piece = reader.takeInt(u32, .big) catch unreachable }
         else
             return error.Dead,
-        .allowedFast => if (self.protocols.fast)
-            .{ .allowedFast = reader.takeInt(u32, .big) catch unreachable }
+        .allowed_fast => if (self.protocols.fast)
+            .{ .allowed_fast = reader.takeInt(u32, .big) catch unreachable }
         else
             return error.Dead,
 
-        .request, .cancel, .rejectRequest => blk: {
+        .request, .cancel, .reject_request => blk: {
             const index = reader.takeInt(u32, .big) catch unreachable;
             const begin = reader.takeInt(u32, .big) catch unreachable;
             const message_len = reader.takeInt(u32, .big) catch unreachable;
@@ -356,8 +356,8 @@ pub fn readMessageStart(self: *Peer, alloc: std.mem.Allocator) !?union(enum) { k
                     .begin = begin,
                     .len = message_len,
                 } };
-            } else if (self.protocols.fast and id == .rejectRequest) {
-                break :blk .{ .rejectRequest = .{
+            } else if (self.protocols.fast and id == .reject_request) {
+                break :blk .{ .reject_request = .{
                     .index = index,
                     .begin = begin,
                     .len = message_len,

@@ -17,7 +17,7 @@ pub const MessageId = enum(u8) {
     choke = 0,
     unchoke = 1,
     interested = 2,
-    notInterested = 3,
+    not_interested = 3,
     have = 4,
     bitfield = 5,
     request = 6,
@@ -26,11 +26,11 @@ pub const MessageId = enum(u8) {
     port = 9,
 
     // Fast Extension (BEP 6)
-    suggestPiece = 13,
-    haveAll = 14,
-    haveNone = 15,
-    rejectRequest = 16,
-    allowedFast = 17,
+    suggest_piece = 13,
+    have_all = 14,
+    have_none = 15,
+    reject_request = 16,
+    allowed_fast = 17,
 
     // Extension Protocol (BEP 10)
     extended = 20,
@@ -39,10 +39,10 @@ pub const MessageId = enum(u8) {
         const initialOffset = @sizeOf(u32) + @sizeOf(u8);
 
         const rest: usize = switch (self) {
-            .choke, .unchoke, .interested, .notInterested, .bitfield, .haveAll, .haveNone => 0,
-            .have, .suggestPiece, .allowedFast => @sizeOf(u32),
+            .choke, .unchoke, .interested, .not_interested, .bitfield, .have_all, .have_none => 0,
+            .have, .suggest_piece, .allowed_fast => @sizeOf(u32),
             .piece => @sizeOf(u32) * 2,
-            .request, .cancel, .rejectRequest => @sizeOf(u32) * 3,
+            .request, .cancel, .reject_request => @sizeOf(u32) * 3,
             .port => @sizeOf(u16),
             .extended => 1,
         };
@@ -55,7 +55,7 @@ pub const Message = union(MessageId) {
     choke: void,
     unchoke: void,
     interested: void,
-    notInterested: void,
+    not_interested: void,
     have: u32,
     bitfield: u32,
     request: Piece,
@@ -64,11 +64,11 @@ pub const Message = union(MessageId) {
     port: u16,
 
     // Fast Extension
-    suggestPiece: u32,
-    haveAll: void,
-    haveNone: void,
-    rejectRequest: Piece,
-    allowedFast: u32,
+    suggest_piece: u32,
+    have_all: void,
+    have_none: void,
+    reject_request: Piece,
+    allowed_fast: u32,
 
     // Extension Protocol
     extended: Extended,
@@ -82,21 +82,21 @@ pub const Message = union(MessageId) {
             .choke,
             .unchoke,
             .interested,
-            .notInterested,
-            .haveAll,
-            .haveNone,
+            .not_interested,
+            .have_all,
+            .have_none,
             => idSize,
 
             .port => idSize + @sizeOf(u16),
 
             // ID (1) + Index (4)
-            .have, .suggestPiece, .allowedFast => idSize + u32Size,
+            .have, .suggest_piece, .allowed_fast => idSize + u32Size,
 
             // ID (1) + Raw bytes
             .bitfield => |l| idSize + l,
 
             // ID (1) + Index (4) + Begin (4) + Length (4)
-            .request, .cancel, .rejectRequest => idSize + (u32Size * 3),
+            .request, .cancel, .reject_request => idSize + (u32Size * 3),
 
             // ID (1) + Index (4) + Begin (4) + Raw block data
             .piece => |p| idSize + (u32Size * 2) + p.len,
@@ -114,18 +114,18 @@ pub const Message = union(MessageId) {
             .choke,
             .unchoke,
             .interested,
-            .notInterested,
-            .haveAll,
-            .haveNone,
+            .not_interested,
+            .have_all,
+            .have_none,
             => {},
 
-            .have, .suggestPiece, .allowedFast => |idx| try w.writeInt(u32, idx, .big),
+            .have, .suggest_piece, .allowed_fast => |idx| try w.writeInt(u32, idx, .big),
 
             .port => |p| try w.writeInt(u16, p, .big),
 
             .bitfield => try w.writeAll(data),
 
-            .request, .cancel, .rejectRequest => |r| {
+            .request, .cancel, .reject_request => |r| {
                 try w.writeInt(u32, r.index, .big);
                 try w.writeInt(u32, r.begin, .big);
                 try w.writeInt(u32, r.len, .big);
