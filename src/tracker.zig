@@ -230,7 +230,11 @@ pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
     sw: switch (client.state) {
         .handshake => {
-            const handshake = try client.tlsHandshake(alloc);
+            const handshake = switch (client.tls) {
+                .none => unreachable,
+                .connection => return error.NoTlsClient,
+                .handshake => |*h| h,
+            };
 
             switch (handshake.state) {
                 .write => {
@@ -387,7 +391,7 @@ pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
     return op;
 }
 
-pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(Stats, "event")) !Operation {
+pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(Stats, "event")) !void {
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
 
@@ -431,8 +435,6 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         .num_want = self.num_want,
         .event = event,
     };
-
-    return try self.nextOperation(alloc) orelse unreachable;
 }
 
 pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {

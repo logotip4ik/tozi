@@ -106,11 +106,10 @@ pub fn downloadTorrent(
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.total_len - tracker.downloaded;
 
-                switch (try tracker.enqueueEvent(alloc, if (tracker.addrs.items.len == 0) .started else .none)) {
-                    .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
-                    .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
-                    .timer => unreachable, // shouldn't be available on first call
-                }
+                try tracker.enqueueEvent(alloc, if (tracker.addrs.items.len == 0) .started else .none);
+                try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer);
+                try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer);
+                try kq.disable(tracker.client.socket(), .read);
 
                 try kq.addTimer(
                     tg.pack(.{ .trackerClient = &tracker.client }),
@@ -204,12 +203,11 @@ pub fn downloadTorrent(
                     if (pieces.isDownloadComplete()) {
                         tracker.downloaded = pieces.downloaded;
                         tracker.left = torrent.total_len - tracker.downloaded;
-                        const op = tracker.enqueueEvent(alloc, .completed) catch return;
-                        switch (op) {
-                            .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
-                            .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
-                            .timer => unreachable, // shouldn't be available on first call
-                        }
+
+                        tracker.enqueueEvent(alloc, .completed) catch return;
+                        try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer);
+                        try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer);
+                        try kq.disable(tracker.client.socket(), .read);
 
                         for (peers.items) |otherPeer| {
                             kq.killSocket(otherPeer.socket.fd);
@@ -243,12 +241,12 @@ pub fn downloadTorrent(
 
                 if (nextOperation) |x| switch (x) {
                     .read => {
-                        try kq.delete(socket, .write);
-                        try kq.subscribe(socket, .read, trackerTaggedPointer);
+                        try kq.disable(socket, .write);
+                        try kq.enable(socket, .read, trackerTaggedPointer);
                     },
                     .write => {
-                        try kq.delete(socket, .read);
-                        try kq.subscribe(socket, .write, trackerTaggedPointer);
+                        try kq.disable(socket, .read);
+                        try kq.enable(socket, .write, trackerTaggedPointer);
                     },
                     .timer => |timer| {
                         kq.killSocket(socket);
@@ -857,11 +855,10 @@ pub fn downloadMagnet(
     while (try kq.next()) |ev| {
         if (ev.kind == .timer) switch (tg.unpack(ev.ident)) {
             .tracker => {
-                switch (try tracker.enqueueEvent(alloc, .started)) {
-                    .read => try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer),
-                    .write => try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer),
-                    .timer => unreachable, // shouldn't be available on first call
-                }
+                try tracker.enqueueEvent(alloc, .started);
+                try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
+                try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
+                try kq.disable(tracker.client.socket(), .read);
 
                 try kq.addTimer(
                     tg.pack(.{ .trackerClient = &tracker.client }),
@@ -914,12 +911,12 @@ pub fn downloadMagnet(
 
                 if (nextOperation) |x| switch (x) {
                     .read => {
-                        try kq.delete(socket, .write);
-                        try kq.subscribe(socket, .read, tracker_tagged_pointer);
+                        try kq.disable(socket, .write);
+                        try kq.enable(socket, .read, tracker_tagged_pointer);
                     },
                     .write => {
-                        try kq.delete(socket, .read);
-                        try kq.subscribe(socket, .write, tracker_tagged_pointer);
+                        try kq.disable(socket, .read);
+                        try kq.enable(socket, .write, tracker_tagged_pointer);
                     },
                     .timer => {
                         kq.killSocket(socket);

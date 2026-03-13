@@ -87,6 +87,9 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
     };
 
     self.socket = &self.socketPosix.?.interface;
+    if (isHttps) {
+        self.tls = .{ .handshake = try .init(alloc, host, self.socket) };
+    }
 
     return self;
 }
@@ -103,18 +106,6 @@ pub fn deinit(self: *TrackerHttp, alloc: std.mem.Allocator) void {
     }
 
     if (self.socketPosix) |x| std.posix.close(x.fd);
-}
-
-pub fn tlsHandshake(self: *TrackerHttp, alloc: std.mem.Allocator) !*TlsHandshake {
-    return switch (self.tls) {
-        .handshake => |*h| h,
-        .connection => error.HandshakeAlreadyEstablished,
-        .none => {
-            utils.assert(self.state == .handshake);
-            self.tls = .{ .handshake = try .init(alloc, self) };
-            return &self.tls.handshake;
-        },
-    };
 }
 
 pub const TlsHandshake = struct {
@@ -140,12 +131,9 @@ pub const TlsHandshake = struct {
         done: Tls.Cipher,
     },
 
-    pub fn init(alloc: std.mem.Allocator, tracker: *const TrackerHttp) !TlsHandshake {
+    pub fn init(alloc: std.mem.Allocator, host: []const u8, socket: *Socket) !TlsHandshake {
         var caBundle = try Tls.config.cert.fromSystem(alloc);
         errdefer caBundle.deinit(alloc);
-
-        var hostBuf: [std.Uri.host_name_max]u8 = undefined;
-        const host = try tracker.uri.getHost(&hostBuf);
 
         const client = Tls.nonblock.Client.init(.{
             .host = host,
@@ -156,7 +144,7 @@ pub const TlsHandshake = struct {
         return .{
             .caBundle = caBundle,
             .client = client,
-            .socket = tracker.socket,
+            .socket = socket,
             .state = .write,
             .res = null,
         };
@@ -216,7 +204,7 @@ pub const TlsHandshake = struct {
 
         try std.testing.expectEqual(State.handshake, t.state);
 
-        const handshake = try t.tlsHandshake(alloc);
+        const handshake = &t.tls.handshake;
 
         const KQ = @import("kq.zig");
         var kq: KQ = try .init();
@@ -721,7 +709,7 @@ test "make https request" {
 
         sw: switch (t.state) {
             .handshake => {
-                const handshake = try t.tlsHandshake(alloc);
+                const handshake = &t.tls.handshake;
 
                 switch (e.kind) {
                     .timer => unreachable,
