@@ -32,8 +32,8 @@ port: u16 = MY_PORT_DEFAULT,
 
 client: Client = .none,
 
-addrs_new: std.array_list.Aligned(NewAddr, null) = .empty,
-addrs_old: std.array_list.Aligned(std.net.Address, null) = .empty,
+addrs: std.array_list.Aligned(AddrWithPriority, null) = .empty,
+addr_current: u16 = 0,
 
 tiers: Torrent.Tiers,
 
@@ -47,11 +47,11 @@ ip_vote: IpVote = .empty,
 
 const IpVote = std.hash_map.AutoHashMapUnmanaged([4]u8, u16);
 
-const NewAddr = struct {
+const AddrWithPriority = struct {
     addr: std.net.Address,
     priority: u32,
 
-    pub fn lessThen(_: void, a: NewAddr, b: NewAddr) bool {
+    pub fn lessThen(_: void, a: AddrWithPriority, b: AddrWithPriority) bool {
         return a.priority < b.priority;
     }
 };
@@ -142,8 +142,7 @@ pub fn fromMagnet(
 }
 
 pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
-    self.addrs_old.deinit(alloc);
-    self.addrs_new.deinit(alloc);
+    self.addrs.deinit(alloc);
     self.ip_vote.deinit(alloc);
 
     for (self.tiers.items) |*x| x.deinit(alloc);
@@ -152,7 +151,6 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.client.deinit(alloc);
 }
 
-/// NOTE: after adding new address ensure `oldAddrs` have the same length as the `newAddrs`
 /// NOTE: ensure to call `sortNewAddrs` after batch call
 pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Address) !void {
     if (peer.any.family != std.posix.AF.INET) {
@@ -170,17 +168,17 @@ pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Addres
     // Block loopback (127.0.0.1)
     if (builtin.mode != .Debug and ip == 0x0100007f) return;
 
-    for (self.addrs_new.items) |item| if (item.addr.eql(peer)) return;
-    for (self.addrs_old.items) |addr| if (addr.eql(peer)) return;
+    for (self.addrs.items) |item| if (item.addr.eql(peer)) return;
 
-    try self.addrs_new.append(alloc, .{ .addr = peer, .priority = 0 });
+    try self.addrs.append(alloc, .{ .addr = peer, .priority = 0 });
 }
 
 pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.net.Address) !void {
     for (peers) |peer| try self.addNewAddr(alloc, peer);
 
-    std.log.debug("tracker: added {d} new addrs", .{self.addrs_new.items.len});
-    try self.addrs_old.ensureUnusedCapacity(alloc, self.addrs_new.items.len);
+    std.log.debug("tracker: added {d} new addrs", .{
+        self.addrs.items.len - self.addr_current,
+    });
 
     if (self.myIp()) |my_ip| self.sortNewAddrs(my_ip);
 }
@@ -216,7 +214,7 @@ pub fn voteForIp(self: *Tracker, alloc: std.mem.Allocator, ip: [4]u8, source: en
 }
 
 pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
-    for (self.addrs_new.items) |*item| {
+    for (self.addrs.items) |*item| {
         if (item.priority != 0) continue;
         item.priority = computeBep40Priority(
             my_ip,
@@ -226,7 +224,7 @@ pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
         );
     }
 
-    std.mem.sortUnstable(NewAddr, self.addrs_new.items, {}, NewAddr.lessThen);
+    std.mem.sortUnstable(AddrWithPriority, self.addrs.items, {}, AddrWithPriority.lessThen);
 }
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
@@ -465,9 +463,12 @@ pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {
 }
 
 pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
-    const newPeer = self.addrs_new.pop() orelse return null;
+    if (self.addr_current >= self.addrs.items.len) {
+        return null;
+    }
 
-    self.addrs_old.appendAssumeCapacity(newPeer.addr);
+    const newPeer = self.addrs.items[self.addr_current];
+    self.addr_current += 1;
 
     return newPeer.addr;
 }

@@ -106,7 +106,7 @@ pub fn downloadTorrent(
                 tracker.downloaded = pieces.downloaded;
                 tracker.left = torrent.total_len - tracker.downloaded;
 
-                switch (try tracker.enqueueEvent(alloc, if (tracker.addrs_old.items.len == 0) .started else .none)) {
+                switch (try tracker.enqueueEvent(alloc, if (tracker.addrs.items.len == 0) .started else .none)) {
                     .read => try kq.subscribe(tracker.client.socket(), .read, trackerTaggedPointer),
                     .write => try kq.subscribe(tracker.client.socket(), .write, trackerTaggedPointer),
                     .timer => unreachable, // shouldn't be available on first call
@@ -454,7 +454,6 @@ pub fn downloadTorrent(
                                 }
 
                                 if (tracker.myIp()) |my_ip| tracker.sortNewAddrs(my_ip);
-                                try tracker.addrs_old.ensureUnusedCapacity(alloc, tracker.addrs_new.items.len);
 
                                 std.log.debug("peer: {d}, received PEX message, added {d}, dropped {d}", .{
                                     peer.socket.fd,
@@ -765,7 +764,8 @@ fn initializeNewPeers(
         if (peers.items.len >= peers_max) break;
     }
 
-    if (peers.items.len == 0 and tracker.addrs_new.items.len == 0) {
+    const addrs_new_count = tracker.addrs.items.len - tracker.addr_current;
+    if (peers.items.len == 0 and addrs_new_count == 0) {
         std.log.info("no pending or alive peers left", .{});
         return error.DeadTorrent;
     }
@@ -1145,7 +1145,8 @@ pub fn downloadMagnet(
                 }
             }
 
-            if (peers.items.len == 0 and tracker.addrs_old.items.len == 0) {
+            const addrs_new_count = tracker.addrs.items.len - tracker.addr_current;
+            if (peers.items.len == 0 and addrs_new_count == 0) {
                 try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
             } else {
                 try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
