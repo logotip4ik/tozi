@@ -62,14 +62,12 @@ pub fn main() !void {
         };
         defer file.close();
 
-        const read_buf_size = 32 * 1024;
-        var read_buf: std.Io.Writer.Allocating = try .initCapacity(alloc, read_buf_size);
-        defer read_buf.deinit();
+        var buf: [32 * 1024]u8 = undefined;
+        var reader = file.reader(&buf);
+        const contents = try reader.interface.allocRemaining(alloc, .limited(std.math.maxInt(u32)));
+        defer alloc.free(contents);
 
-        var reader = file.reader(&.{});
-        _ = try reader.interface.stream(&read_buf.writer, .limited(read_buf_size));
-
-        break :blk try .fromSlice(alloc, read_buf.written());
+        break :blk try .fromSlice(alloc, contents);
     };
     defer torrent.deinit(alloc);
 

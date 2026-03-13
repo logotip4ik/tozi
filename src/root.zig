@@ -454,7 +454,7 @@ pub fn downloadTorrent(
                                 }
 
                                 if (tracker.myIp()) |my_ip| tracker.sortNewAddrs(my_ip);
-                                try tracker.addrs_old.ensureTotalCapacity(alloc, tracker.addrs_new.items.len);
+                                try tracker.addrs_old.ensureUnusedCapacity(alloc, tracker.addrs_new.items.len);
 
                                 std.log.debug("peer: {d}, received PEX message, added {d}, dropped {d}", .{
                                     peer.socket.fd,
