@@ -214,7 +214,9 @@ pub fn voteForIp(self: *Tracker, alloc: std.mem.Allocator, ip: [4]u8, source: en
 }
 
 pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
-    for (self.addrs.items) |*item| {
+    const newItems = self.addrs.items[self.addr_current..];
+
+    for (newItems) |*item| {
         if (item.priority != 0) continue;
         item.priority = computeBep40Priority(
             my_ip,
@@ -224,7 +226,7 @@ pub fn sortNewAddrs(self: *Tracker, my_ip: [4]u8) void {
         );
     }
 
-    std.mem.sortUnstable(AddrWithPriority, self.addrs.items, {}, AddrWithPriority.lessThen);
+    std.mem.sortUnstable(AddrWithPriority, newItems, {}, AddrWithPriority.lessThen);
 }
 
 fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerHttp) !Operation {
