@@ -10,8 +10,12 @@ const Pex = @import("pex.zig");
 
 const Peer = @This();
 
+var next_id: u32 = 0;
+
 const DEFAULT_IN_FLIGHT_REQUESTS = 50;
 const DEFAULT_ALLOWED_FAST = 10;
+
+id: u32,
 
 address: std.net.Address,
 
@@ -84,6 +88,7 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !*Peer {
     };
 
     self.* = .{
+        .id = next_id,
         .address = addr,
         .socket = .init(fd),
         .buf_read = .init(alloc),
@@ -91,6 +96,8 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !*Peer {
         .in_flight = try .init(alloc, DEFAULT_IN_FLIGHT_REQUESTS),
         .allowed_fast = try .initCapacity(alloc, DEFAULT_ALLOWED_FAST),
     };
+
+    next_id += 1;
 
     return self;
 }

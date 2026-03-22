@@ -22,6 +22,7 @@ const ENABLE_EXTENSION = true;
 const ENABLE_PEX = true;
 const PEERS_MAX = 30;
 const CLIENT_NAME = "Tozi 0.1";
+const WORKER_MESSAGE_SIZE = 20;
 
 const tg = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
@@ -174,18 +175,24 @@ pub fn downloadTorrent(
             .ticker, .trackerClient => unreachable,
             .peer => {},
             .pieces => {
-                var buf: [256]u8 = undefined;
+                var buf: [WORKER_MESSAGE_SIZE * 12]u8 = undefined;
                 const count = try std.posix.read(readPipe, &buf);
 
-                utils.assert(@rem(count, 16) == 0);
+                utils.assert(@rem(count, WORKER_MESSAGE_SIZE) == 0);
 
                 var r: std.Io.Reader = .fixed(buf[0..count]);
-                while (r.peek(16) catch null) |_| {
-                    const peer: *Peer = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
+                while (r.peek(WORKER_MESSAGE_SIZE) catch null) |_| {
+                    const peer_id = r.takeInt(u32, .big) catch unreachable;
+                    const peer_ptr = r.takeInt(usize, .big) catch unreachable;
                     const piece: *PieceManager.PieceBuf = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
-
                     defer pieces.consumePieceBuf(alloc, piece);
-                    defer if (peer.working_on) |*x| x.unset(piece.index);
+
+                    for (peers.items) |p| {
+                        if (@intFromPtr(p) == peer_ptr and p.id == peer_id) {
+                            if (p.working_on) |*x| x.unset(piece.index);
+                            break;
+                        }
+                    }
 
                     if (piece.fetched == 0) {
                         pieces.reset(piece.index);
@@ -665,6 +672,7 @@ pub fn downloadTorrent(
                         try pool.spawn(hashAndWrite, .{
                             writePipe,
                             peer,
+                            peer.id,
                             fullPiece,
                             torrent,
                             files,
@@ -775,14 +783,18 @@ fn initializeNewPeers(
 
 fn hashAndWrite(
     writeFd: std.posix.socket_t,
-    peer: *const Peer,
+    peer_ptr: *const Peer,
+    peer_id: u32,
     piece: *PieceManager.PieceBuf,
     torrent: *const Torrent,
     files: *const Files,
 ) void {
-    var peerAndPointersBytes: [16]u8 = undefined;
-    std.mem.writeInt(usize, peerAndPointersBytes[0..8], @intFromPtr(peer), .big);
-    std.mem.writeInt(usize, peerAndPointersBytes[8..16], @intFromPtr(piece), .big);
+    var pipeBytes: [WORKER_MESSAGE_SIZE]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&pipeBytes);
+
+    w.writeInt(u32, peer_id, .big) catch unreachable;
+    w.writeInt(usize, @intFromPtr(peer_ptr), .big) catch unreachable;
+    w.writeInt(usize, @intFromPtr(piece), .big) catch unreachable;
 
     const expectedHash = torrent.pieces[piece.index * 20 ..];
     const computedHash = hasher.hash(piece.written());
@@ -799,14 +811,14 @@ fn hashAndWrite(
     } else {
         @branchHint(.unlikely);
 
-        std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer.socket.fd });
+        std.log.warn("piece: {d} corrupt from peer {d}", .{ piece.index, peer_ptr.socket.fd });
 
         // mark as errored
         piece.fetched = 0;
     }
 
-    const wrote = std.posix.write(writeFd, &peerAndPointersBytes) catch @panic("failed writing to thread pipe");
-    utils.assert(wrote == peerAndPointersBytes.len);
+    const wrote = std.posix.write(writeFd, &pipeBytes) catch @panic("failed writing to thread pipe");
+    utils.assert(wrote == pipeBytes.len);
 }
 
 const DownloadMagnetContext = struct {
