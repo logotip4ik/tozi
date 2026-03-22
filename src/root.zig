@@ -159,9 +159,12 @@ pub fn downloadTorrent(
                         pex.dropped.items.len,
                     });
 
-                    const ready = try peer.addMessage(.{
+                    const ready = peer.addMessage(.{
                         .extended = .{ .id = pex_key, .len = @intCast(pex_message.len) },
-                    }, pex_message);
+                    }, pex_message) catch {
+                        peer.state = .dead;
+                        continue;
+                    };
                     if (!ready) try kq.enable(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                 };
 
@@ -202,8 +205,11 @@ pub fn downloadTorrent(
 
                     pieces.complete(piece);
 
-                    for (peers.items) |other_peer| if (other_peer.state.isConnected()) {
-                        const ready = try other_peer.addMessage(.{ .have = piece.index }, &.{});
+                    for (peers.items) |other_peer| if (other_peer.state.isConnected()) blk: {
+                        const ready = other_peer.addMessage(.{ .have = piece.index }, &.{}) catch {
+                            other_peer.state = .dead;
+                            break :blk;
+                        };
                         if (!ready) try kq.enable(other_peer.socket.fd, .write, tg.pack(.{ .peer = other_peer }));
                     };
 
@@ -342,7 +348,10 @@ pub fn downloadTorrent(
                     peer.protocols = matched;
 
                     if (matched.fast and pieces.downloaded == 0) {
-                        const ready = try peer.addMessage(.have_none, &.{});
+                        const ready = peer.addMessage(.have_none, &.{}) catch {
+                            peer.state = .dead;
+                            break :readblk;
+                        };
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                         std.log.debug("peer: {d} sent 'haveNone' message", .{peer.socket.fd});
@@ -350,7 +359,10 @@ pub fn downloadTorrent(
                         const bitfield = try pieces.torrentBitfieldBytes(alloc);
                         defer alloc.free(bitfield);
 
-                        const ready = try peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield);
+                        const ready = peer.addMessage(.{ .bitfield = @intCast(bitfield.len) }, bitfield) catch {
+                            peer.state = .dead;
+                            break :readblk;
+                        };
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     }
 
@@ -372,9 +384,12 @@ pub fn downloadTorrent(
 
                         try extended.encode(alloc, &w);
 
-                        const ready = try peer.addMessage(.{
+                        const ready = peer.addMessage(.{
                             .extended = .{ .id = 0, .len = @intCast(w.buffered().len) },
-                        }, w.buffered());
+                        }, w.buffered()) catch {
+                            peer.state = .dead;
+                            break :readblk;
+                        };
                         if (!ready) try kq.subscribe(peer.socket.fd, .write, event.udata);
                     }
                 },
@@ -504,7 +519,6 @@ pub fn downloadTorrent(
                                     const ready = try peer.fillRqPool(torrent, pieces);
                                     if (!ready) try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                                 }
-
                             },
                             .Metadata => {
                                 // TODO, we probably should be able to retrieve torrent info section
@@ -536,7 +550,10 @@ pub fn downloadTorrent(
                         bitfield.set(piece);
 
                         if (pieces.hasInterestingPiece(bitfield)) {
-                            const ready = try peer.addMessage(.interested, &.{});
+                            const ready = peer.addMessage(.interested, &.{}) catch {
+                                peer.state = .dead;
+                                break :readblk;
+                            };
                             if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
                     },
@@ -553,7 +570,10 @@ pub fn downloadTorrent(
                         peer.working_on = try .initEmpty(alloc, pieces.pieces.len);
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
-                            const ready = try peer.addMessage(.interested, &.{});
+                            const ready = peer.addMessage(.interested, &.{}) catch {
+                                peer.state = .dead;
+                                break :readblk;
+                            };
                             if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
 
                             std.log.debug("peer: {d} sent 'interested' message", .{peer.socket.fd});
@@ -597,7 +617,10 @@ pub fn downloadTorrent(
                         peer.working_on = try .initEmpty(alloc, pieces.pieces.len);
 
                         if (pieces.hasInterestingPiece(peer.bitfield.?)) {
-                            const ready = try peer.addMessage(.interested, &.{});
+                            const ready = peer.addMessage(.interested, &.{}) catch {
+                                peer.state = .dead;
+                                break :readblk;
+                            };
                             if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                         }
                     },
@@ -717,7 +740,10 @@ pub fn downloadTorrent(
 
                         peer.bytes_sent +|= data.len;
 
-                        const ready = try peer.addMessage(.{ .piece = request }, data);
+                        const ready = peer.addMessage(.{ .piece = request }, data) catch {
+                            peer.state = .dead;
+                            break :readblk;
+                        };
                         if (!ready) try kq.enable(peer.socket.fd, .write, event.udata);
                     },
                     .cancel,
@@ -1033,9 +1059,12 @@ pub fn downloadMagnet(
 
                     try extended.encode(alloc, &w);
 
-                    const ready = try peer.addMessage(.{
+                    const ready = peer.addMessage(.{
                         .extended = .{ .id = 0, .len = @intCast(w.buffered().len) },
-                    }, w.buffered());
+                    }, w.buffered()) catch {
+                        peer.state = .dead;
+                        break :readblk;
+                    };
                     if (!ready) try kq.subscribe(peer.socket.fd, .write, ev.udata);
                 },
                 .messageStart => {
