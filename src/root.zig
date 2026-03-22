@@ -268,7 +268,7 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(trackerTaggedPointer, timer, .{ .periodic = false });
 
-                        initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX) catch |err| switch (err) {
+                        initializeNewPeers(alloc, &peers, &tracker, &kq) catch |err| switch (err) {
                             error.DeadTorrent => if (pieces.isDownloadComplete()) {} else {
                                 // tracker timer already scheduled, wait for it
                             },
@@ -468,10 +468,9 @@ pub fn downloadTorrent(
                                     pex.dropped.items.len,
                                 });
 
-                                initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX) catch |err| switch (err) {
-                                    error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
-                                    else => |e| return e,
-                                };
+                                if (!pieces.isDownloadComplete()) {
+                                    try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                                }
                             },
                             .Donthave => {
                                 if (bytes.len != 4) {
@@ -491,17 +490,21 @@ pub fn downloadTorrent(
 
                                 if (peer.bitfield) |*x| x.unset(piece);
                                 if (peer.working_on) |*x| x.unset(piece);
-                                pieces.reset(piece);
 
-                                var i: u16 = @intCast(peer.in_flight.count);
-                                while (i > 0) {
-                                    i -= 1;
-                                    const req = peer.in_flight.buf[i];
-                                    if (req.index == piece) peer.in_flight.receive(req) catch unreachable;
+                                if (pieces.pieces[piece] == .downloading) {
+                                    pieces.reset(piece);
+
+                                    var i: u16 = @intCast(peer.in_flight.count);
+                                    while (i > 0) {
+                                        i -= 1;
+                                        const req = peer.in_flight.buf[i];
+                                        if (req.index == piece) peer.in_flight.receive(req) catch unreachable;
+                                    }
+
+                                    const ready = try peer.fillRqPool(torrent, pieces);
+                                    if (!ready) try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                                 }
 
-                                const ready = try peer.fillRqPool(torrent, pieces);
-                                if (!ready) try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
                             },
                             .Metadata => {
                                 // TODO, we probably should be able to retrieve torrent info section
@@ -621,6 +624,9 @@ pub fn downloadTorrent(
                     },
                     .reject_request => |piece| {
                         peer.state = .messageStart;
+                        if (pieces.pieces[piece.index] == .missing) {
+                            continue;
+                        }
 
                         peer.in_flight.receive(.{
                             .index = piece.index,
@@ -723,7 +729,7 @@ pub fn downloadTorrent(
             };
         }
 
-        if (peer.state.isDead()) {
+        if (peer.state.isDead() or pieces.isDownloadComplete()) {
             if (peer.extended_map.pex) |_| {
                 try kq.deleteTimer(tg.pack(.{ .peer = peer }));
             }
@@ -739,12 +745,11 @@ pub fn downloadTorrent(
                 }
             }
 
-            initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX) catch |err| switch (err) {
-                error.DeadTorrent => if (pieces.isDownloadComplete()) {} else {
-                    try kq.addTimer(trackerTaggedPointer, 0, .{ .periodic = false });
-                },
-                else => |e| return e,
-            };
+            if (pieces.isDownloadComplete()) {
+                continue;
+            }
+
+            try initializeNewPeers(alloc, &peers, &tracker, &kq);
         }
     }
 }
@@ -754,9 +759,8 @@ fn initializeNewPeers(
     peers: *Peers,
     tracker: *Tracker,
     kq: *KQ,
-    peers_max: u8,
 ) !void {
-    if (peers.items.len > peers_max) return;
+    if (peers.items.len == peers.capacity) return;
 
     // don't waste returned addr, because it's already moved to `oldAddrs`
     while (tracker.nextNewPeer()) |addr| {
@@ -771,7 +775,7 @@ fn initializeNewPeers(
 
         peers.appendAssumeCapacity(peer);
 
-        if (peers.items.len >= peers_max) break;
+        if (peers.items.len == peers.capacity) return;
     }
 
     const addrs_new_count = tracker.addrs.items.len - tracker.addr_current;
@@ -862,7 +866,7 @@ pub fn downloadMagnet(
 
             peers.appendAssumeCapacity(peer);
 
-            if (i == PEERS_MAX) break;
+            if (i == peers.capacity) break;
         }
     }
 
@@ -941,7 +945,7 @@ pub fn downloadMagnet(
                         // pipes, but we have our custom timer with "socket" id
                         try kq.deleteTimer(tg.pack(.{ .trackerClient = &tracker.client }));
 
-                        try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+                        try initializeNewPeers(alloc, &peers, &tracker, &kq);
                     },
                 };
 
@@ -1162,7 +1166,7 @@ pub fn downloadMagnet(
             if (peers.items.len == 0 and addrs_new_count == 0) {
                 try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
             } else {
-                try initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX);
+                try initializeNewPeers(alloc, &peers, &tracker, &kq);
             }
         }
     }

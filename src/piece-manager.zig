@@ -233,6 +233,8 @@ pub fn downloading(self: *PieceManager, index: u32) void {
 }
 
 pub fn reset(self: *PieceManager, index: u32) void {
+    utils.assert(self.pieces[index] != .missing);
+
     self.pieces[index] = .missing;
     self.missing_count += 1;
 
@@ -240,6 +242,8 @@ pub fn reset(self: *PieceManager, index: u32) void {
 }
 
 pub fn complete(self: *PieceManager, piece: *PieceBuf) void {
+    utils.assert(self.pieces[piece.index] != .have);
+
     self.pieces[piece.index] = .have;
     self.completed_count += 1;
     self.downloaded += piece.fetched;
