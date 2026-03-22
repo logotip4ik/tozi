@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_zig_zon = @import("./build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -16,6 +17,13 @@ pub fn build(b: *std.Build) void {
         .single_threaded = true,
     });
 
+    const build_options = b.addOptions();
+    build_options.addOption(
+        std.SemanticVersion,
+        "version",
+        std.SemanticVersion.parse(build_zig_zon.version) catch unreachable,
+    );
+
     const toziMod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -23,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "hasher", .module = hasherMod },
             .{ .name = "tls", .module = tlsDep.module("tls") },
+            .{ .name = "build_options", .module = build_options.createModule() },
         },
     });
 
@@ -34,6 +43,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "tozi", .module = toziMod },
+                .{ .name = "build_options", .module = build_options.createModule() },
             },
         }),
     };

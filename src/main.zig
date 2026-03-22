@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 const tozi = @import("tozi");
 
@@ -29,6 +30,32 @@ const Heap = if (builtin.mode == .Debug) struct {
     pub fn deinit(_: *@This()) void {}
 };
 
+const Command = enum {
+    download,
+    @"continue",
+    verify,
+    info,
+    version,
+    help,
+};
+
+const command_descriptions: std.static_string_map.StaticStringMap([]const u8) = .initComptime([_]struct { []const u8, []const u8 }{
+    .{ "download", "Download torrent from a file or magnet link" },
+    .{ "continue", "Check how much of the torrent is already downloaded. Accepts torrent files as well as magnet links" },
+    .{ "verify", "Check the integrity of the torrent files. Logs success message if the whole torrent is downloaded" },
+    .{ "info", "Display metadata for a torrent file or magnet link (will firstly fetch torrent file for magnet links)" },
+    .{ "version", "Show build information" },
+    .{ "help", "Show this message" },
+});
+
+comptime {
+    for (std.meta.fieldNames(Command)) |field| {
+        if (command_descriptions.get(field)) |_| {} else {
+            @compileError(field ++ " is missing from command_descriptions");
+        }
+    }
+}
+
 pub fn main() !void {
     var heap: Heap = .init();
     defer heap.deinit();
@@ -38,12 +65,38 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
-    if (args.len < 3) {
-        std.log.err("provide command to run `download`, `continue`, `verify` or `info` + path to torrent file", .{});
+    const stdout = std.fs.File.stdout();
+    var stdout_buf: [256]u8 = undefined;
+    var out = stdout.writer(&stdout_buf);
+    defer out.interface.flush() catch {};
+
+    if (args.len < 2) {
+        try printHelp(&out.interface);
         return;
     }
 
-    const command = args[1];
+    const command = std.meta.stringToEnum(Command, args[1]) orelse {
+        std.log.err("{s} is not recognized as command\n", .{args[1]});
+        try printHelp(&out.interface);
+        return;
+    };
+
+    switch (command) {
+        .help => {
+            try printHelp(&out.interface);
+            return;
+        },
+        .version => {
+            try printVersion(&out.interface);
+            return;
+        },
+        else => if (args.len < 3) {
+            std.log.err("missing required file or url parameter\n", .{});
+            try printHelp(&out.interface);
+            return;
+        },
+    }
+
     const torrent_path = args[2];
 
     const peer_id = tozi.Tracker.generatePeerId();
@@ -71,18 +124,16 @@ pub fn main() !void {
     };
     defer torrent.deinit(alloc);
 
-    if (std.mem.eql(u8, command, "info")) {
+    if (command == .info) {
         torrent.value.dump();
-        std.debug.print("infohash: {x}\n", .{torrent.info_hash});
+        try out.interface.print("info hash: {x}\n", .{torrent.info_hash});
         return;
     }
 
     var files: tozi.Files = try .init(alloc, torrent.files.items);
     defer files.deinit(alloc);
 
-    const isverify = std.mem.eql(u8, command, "verify");
-
-    var pieces: tozi.PieceManager = if (std.mem.eql(u8, command, "continue") or isverify) blk: {
+    var pieces: tozi.PieceManager = if (command == .verify or command == .@"continue") blk: {
         var start = std.time.Timer.start() catch unreachable;
 
         var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.piece_len);
@@ -106,7 +157,7 @@ pub fn main() !void {
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
 
-    if (isverify) {
+    if (command == .verify) {
         return;
     }
 
@@ -122,4 +173,48 @@ pub fn main() !void {
     }, peer_id, &torrent);
 
     std.log.info("finished in: {D}", .{start.read()});
+}
+
+fn printHelp(out: *std.Io.Writer) !void {
+    try out.writeAll(
+        \\tozi - torrent leecher (downloader) built in zig, fast, efficient and small
+        \\
+        \\USAGE:
+        \\  tozi <COMMAND> [FILE_OR_URL]
+        \\
+        \\COMMANDS:
+        \\
+    );
+
+    const command_name_len_max = comptime blk: {
+        var len = 0;
+
+        for (std.meta.fieldNames(Command)) |field| {
+            if (field.len > len) len = field.len;
+        }
+
+        break :blk len;
+    };
+
+    for (std.meta.fieldNames(Command)) |field| {
+        const desc = command_descriptions.get(field) orelse unreachable;
+
+        try out.print("  {s}", .{field});
+        for (field.len..command_name_len_max + 2) |_| try out.writeByte(' ');
+        try out.print("{s}\n", .{ desc });
+    }
+
+    try out.writeByte('\n');
+
+    try out.writeAll(
+        \\EXAMPLES:
+        \\  tozi download "magnet:?xt=urn:btih:..."
+        \\  tozi download ./film.torrent
+        \\  tozi version
+        \\
+    );
+}
+
+fn printVersion(out: *std.Io.Writer) !void {
+    try out.print("{f} {t}\n", .{ build_options.version, builtin.mode });
 }
