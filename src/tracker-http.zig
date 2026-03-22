@@ -193,6 +193,10 @@ pub const TlsHandshake = struct {
     }
 
     test "initiate handshake" {
+        if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+            return error.SkipZigTest;
+        }
+
         const alloc = std.testing.allocator;
 
         var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");
@@ -215,7 +219,7 @@ pub const TlsHandshake = struct {
         switch (handshake.state) {
             .write => try kq.disable(socket, .read),
             .read => try kq.disable(socket, .write),
-            .done => unreachable
+            .done => unreachable,
         }
 
         try kq.addTimer(0, 250, .{ .periodic = false });
@@ -619,6 +623,10 @@ fn getTestTorrent(alloc: std.mem.Allocator, path: []const u8) !Torrent {
 }
 
 test "make request" {
+    if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+        return error.SkipZigTest;
+    }
+
     const alloc = std.testing.allocator;
 
     var torrent = try getTestTorrent(alloc, "./src/test_files/copper.torrent");
@@ -677,6 +685,10 @@ test "make request" {
 }
 
 test "make https request" {
+    if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+        return error.SkipZigTest;
+    }
+
     const alloc = std.testing.allocator;
 
     var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");

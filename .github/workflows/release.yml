@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # - os: windows-latest
+          #   target: x86_64-windows
+          #   artifact_name: windows-x86_64
+          # - os: ubuntu-latest
+          #   target: x86_64-linux
+          #   artifact_name: linux-x86_64
+          - os: ubuntu-latest
+            target: x86_64-freebsd
+            artifact_name: freebsd-x86_64
+          - os: ubuntu-latest
+            target: x86_64-netbsd
+            artifact_name: netbsd-x86_64
+          - os: macos-latest
+            target: x86_64-macos
+            artifact_name: macos-x86_64
+          - os: macos-latest
+            target: aarch64-macos
+            artifact_name: macos-aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          cache-key: ${{ matrix.artifact_name }}-${{ matrix.target }}
+
+      - name: Run tests
+        if: matrix.artifact_name == 'macos-aarch64' || matrix.artifact_name == 'freebsd-x86_64'
+        run: zig build test
+
+      - name: Build project
+        run: zig build --release=fast -Dtarget=${{ matrix.target }} --summary all
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp zig-out/bin/* artifacts/ || true
+          cd artifacts
+          tar -czf ../tozi-${{ matrix.artifact_name }}.tar.gz *
+
+      - name: Generate artifact attestation (Unix)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: tozi-${{ matrix.artifact_name }}.tar.gz
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: tozi-${{ matrix.artifact_name }}
+          path: |
+            tozi-${{ matrix.artifact_name }}.tar.gz
+            tozi-${{ matrix.artifact_name }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get previous tag from tozi repo
+        id: get_previous_tag
+        run: |
+          TAG_NAME=$(curl -s https://api.github.com/repos/logotip4ik/tozi/releases/latest | jq -r '.tag_name')
+          if [ -z "$TAG_NAME" ]; then
+            TAG_NAME=""
+          fi
+
+          # Set output for use in next steps
+          echo "previous_from_tag=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Build Changelog
+        id: github_release
+        uses: mikepenz/release-changelog-builder-action@v6
+        with:
+          mode: COMMIT
+          # allows to generate release notes if previous release failed
+          fromTag: ${{ steps.get_previous_tag.outputs.previous_from_tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          prerelease: false
+          body: ${{steps.github_release.outputs.changelog}}
