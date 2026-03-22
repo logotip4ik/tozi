@@ -24,6 +24,8 @@ pub fn build(b: *std.Build) void {
         std.SemanticVersion.parse(build_zig_zon.version) catch unreachable,
     );
 
+    const build_options_module = build_options.createModule();
+
     const toziMod = b.addModule("tozi", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -31,7 +33,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "hasher", .module = hasherMod },
             .{ .name = "tls", .module = tlsDep.module("tls") },
-            .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "build_options", .module = build_options_module },
         },
     });
 
@@ -43,7 +45,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "tozi", .module = toziMod },
-                .{ .name = "build_options", .module = build_options.createModule() },
+                .{ .name = "build_options", .module = build_options_module },
             },
         }),
     };
@@ -78,4 +80,66 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    try addBumpStep(b, target, build_options_module);
+}
+
+fn addBumpStep(b: *std.Build, target: std.Build.ResolvedTarget, buildOptions: *std.Build.Module) !void {
+    const bump = b.addExecutable(.{
+        .name = "bump",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bump.zig"),
+            .target = target,
+            .imports = &[_]std.Build.Module.Import{
+                .{ .name = "build_options", .module = buildOptions },
+            },
+        }),
+    });
+
+    const runBump = b.addRunArtifact(bump);
+
+    const commits = b.addSystemCommand(&.{
+        "git",
+        "log",
+        "--pretty=format:%s",
+        std.fmt.allocPrint(b.allocator, "v{s}..HEAD", .{build_zig_zon.version}) catch unreachable,
+    });
+    runBump.step.dependOn(&commits.step);
+
+    const generatedBuildZigZon = runBump.addOutputFileArg("build.zig.zon");
+    runBump.addFileArg(commits.captureStdOut());
+    runBump.addFileArg(b.path("build.zig.zon"));
+
+    const wf = b.addUpdateSourceFiles();
+    wf.step.dependOn(&runBump.step);
+    wf.addCopyFileToSource(generatedBuildZigZon, "build.zig.zon");
+
+    const gitAdd = b.addSystemCommand(&.{
+        "git",
+        "add",
+        "build.zig.zon",
+    });
+    gitAdd.step.dependOn(&wf.step);
+
+    const gitCommit = b.addSystemCommand(&.{
+        "git",
+        "commit",
+        "-m chore: bump version",
+    });
+    gitCommit.step.dependOn(&gitAdd.step);
+
+    const tag = b.addExecutable(.{
+        .name = "tag",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/git-tag.zig"),
+            .target = target,
+        }),
+    });
+    const runTag = b.addRunArtifact(tag);
+    runTag.step.dependOn(&gitCommit.step);
+    runTag.addFileArg(runBump.captureStdErr());
+
+    const bumpStep = b.step("bump", "bump package version and commit");
+    bumpStep.dependOn(&wf.step);
+    bumpStep.dependOn(&runTag.step);
 }
