@@ -22,7 +22,10 @@ const MAX_EVENTS = 256;
 const MAX_CHANGE_EVENTS = 64;
 
 pub fn init() !KQ {
-    comptime utils.assert(builtin.os.tag == .macos);
+    comptime switch (builtin.target.os.tag) {
+        .macos, .freebsd, .netbsd => {},
+        else => @compileError("unsupported target"),
+    };
 
     const kqueue = try std.posix.kqueue();
     errdefer std.posix.close(kqueue);
@@ -203,6 +206,14 @@ const CustomEvent = struct {
 };
 
 const FALLBACK_ERROR = std.c.E.CONNRESET;
+const EV_ERROR = switch (builtin.target.os.tag) {
+    .netbsd => 0x4000,
+    else => std.c.EV.ERROR,
+};
+const EV_EOF = switch (builtin.target.os.tag) {
+    .netbsd, .freebsd => 0x8000,
+    else => std.c.EV.EOF,
+};
 
 pub fn next(self: *KQ) NextError!?CustomEvent {
     while (self.evs_index >= self.evs_count) {
@@ -220,13 +231,13 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
 
     var err: ?std.posix.E = null;
 
-    if (ev.flags & std.c.EV.ERROR != 0) {
+    if (ev.flags & EV_ERROR != 0) {
         const code: i32 = @intCast(ev.data);
         err = std.enums.fromInt(std.posix.E, code) orelse blk: {
             std.log.err("unknown registration error: {d}", .{code});
             break :blk FALLBACK_ERROR;
         };
-    } else if (ev.flags & std.c.EV.EOF != 0) { // Check for socket errors/disconnects
+    } else if (ev.flags & EV_EOF != 0) { // Check for socket errors/disconnects
         if (ev.fflags == 0) {
             err = .CONNRESET;
         } else {

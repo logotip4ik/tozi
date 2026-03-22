@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Torrent = @import("torrent.zig");
 const proto = @import("proto.zig");
@@ -274,8 +275,14 @@ const SReader = struct {
             0,
         );
 
+        const MADV_SEQUENTIAL = switch (builtin.target.os.tag) {
+            // https://github.com/NetBSD/src/blob/7ffedda727fa618aa0be8469eba52ba32a6e4825/sys/sys/mman.h#L199
+            .netbsd => 2,
+            else => std.posix.MADV.SEQUENTIAL,
+        };
+
         // Essential optimization
-        _ = std.posix.madvise(ptr.ptr, file.size, std.posix.MADV.SEQUENTIAL) catch {};
+        _ = std.posix.madvise(ptr.ptr, file.size, MADV_SEQUENTIAL) catch {};
 
         self.mptr = ptr;
 
