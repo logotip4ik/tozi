@@ -106,7 +106,9 @@ pub fn main() !void {
     } else try .init(alloc, torrent.pieces);
     defer pieces.deinit(alloc);
 
-    if (isverify) return;
+    if (isverify) {
+        return;
+    }
 
     var start = std.time.Timer.start() catch unreachable;
 

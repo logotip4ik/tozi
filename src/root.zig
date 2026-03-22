@@ -188,7 +188,7 @@ pub fn downloadTorrent(
                     defer if (peer.working_on) |*x| x.unset(piece.index);
 
                     if (piece.fetched == 0) {
-                        pieces.reset(piece);
+                        pieces.reset(piece.index);
 
                         continue;
                     }
@@ -262,7 +262,9 @@ pub fn downloadTorrent(
                         try kq.addTimer(trackerTaggedPointer, timer, .{ .periodic = false });
 
                         initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX) catch |err| switch (err) {
-                            error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
+                            error.DeadTorrent => if (pieces.isDownloadComplete()) {} else {
+                                // tracker timer already scheduled, wait for it
+                            },
                             else => |e| return e,
                         };
                     },
@@ -482,7 +484,7 @@ pub fn downloadTorrent(
 
                                 if (peer.bitfield) |*x| x.unset(piece);
                                 if (peer.working_on) |*x| x.unset(piece);
-                                if (pieces.buffers.get(piece)) |buf| pieces.reset(buf);
+                                pieces.reset(piece);
 
                                 var i: u16 = @intCast(peer.in_flight.count);
                                 while (i > 0) {
@@ -618,7 +620,7 @@ pub fn downloadTorrent(
                             .begin = piece.begin,
                         }) catch {};
 
-                        if (pieces.buffers.get(piece.index)) |buf| pieces.reset(buf);
+                        pieces.reset(piece.index);
                         if (peer.working_on) |*working_on| working_on.unset(piece.index);
 
                         if (peer.working_piece) |x| if (x == piece.index) {
@@ -730,7 +732,9 @@ pub fn downloadTorrent(
             }
 
             initializeNewPeers(alloc, &peers, &tracker, &kq, PEERS_MAX) catch |err| switch (err) {
-                error.DeadTorrent => if (pieces.isDownloadComplete()) {} else return err,
+                error.DeadTorrent => if (pieces.isDownloadComplete()) {} else {
+                    try kq.addTimer(trackerTaggedPointer, 0, .{ .periodic = false });
+                },
                 else => |e| return e,
             };
         }

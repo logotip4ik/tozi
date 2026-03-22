@@ -232,11 +232,11 @@ pub fn downloading(self: *PieceManager, index: u32) void {
     if (VERY_VERBOSE) std.log.debug("pieces: downloading {d}", .{index});
 }
 
-pub fn reset(self: *PieceManager, piece: *PieceBuf) void {
-    self.pieces[piece.index] = .missing;
+pub fn reset(self: *PieceManager, index: u32) void {
+    self.pieces[index] = .missing;
     self.missing_count += 1;
 
-    if (VERY_VERBOSE) std.log.debug("pieces: reseting {d}", .{piece.index});
+    if (VERY_VERBOSE) std.log.debug("pieces: reseting {d}", .{index});
 }
 
 pub fn complete(self: *PieceManager, piece: *PieceBuf) void {
@@ -256,8 +256,8 @@ pub fn killPeer(self: *PieceManager, workingOn: ?std.DynamicBitSetUnmanaged) voi
     });
 
     while (iter.next()) |index| {
-        const buf = self.buffers.get(@intCast(index)) orelse continue;
-        self.reset(buf);
+        const idx: u32 = @intCast(index);
+        if (self.pieces[idx] == .downloading) self.reset(idx);
     }
 }
 
