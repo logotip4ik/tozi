@@ -117,7 +117,7 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
 }
 
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
-    utils.assert(size <= Torrent.BLOCK_SIZE * 10);
+    utils.assert(size <= Torrent.BLOCK_SIZE * 16);
 
     if (self.buf_read.writer.end >= size) {
         return;

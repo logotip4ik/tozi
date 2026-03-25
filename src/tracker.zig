@@ -428,6 +428,7 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         self.client = .none;
     }
 
+    std.log.debug("queueing {t} event", .{event});
     self.queued = .{
         .info_hash = self.info_hash,
         .peer_id = self.peer_id,
