@@ -101,11 +101,14 @@ pub fn main() !void {
 
     const peer_id = tozi.Tracker.generatePeerId();
 
+    var loop: tozi.KQ = try .init();
+    defer loop.deinit();
+
     var torrent: tozi.Torrent = if (tozi.utils.isMagnet(torrent_path)) blk: {
         var magnet: tozi.Magnet = try .parse(alloc, torrent_path);
         defer magnet.deinit(alloc);
 
-        try tozi.downloadMagnet(alloc, peer_id, &magnet);
+        try tozi.downloadMagnet(.{ .alloc = alloc, .loop = &loop }, peer_id, &magnet);
 
         break :blk try .fromMagnet(alloc, &magnet);
     } else blk: {
@@ -170,6 +173,7 @@ pub fn main() !void {
         .files = &files,
         .pieces = &pieces,
         .ticker = &ticker,
+        .loop = &loop,
     }, peer_id, &torrent);
 
     std.log.info("finished in: {D}", .{start.read()});

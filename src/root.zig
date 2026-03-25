@@ -34,6 +34,7 @@ const tg = utils.TaggedPointer(union(enum) {
 
 pub const DownloadTorrentContext = struct {
     alloc: std.mem.Allocator,
+    loop: *KQ,
     files: *Files,
     pieces: *PieceManager,
     ticker: ?*Ticker = null,
@@ -52,9 +53,7 @@ pub fn downloadTorrent(
     const alloc = ctx.alloc;
     const files = ctx.files;
     const pieces = ctx.pieces;
-
-    var kq: KQ = try .init();
-    defer kq.deinit();
+    const kq = ctx.loop;
 
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .allocator = alloc });
@@ -274,7 +273,7 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(tracker_tagged_pointer, timer, .{ .periodic = false });
 
-                        try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                        try initializeNewPeers(alloc, &peers, &tracker, kq);
                     },
                 };
 
@@ -479,7 +478,7 @@ pub fn downloadTorrent(
                                 });
 
                                 if (!pieces.isDownloadComplete()) {
-                                    try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                                    try initializeNewPeers(alloc, &peers, &tracker, kq);
                                 }
                             },
                             .Donthave => {
@@ -767,7 +766,7 @@ pub fn downloadTorrent(
             }
 
             if (!pieces.isDownloadComplete()) {
-                try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                try initializeNewPeers(alloc, &peers, &tracker, kq);
             }
         }
     }
@@ -846,16 +845,16 @@ fn hashAndWrite(
 
 const DownloadMagnetContext = struct {
     alloc: std.mem.Allocator,
-    tracker: *Tracker,
+    loop: *KQ,
 };
 
 pub fn downloadMagnet(
-    alloc: std.mem.Allocator,
+    ctx: DownloadMagnetContext,
     peer_id: [20]u8,
     magnet: *Magnet,
 ) !void {
-    var kq: KQ = try .init();
-    defer kq.deinit();
+    const alloc = ctx.alloc;
+    const kq = ctx.loop;
 
     var tracker: Tracker = try .fromMagnet(alloc, peer_id, magnet);
     defer tracker.deinit(alloc);
@@ -964,7 +963,7 @@ pub fn downloadMagnet(
                         // pipes, but we have our custom timer with "socket" id
                         try kq.deleteTimer(tg.pack(.{ .tracker_client = &tracker.client }));
 
-                        try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                        try initializeNewPeers(alloc, &peers, &tracker, kq);
                     },
                 };
 
@@ -1188,7 +1187,7 @@ pub fn downloadMagnet(
             if (peers.items.len == 0 and addrs_new_count == 0) {
                 try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
             } else {
-                try initializeNewPeers(alloc, &peers, &tracker, &kq);
+                try initializeNewPeers(alloc, &peers, &tracker, kq);
             }
         }
     }
