@@ -8,7 +8,23 @@
 ## Usage
 
 ```
-tozi download|continue|verify|info ./path/to/file.torrent|magnet link
+tozi - torrent leecher (downloader) built in zig, fast, efficient and small
+
+USAGE:
+  tozi <COMMAND> [FILE_OR_URL]
+
+COMMANDS:
+  download  Download torrent from a file or magnet link
+  continue  Check how much of the torrent is already downloaded. Accepts torrent files as well as magnet links
+  verify    Check the integrity of the torrent files. Logs success message if the whole torrent is downloaded
+  info      Display metadata for a torrent file or magnet link (will firstly fetch torrent file for magnet links)
+  version   Show build information
+  help      Show this message
+
+EXAMPLES:
+  tozi download "magnet:?xt=urn:btih:..."
+  tozi download ./film.torrent
+  tozi version
 ```
 
 ## Building
