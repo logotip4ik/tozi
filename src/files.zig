@@ -70,9 +70,6 @@ pub fn collectPieces(
     var bitset: std.bit_set.DynamicBitSetUnmanaged = try .initEmpty(alloc, numberOfPieces);
     errdefer bitset.deinit(alloc);
 
-    const pieceBuf = try alloc.alloc(u8, torrentPieceLen);
-    defer alloc.free(pieceBuf);
-
     var hash: [20]u8 = undefined;
 
     var sreader: SReader = try .init(alloc, torrentPieceLen);
