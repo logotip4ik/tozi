@@ -189,28 +189,31 @@ pub fn downloadTorrent(
                     const piece: *PieceManager.PieceBuf = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
                     defer pieces.consumePieceBuf(alloc, piece);
 
+                    const piece_is_valid = piece.fetched != 0;
+                    if (piece_is_valid) {
+                        pieces.complete(piece);
+                    } else {
+                        pieces.reset(piece.index);
+                    }
+
                     for (peers.items) |p| {
                         if (@intFromPtr(p) == peer_ptr and p.id == peer_id) {
                             if (p.working_on) |*x| x.unset(piece.index);
-                            break;
+                            if (!piece_is_valid) break;
+                        }
+
+                        if (piece_is_valid and p.state.isConnected()) {
+                            const ready = p.addMessage(.{ .have = piece.index }, &.{}) catch {
+                                p.state = .dead;
+                                continue;
+                            };
+                            if (!ready) try kq.subscribe(p.socket.fd, .write, tg.pack(.{ .peer = p }));
                         }
                     }
 
-                    if (piece.fetched == 0) {
-                        pieces.reset(piece.index);
-
+                    if (!piece_is_valid) {
                         continue;
                     }
-
-                    pieces.complete(piece);
-
-                    for (peers.items) |other_peer| if (other_peer.state.isConnected()) blk: {
-                        const ready = other_peer.addMessage(.{ .have = piece.index }, &.{}) catch {
-                            other_peer.state = .dead;
-                            break :blk;
-                        };
-                        if (!ready) try kq.enable(other_peer.socket.fd, .write, tg.pack(.{ .peer = other_peer }));
-                    };
 
                     if (pieces.isDownloadComplete()) {
                         tracker.downloaded = pieces.downloaded;
