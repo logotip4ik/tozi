@@ -16,20 +16,6 @@ const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
 
 const Tracker = @This();
 
-peer_id: [20]u8,
-
-info_hash: [20]u8,
-
-uploaded: usize,
-
-downloaded: usize,
-
-left: usize,
-
-num_want: u16 = 100,
-
-port: u16 = MY_PORT_DEFAULT,
-
 client: Client = .none,
 
 addrs: std.array_list.Aligned(AddrWithPriority, null) = .empty,
@@ -39,7 +25,7 @@ tiers: Torrent.Tiers,
 
 used: Source = .{ .tier = 0, .i = 0 },
 
-queued: Stats = undefined,
+queued: ?Stats = null,
 
 operation: Operation = .{ .timer = 0 },
 
@@ -83,9 +69,7 @@ pub const NUM_WANT_DEFAULT = 20;
 
 pub fn init(
     alloc: std.mem.Allocator,
-    peer_id: [20]u8,
     torrent: *const Torrent,
-    downloaded: usize,
 ) !Tracker {
     var cloned: Torrent.Tiers = try .initCapacity(alloc, torrent.tiers.items.len);
     errdefer {
@@ -105,18 +89,12 @@ pub fn init(
     }
 
     return .{
-        .peer_id = peer_id,
-        .info_hash = torrent.info_hash,
         .tiers = cloned,
-        .uploaded = 0,
-        .downloaded = downloaded,
-        .left = torrent.total_len - downloaded,
     };
 }
 
 pub fn fromMagnet(
     alloc: std.mem.Allocator,
-    peerId: [20]u8,
     magnet: *const Magnet,
 ) !Tracker {
     var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
@@ -132,11 +110,6 @@ pub fn fromMagnet(
     tiers.appendAssumeCapacity(urls_cloned);
 
     return .{
-        .peer_id = peerId,
-        .info_hash = magnet.info_hash,
-        .downloaded = 0,
-        .left = 1,
-        .uploaded = 0,
         .tiers = tiers,
     };
 }
@@ -269,7 +242,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             }
         },
         .prepare => {
-            try client.prepareRequest(alloc, &self.queued);
+            try client.prepareRequest(alloc, &self.queued.?);
 
             return .write;
         },
@@ -335,7 +308,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
             continue :sw .prepare_announce;
         },
         .prepare_announce => {
-            try client.prepareAnnounce(&self.queued);
+            try client.prepareAnnounce(&self.queued.?);
 
             return .write;
         },
@@ -393,7 +366,11 @@ pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
     return op;
 }
 
-pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(Stats, "event")) !void {
+pub fn startClient(self: *Tracker, alloc: std.mem.Allocator) !void {
+    utils.assert(self.queued != null);
+
+    std.log.debug("starting tracker client with \"{t}\" event", .{self.queued.?.event});
+
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
 
@@ -427,17 +404,6 @@ pub fn enqueueEvent(self: *Tracker, alloc: std.mem.Allocator, event: @FieldType(
         self.client.deinit(alloc);
         self.client = .none;
     }
-
-    std.log.debug("queueing {t} event", .{event});
-    self.queued = .{
-        .info_hash = self.info_hash,
-        .peer_id = self.peer_id,
-        .left = self.left,
-        .downloaded = self.downloaded,
-        .uploaded = self.uploaded,
-        .num_want = self.num_want,
-        .event = event,
-    };
 }
 
 pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {

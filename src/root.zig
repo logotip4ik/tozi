@@ -41,14 +41,14 @@ pub const DownloadTorrentContext = struct {
 };
 
 const PeerAllocator = std.heap.MemoryPoolExtra(Peer, .{ .alignment = null, .growable = false });
-const Peers = std.array_list.Aligned(*Peer, null);
+const PeerPtrs = std.array_list.Aligned(*Peer, null);
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `in_flight`
 /// requests doesn't track when the request was done, so we don't have a way to check if this chunk
 /// is "stale" and all our download could be broken by one chunk that is "lost"...
 pub fn downloadTorrent(
     ctx: DownloadTorrentContext,
-    peerId: [20]u8,
+    peer_id: [20]u8,
     torrent: *const Torrent,
 ) !void {
     const alloc = ctx.alloc;
@@ -69,7 +69,7 @@ pub fn downloadTorrent(
     var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
     defer peer_allocator.deinit();
 
-    var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
+    var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
     defer {
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
@@ -79,12 +79,7 @@ pub fn downloadTorrent(
         peers.deinit(alloc);
     }
 
-    var tracker: Tracker = try .init(
-        alloc,
-        peerId,
-        torrent,
-        pieces.downloaded,
-    );
+    var tracker: Tracker = try .init(alloc, torrent);
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
@@ -97,7 +92,7 @@ pub fn downloadTorrent(
         );
     }
 
-    const handshake = Handshake.init(peerId, torrent.info_hash, .{
+    const handshake = Handshake.init(peer_id, torrent.info_hash, .{
         .fast = ENABLE_FAST,
         .extended = ENABLE_EXTENSION,
     });
@@ -107,10 +102,19 @@ pub fn downloadTorrent(
     while (try kq.next()) |event| {
         if (event.kind == .timer) switch (tg.unpack(event.ident)) {
             .tracker => {
-                tracker.downloaded = pieces.downloaded;
-                tracker.left = torrent.total_len - tracker.downloaded;
+                if (tracker.queued == null) {
+                    tracker.queued = .{
+                        .info_hash = torrent.info_hash,
+                        .peer_id = peer_id,
+                        .left = torrent.total_len - pieces.downloaded,
+                        .downloaded = pieces.downloaded,
+                        .uploaded = 0,
+                        .num_want = Tracker.NUM_WANT_DEFAULT,
+                        .event = if (tracker.addrs.items.len == 0) .started else .none,
+                    };
+                }
 
-                try tracker.enqueueEvent(alloc, if (tracker.addrs.items.len == 0) .started else .none);
+                try tracker.startClient(alloc);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                 try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                 try kq.disable(tracker.client.socket(), .read);
@@ -188,7 +192,7 @@ pub fn downloadTorrent(
 
                 var r: std.Io.Reader = .fixed(buf[0..count]);
                 while (r.peek(WORKER_MESSAGE_SIZE) catch null) |_| {
-                    const peer_id = r.takeInt(u32, .big) catch unreachable;
+                    const peer_ident = r.takeInt(u32, .big) catch unreachable;
                     const peer_ptr = r.takeInt(usize, .big) catch unreachable;
                     const piece: *PieceManager.PieceBuf = @ptrFromInt(r.takeInt(usize, .big) catch unreachable);
                     defer pieces.consumePieceBuf(alloc, piece);
@@ -201,7 +205,7 @@ pub fn downloadTorrent(
                     }
 
                     for (peers.items) |p| {
-                        if (@intFromPtr(p) == peer_ptr and p.id == peer_id) {
+                        if (@intFromPtr(p) == peer_ptr and p.id == peer_ident) {
                             if (p.working_on) |*x| x.unset(piece.index);
                             if (!piece_is_valid) break;
                         }
@@ -220,10 +224,17 @@ pub fn downloadTorrent(
                     }
 
                     if (pieces.isDownloadComplete()) {
-                        tracker.downloaded = pieces.downloaded;
-                        tracker.left = torrent.total_len - tracker.downloaded;
+                        tracker.queued = .{
+                            .info_hash = torrent.info_hash,
+                            .peer_id = peer_id,
+                            .left = torrent.total_len - pieces.downloaded,
+                            .downloaded = pieces.downloaded,
+                            .uploaded = 0,
+                            .num_want = 1,
+                            .event = .completed,
+                        };
 
-                        tracker.enqueueEvent(alloc, .completed) catch return;
+                        try tracker.startClient(alloc);
                         try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                         try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                         try kq.disable(tracker.client.socket(), .read);
@@ -275,6 +286,7 @@ pub fn downloadTorrent(
                         try kq.deleteTimer(tg.pack(.{ .tracker_client = &tracker.client }));
 
                         if (pieces.isDownloadComplete()) {
+                            std.log.info("successfully downloaded torrent.", .{});
                             return;
                         }
 
@@ -783,7 +795,7 @@ pub fn downloadTorrent(
 fn initializeNewPeers(
     alloc: std.mem.Allocator,
     peer_allocator: *PeerAllocator,
-    peers: *Peers,
+    peers: *PeerPtrs,
     tracker: *Tracker,
     kq: *KQ,
 ) !void {
@@ -869,14 +881,14 @@ pub fn downloadMagnet(
     const alloc = ctx.alloc;
     const kq = ctx.loop;
 
-    var tracker: Tracker = try .fromMagnet(alloc, peer_id, magnet);
+    var tracker: Tracker = try .fromMagnet(alloc, magnet);
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
     var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
     defer peer_allocator.deinit();
 
-    var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
+    var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
     defer {
         for (peers.items) |peer| {
             kq.killSocket(peer.socket.fd);
@@ -914,7 +926,19 @@ pub fn downloadMagnet(
     while (try kq.next()) |ev| {
         if (ev.kind == .timer) switch (tg.unpack(ev.ident)) {
             .tracker => {
-                try tracker.enqueueEvent(alloc, .started);
+                if (tracker.queued == null) {
+                    tracker.queued = .{
+                        .info_hash = magnet.info_hash,
+                        .peer_id = peer_id,
+                        .left = 1,
+                        .downloaded = 1,
+                        .uploaded = 0,
+                        .num_want = Tracker.NUM_WANT_DEFAULT,
+                        .event = .started,
+                    };
+                }
+
+                try tracker.startClient(alloc);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                 try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                 try kq.disable(tracker.client.socket(), .read);
