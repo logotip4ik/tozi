@@ -31,7 +31,7 @@ pub const Stats = struct {
 
 pub const AnnounceResponse = struct {
     /// Seconds client should wait before next announce
-    interval: u32 = undefined,
+    interval: u32,
     peers: std.array_list.Aligned(std.net.Address, null) = .empty,
 
     /// Minimum allowed interval

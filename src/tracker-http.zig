@@ -534,7 +534,7 @@ pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: 
                 );
             }
         },
-        else => return error.MissinPeers,
+        else => return error.MissingPeers,
     };
 
     if (value.inner.dict.get("min interval")) |x| switch (x.inner) {

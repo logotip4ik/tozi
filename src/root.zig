@@ -230,7 +230,7 @@ pub fn downloadTorrent(
                             .left = torrent.total_len - pieces.downloaded,
                             .downloaded = pieces.downloaded,
                             .uploaded = 0,
-                            .num_want = 1,
+                            .num_want = 0,
                             .event = .completed,
                         };
 

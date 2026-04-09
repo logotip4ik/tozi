@@ -256,10 +256,15 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             const content = try client.readRequest(alloc) orelse return .read;
             defer alloc.free(content);
 
-            var announce: AnnounceResponse = .{};
+            var announce: AnnounceResponse = .{ .interval = 0 };
             defer announce.deinit(alloc);
 
-            try TrackerHttp.parseIntoAnnounce(alloc, content, &announce);
+            TrackerHttp.parseIntoAnnounce(alloc, content, &announce) catch |err| switch (err) {
+                error.MissingPeers => if (self.queued.?.event != .completed) {
+                    return error.MissingPeers;
+                },
+                else => |e| return e,
+            };
             std.log.debug("received interval of {d}s", .{announce.interval});
 
             if (announce.external_ip) |your_ip| {
@@ -318,7 +323,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
             return .read;
         },
         .read_announce => {
-            var announce: AnnounceResponse = .{};
+            var announce: AnnounceResponse = .{ .interval = 0 };
             defer announce.deinit(alloc);
 
             try client.readAnnounce(alloc, &announce) orelse return .write;
