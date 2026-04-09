@@ -66,16 +66,12 @@ pub fn downloadTorrent(
     const read_pipe, const write_pipe = thread_pipes;
     try kq.subscribe(read_pipe, .read, tg.pack(.{ .pieces = pieces }));
 
-    var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
+    var peer_allocator: PeerAllocator = try .initPreheated(alloc, PEERS_MAX);
     defer peer_allocator.deinit();
 
     var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
     defer {
-        for (peers.items) |peer| {
-            kq.killSocket(peer.socket.fd);
-            pieces.killPeer(peer.working_on);
-            peer.deinit(alloc);
-        }
+        for (peers.items) |peer| killPeer(alloc, peer, kq, pieces, &peer_allocator);
         peers.deinit(alloc);
     }
 
@@ -239,8 +235,10 @@ pub fn downloadTorrent(
                         try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                         try kq.disable(tracker.client.socket(), .read);
 
-                        for (peers.items) |otherPeer| {
-                            kq.killSocket(otherPeer.socket.fd);
+                        var i = peers.items.len;
+                        while (i > 0) {
+                            i -= 1;
+                            killPeer(alloc, peers.swapRemove(i), kq, pieces, &peer_allocator);
                         }
 
                         break;
@@ -773,23 +771,31 @@ pub fn downloadTorrent(
                 try kq.deleteTimer(tg.pack(.{ .peer = peer }));
             }
 
-            kq.killSocket(peer.socket.fd);
-            pieces.killPeer(peer.working_on);
-            peer.deinit(alloc);
-            peer_allocator.destroy(peer);
-
             for (peers.items, 0..) |other_peer, i| {
                 if (other_peer == peer) {
-                    _ = peers.swapRemove(i);
+                    killPeer(alloc, peers.swapRemove(i), kq, pieces, &peer_allocator);
                     break;
                 }
-            }
+            } else unreachable;
 
             if (!pieces.isDownloadComplete()) {
                 try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
             }
         }
     }
+}
+
+fn killPeer(
+    alloc: std.mem.Allocator,
+    peer: *Peer,
+    kq: *KQ,
+    pieces: *PieceManager,
+    peer_allocator: *PeerAllocator,
+) void {
+    kq.killSocket(peer.socket.fd);
+    pieces.killPeer(peer.working_on);
+    peer.deinit(alloc);
+    peer_allocator.destroy(peer);
 }
 
 fn initializeNewPeers(
@@ -885,7 +891,7 @@ pub fn downloadMagnet(
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
-    var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
+    var peer_allocator: PeerAllocator = try .initPreheated(alloc, PEERS_MAX);
     defer peer_allocator.deinit();
 
     var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
