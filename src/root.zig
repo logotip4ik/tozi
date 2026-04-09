@@ -40,6 +40,7 @@ pub const DownloadTorrentContext = struct {
     ticker: ?*Ticker = null,
 };
 
+const PeerAllocator = std.heap.MemoryPoolExtra(Peer, .{ .alignment = null, .growable = false });
 const Peers = std.array_list.Aligned(*Peer, null);
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `in_flight`
@@ -64,6 +65,9 @@ pub fn downloadTorrent(
 
     const read_pipe, const write_pipe = thread_pipes;
     try kq.subscribe(read_pipe, .read, tg.pack(.{ .pieces = pieces }));
+
+    var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
+    defer peer_allocator.deinit();
 
     var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
     defer {
@@ -276,7 +280,7 @@ pub fn downloadTorrent(
 
                         try kq.addTimer(tracker_tagged_pointer, timer, .{ .periodic = false });
 
-                        try initializeNewPeers(alloc, &peers, &tracker, kq);
+                        try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
                     },
                 };
 
@@ -481,7 +485,7 @@ pub fn downloadTorrent(
                                 });
 
                                 if (!pieces.isDownloadComplete()) {
-                                    try initializeNewPeers(alloc, &peers, &tracker, kq);
+                                    try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
                                 }
                             },
                             .Donthave => {
@@ -760,6 +764,7 @@ pub fn downloadTorrent(
             kq.killSocket(peer.socket.fd);
             pieces.killPeer(peer.working_on);
             peer.deinit(alloc);
+            peer_allocator.destroy(peer);
 
             for (peers.items, 0..) |other_peer, i| {
                 if (other_peer == peer) {
@@ -769,7 +774,7 @@ pub fn downloadTorrent(
             }
 
             if (!pieces.isDownloadComplete()) {
-                try initializeNewPeers(alloc, &peers, &tracker, kq);
+                try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
             }
         }
     }
@@ -777,6 +782,7 @@ pub fn downloadTorrent(
 
 fn initializeNewPeers(
     alloc: std.mem.Allocator,
+    peer_allocator: *PeerAllocator,
     peers: *Peers,
     tracker: *Tracker,
     kq: *KQ,
@@ -785,8 +791,12 @@ fn initializeNewPeers(
 
     // don't waste returned addr, because it's already moved to `oldAddrs`
     while (tracker.nextNewPeer()) |addr| {
-        const peer = Peer.init(alloc, addr) catch |err| {
+        const peer = peer_allocator.create() catch unreachable;
+        errdefer peer_allocator.destroy(peer);
+
+        peer.initPtr(alloc, addr) catch |err| {
             std.log.err("failed connecting with {t}", .{err});
+            peer_allocator.destroy(peer);
             continue;
         };
         errdefer peer.deinit(alloc);
@@ -863,6 +873,9 @@ pub fn downloadMagnet(
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
+    var peer_allocator: PeerAllocator  = try .initPreheated(alloc, PEERS_MAX);
+    defer peer_allocator.deinit();
+
     var peers: Peers = try .initCapacity(alloc, PEERS_MAX);
     defer {
         for (peers.items) |peer| {
@@ -876,11 +889,16 @@ pub fn downloadMagnet(
         try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
     } else {
         for (magnet.peers.items, 0..) |addr, i| {
-            const peer = Peer.init(alloc, addr) catch |err| {
+            if (i == PEERS_MAX) break;
+
+            const peer = peer_allocator.create() catch unreachable;
+            errdefer peer_allocator.destroy(peer);
+
+            peer.initPtr(alloc, addr) catch |err| {
                 std.log.err("failed connecting with {t}", .{err});
+                peer_allocator.destroy(peer);
                 continue;
             };
-            errdefer peer.deinit(alloc);
 
             try kq.subscribe(peer.socket.fd, .write, tg.pack(.{ .peer = peer }));
             errdefer kq.killSocket(kq);
@@ -966,7 +984,7 @@ pub fn downloadMagnet(
                         // pipes, but we have our custom timer with "socket" id
                         try kq.deleteTimer(tg.pack(.{ .tracker_client = &tracker.client }));
 
-                        try initializeNewPeers(alloc, &peers, &tracker, kq);
+                        try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
                     },
                 };
 
@@ -1178,6 +1196,7 @@ pub fn downloadMagnet(
         if (peer.state.isDead()) {
             kq.killSocket(peer.socket.fd);
             peer.deinit(alloc);
+            peer_allocator.destroy(peer);
 
             for (peers.items, 0..) |other_peer, i| {
                 if (other_peer == peer) {
@@ -1190,7 +1209,7 @@ pub fn downloadMagnet(
             if (peers.items.len == 0 and addrs_new_count == 0) {
                 try kq.addTimer(tracker_tagged_pointer, 0, .{ .periodic = false });
             } else {
-                try initializeNewPeers(alloc, &peers, &tracker, kq);
+                try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
             }
         }
     }

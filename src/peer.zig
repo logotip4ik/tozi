@@ -70,10 +70,7 @@ pub const State = union(enum) {
     }
 };
 
-pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !*Peer {
-    const self = try alloc.create(Peer);
-    errdefer alloc.destroy(self);
-
+pub fn initPtr(self: *Peer, alloc: std.mem.Allocator, addr: std.net.Address) !void {
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
@@ -98,8 +95,6 @@ pub fn init(alloc: std.mem.Allocator, addr: std.net.Address) !*Peer {
     };
 
     next_id += 1;
-
-    return self;
 }
 
 pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
@@ -113,7 +108,7 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     if (self.working_on) |*x| x.deinit(alloc);
 
     std.posix.close(self.socket.fd);
-    alloc.destroy(self);
+    self.* = undefined;
 }
 
 pub fn fillReadBuffer(self: *Peer, alloc: std.mem.Allocator, size: usize) !?void {
