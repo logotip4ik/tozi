@@ -10,13 +10,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const hasherMod = b.addModule("hasher", .{
-        .root_source_file = b.path("src/hasher.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .single_threaded = true,
-    });
-
     const build_options = b.addOptions();
     build_options.addOption(
         std.SemanticVersion,
@@ -31,7 +24,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "hasher", .module = hasherMod },
             .{ .name = "tls", .module = tlsDep.module("tls") },
             .{ .name = "build_options", .module = build_options_module },
         },

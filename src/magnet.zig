@@ -4,7 +4,6 @@ const Bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig");
 
 const utils = @import("utils.zig");
-const hasher = @import("hasher");
 const proto = @import("proto.zig");
 
 info_hash: [20]u8 = undefined,
@@ -235,7 +234,9 @@ pub fn isComplete(self: *const Magnet) bool {
 pub fn isValid(self: *const Magnet) bool {
     const buffer = self.buffer orelse return false;
 
-    const hash = hasher.hash(buffer);
+    var hash: [20]u8 = undefined;
+
+    std.crypto.hash.Sha1.hash(buffer, &hash, .{});
 
     return std.mem.eql(u8, hash[0..20], self.info_hash[0..20]);
 }

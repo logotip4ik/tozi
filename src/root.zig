@@ -13,7 +13,6 @@ pub const Ticker = @import("ticker.zig");
 pub const Pex = @import("pex.zig");
 pub const Magnet = @import("magnet.zig");
 
-const hasher = @import("hasher");
 const proto = @import("proto.zig");
 pub const utils = @import("utils.zig");
 
@@ -851,7 +850,9 @@ fn hashAndWrite(
     w.writeInt(usize, @intFromPtr(piece), .big) catch unreachable;
 
     const expectedHash = torrent.pieces[piece.index * 20 ..];
-    const computedHash = hasher.hash(piece.written());
+    var computedHash: [20]u8 = undefined;
+
+    std.crypto.hash.Sha1.hash(piece.written(), &computedHash, .{});
 
     if (std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
         files.writePieceData(piece.index, torrent.piece_len, piece.written()) catch |err| {
