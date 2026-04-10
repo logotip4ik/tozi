@@ -21,12 +21,12 @@ const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
 const ENABLE_PEX = true;
 const PEERS_MAX = 30;
-const CLIENT_NAME = "Tozi 0.1";
+const CLIENT_NAME = "Tozi 1.0";
 const WORKER_MESSAGE_SIZE = 20;
 
 const tg = utils.TaggedPointer(union(enum) {
     tracker: *Tracker,
-    tracker_client: *Tracker.Client,
+    tracker_client_timeout: *Tracker.Client,
     peer: *Peer,
     pieces: *PieceManager,
     ticker: *Ticker,
@@ -116,15 +116,16 @@ pub fn downloadTorrent(
                 try kq.disable(tracker.client.socket(), .read);
 
                 try kq.addTimer(
-                    tg.pack(.{ .tracker_client = &tracker.client }),
+                    tg.pack(.{ .tracker_client_timeout = &tracker.client }),
                     tracker.timeout(),
                     .{ .periodic = false },
                 );
 
                 continue;
             },
-            .tracker_client => |client| {
+            .tracker_client_timeout => |client| {
                 kq.killSocket(client.socket());
+                client.deinit(alloc);
 
                 tracker.useNextUrl(alloc) catch |err| switch (err) {
                     error.NoAnnounceUrlAvailable => {
@@ -178,7 +179,7 @@ pub fn downloadTorrent(
 
         const taggedPointer = tg.unpack(event.udata);
         switch (taggedPointer) {
-            .ticker, .tracker_client => unreachable,
+            .ticker, .tracker_client_timeout => unreachable,
             .peer => {},
             .pieces => {
                 var buf: [WORKER_MESSAGE_SIZE * 12]u8 = undefined;
@@ -281,7 +282,7 @@ pub fn downloadTorrent(
 
                         // closing socket will close "read/write"
                         // pipes, but we have our custom timer with "socket" id
-                        try kq.deleteTimer(tg.pack(.{ .tracker_client = &tracker.client }));
+                        try kq.deleteTimer(tg.pack(.{ .tracker_client_timeout = &tracker.client }));
 
                         if (pieces.isDownloadComplete()) {
                             std.log.info("successfully downloaded torrent.", .{});
@@ -950,17 +951,18 @@ pub fn downloadMagnet(
                 try kq.disable(tracker.client.socket(), .read);
 
                 try kq.addTimer(
-                    tg.pack(.{ .tracker_client = &tracker.client }),
+                    tg.pack(.{ .tracker_client_timeout = &tracker.client }),
                     tracker.timeout(),
                     .{ .periodic = false },
                 );
 
                 continue;
             },
-            .tracker_client => |client| {
+            .tracker_client_timeout => |client| {
                 std.log.info("reached timeout for tracker, trying next one...", .{});
 
                 kq.killSocket(client.socket());
+                client.deinit(alloc);
 
                 tracker.useNextUrl(alloc) catch |err| switch (err) {
                     error.NoAnnounceUrlAvailable => {
@@ -1012,7 +1014,7 @@ pub fn downloadMagnet(
 
                         // closing socket will close "read/write"
                         // pipes, but we have our custom timer with "socket" id
-                        try kq.deleteTimer(tg.pack(.{ .tracker_client = &tracker.client }));
+                        try kq.deleteTimer(tg.pack(.{ .tracker_client_timeout = &tracker.client }));
 
                         try initializeNewPeers(alloc, &peer_allocator, &peers, &tracker, kq);
                     },

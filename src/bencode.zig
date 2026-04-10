@@ -6,7 +6,7 @@ const Inner = union(enum) {
     int: isize,
     string: []const u8,
     list: std.array_list.Aligned(Value, null),
-    dict: std.StringHashMapUnmanaged(Value),
+    dict: std.hash_map.StringHashMapUnmanaged(Value),
 };
 
 inner: Inner,
@@ -41,7 +41,7 @@ pub fn decode(alloc: std.mem.Allocator, reader: *std.Io.Reader, start: usize) !V
         'd' => {
             _ = try reader.discardShort(1);
 
-            var ret: std.StringHashMapUnmanaged(Value) = .empty;
+            var ret: std.hash_map.StringHashMapUnmanaged(Value) = .empty;
             errdefer {
                 var iter = ret.iterator();
                 while (iter.next()) |entry| {
@@ -409,7 +409,7 @@ test "value dict encode" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
 
-    var map: std.StringHashMapUnmanaged(Value) = .empty;
+    var map: std.hash_map.StringHashMapUnmanaged(Value) = .empty;
     defer map.deinit(std.testing.allocator);
 
     try map.ensureTotalCapacity(std.testing.allocator, 2);

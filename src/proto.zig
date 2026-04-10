@@ -74,7 +74,7 @@ pub const Message = union(MessageId) {
     extended: Extended,
 
     /// Length of the message defined by torrent protocol
-    inline fn len(self: Message) u32 {
+    fn len(self: Message) u32 {
         const idSize = 1;
         const u32Size = @sizeOf(u32);
 
@@ -106,7 +106,7 @@ pub const Message = union(MessageId) {
         };
     }
 
-    pub inline fn writeMessage(m: Message, w: *std.Io.Writer, data: []const u8) !void {
+    pub fn writeMessage(m: Message, w: *std.Io.Writer, data: []const u8) !void {
         try w.writeInt(u32, m.len(), .big);
         try w.writeByte(@intFromEnum(m));
 
