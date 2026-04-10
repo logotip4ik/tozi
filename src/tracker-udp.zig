@@ -406,7 +406,7 @@ test "readAnnounce response" {
 
     try socket.addInBytes(&response);
 
-    var announce: AnnounceResponse = .{};
+    var announce: AnnounceResponse = .{ .interval = 0 };
     defer announce.deinit(alloc);
 
     _ = try t.readAnnounce(alloc, &announce);
