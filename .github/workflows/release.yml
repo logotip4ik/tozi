@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: Build on ${{ matrix.artifact_name }}
+    name: Build for ${{ matrix.artifact_name }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -92,7 +92,7 @@ jobs:
         run: |
           TAG_NAME=$(curl -s https://api.github.com/repos/logotip4ik/tozi/releases/latest | jq -r '.tag_name')
           if [ -z "$TAG_NAME" ]; then
-            TAG_NAME=""
+            TAG_NAME="v1.0.0"
           fi
 
           # Set output for use in next steps
