@@ -97,17 +97,15 @@ pub fn downloadTorrent(
     while (try kq.next()) |event| {
         if (event.kind == .timer) switch (tg.unpack(event.ident)) {
             .tracker => {
-                if (tracker.queued == null) {
-                    tracker.queued = .{
-                        .info_hash = torrent.info_hash,
-                        .peer_id = peer_id,
-                        .left = torrent.total_len - pieces.downloaded,
-                        .downloaded = pieces.downloaded,
-                        .uploaded = 0,
-                        .num_want = Tracker.NUM_WANT_DEFAULT,
-                        .event = if (tracker.addrs.items.len == 0) .started else .none,
-                    };
-                }
+                tracker.queueEventIfEmpty(.{
+                    .info_hash = torrent.info_hash,
+                    .peer_id = peer_id,
+                    .left = torrent.total_len - pieces.downloaded,
+                    .downloaded = pieces.downloaded,
+                    .uploaded = 0,
+                    .num_want = Tracker.NUM_WANT_DEFAULT,
+                    .event = if (tracker.addrs.items.len == 0) .started else .none,
+                });
 
                 try tracker.startClient(alloc);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
@@ -220,7 +218,7 @@ pub fn downloadTorrent(
                     }
 
                     if (pieces.isDownloadComplete()) {
-                        tracker.queued = .{
+                        tracker.queueEventIfEmpty(.{
                             .info_hash = torrent.info_hash,
                             .peer_id = peer_id,
                             .left = torrent.total_len - pieces.downloaded,
@@ -228,7 +226,7 @@ pub fn downloadTorrent(
                             .uploaded = 0,
                             .num_want = 0,
                             .event = .completed,
-                        };
+                        });
 
                         try tracker.startClient(alloc);
                         try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
@@ -934,17 +932,15 @@ pub fn downloadMagnet(
     while (try kq.next()) |ev| {
         if (ev.kind == .timer) switch (tg.unpack(ev.ident)) {
             .tracker => {
-                if (tracker.queued == null) {
-                    tracker.queued = .{
-                        .info_hash = magnet.info_hash,
-                        .peer_id = peer_id,
-                        .left = 1,
-                        .downloaded = 1,
-                        .uploaded = 0,
-                        .num_want = Tracker.NUM_WANT_DEFAULT,
-                        .event = .started,
-                    };
-                }
+                tracker.queueEventIfEmpty(.{
+                    .info_hash = magnet.info_hash,
+                    .peer_id = peer_id,
+                    .left = 1,
+                    .downloaded = 1,
+                    .uploaded = 0,
+                    .num_want = Tracker.NUM_WANT_DEFAULT,
+                    .event = .started,
+                });
 
                 try tracker.startClient(alloc);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);

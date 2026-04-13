@@ -290,6 +290,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
             self.client = .none;
             self.used.tier = 0;
             self.used.i = 0;
+            self.queued = null;
 
             return .{ .timer = announce.interval * std.time.ms_per_s };
         },
@@ -349,6 +350,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
             self.client = .none;
             self.used.tier = 0;
             self.used.i = 0;
+            self.queued = null;
 
             return .{ .timer = announce.interval * std.time.ms_per_s };
         },
@@ -373,8 +375,6 @@ pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
 
 pub fn startClient(self: *Tracker, alloc: std.mem.Allocator) !void {
     utils.assert(self.queued != null);
-
-    std.log.debug("starting tracker client with \"{t}\" event", .{self.queued.?.event});
 
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
@@ -482,6 +482,14 @@ pub fn generatePeerId() [20]u8 {
     }
 
     return id;
+}
+
+pub fn queueEventIfEmpty(self: *Tracker, event: Stats) void {
+    if (self.queued == null) {
+        self.queued = event;
+
+        std.log.debug("queuing \"{t}\" event", .{self.queued.?.event});
+    }
 }
 
 /// Computes the BEP 40 Canonical Peer Priority between your IP/Port and a Peer's IP/Port.
