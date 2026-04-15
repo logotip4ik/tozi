@@ -166,7 +166,11 @@ pub fn main() !void {
 
     var start = std.time.Timer.start() catch unreachable;
 
-    var ticker = tozi.Ticker{ .tick = 3, .total_pieces = torrent.pieces.len / 20 };
+    var ticker = tozi.Ticker{
+        .tick = 3,
+        .total_pieces = torrent.pieces.len / 20,
+        .out_writer =  &out.interface,
+    };
 
     try tozi.downloadTorrent(.{
         .alloc = alloc,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Peer = @import("peer.zig");
 const PieceManager = @import("piece-manager.zig");
@@ -7,6 +8,8 @@ const PieceManager = @import("piece-manager.zig");
 tick: u8,
 
 total_pieces: usize,
+
+out_writer: *std.Io.Writer,
 
 const Ticker = @This();
 
@@ -51,11 +54,20 @@ pub fn onTick(
     const percent = (pieces.completed_count * 100) / self.total_pieces;
     const bytes_per_second = bytes_per_tick / 3;
 
-    std.log.info("progress: {d:2}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
-        percent,
-        pieces.completed_count,
-        self.total_pieces,
-        peers_alive_count,
-        bytes_per_second,
-    });
+    if (builtin.mode == .Debug) {
+        self.out_writer.print("{d}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
+            percent,
+            pieces.completed_count,
+            self.total_pieces,
+            peers_alive_count,
+            bytes_per_second,
+        }) catch {};
+    } else {
+        self.out_writer.print("{d}% {Bi:6.2}/s\r", .{
+            percent,
+            bytes_per_second,
+        }) catch {};
+    }
+
+    self.out_writer.flush() catch {};
 }
