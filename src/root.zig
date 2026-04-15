@@ -764,7 +764,7 @@ pub fn downloadTorrent(
             };
         }
 
-        if (peer.state.isDead() or pieces.isDownloadComplete()) {
+        if (peer.state.isDead()) {
             if (peer.extended_map.pex) |_| {
                 try kq.deleteTimer(tg.pack(.{ .peer = peer }));
             }
