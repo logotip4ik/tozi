@@ -197,6 +197,10 @@ const NextError = error{
     FFlags,
     ConnectionRefused,
     Unexpected,
+    AccessDenied,
+    EventNotFound,
+    SystemResources,
+    ProcessNotFound,
 };
 
 const CustomEvent = struct {
@@ -221,8 +225,15 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
         const rc = std.posix.system.kevent(self.fd, &self.changes, @intCast(self.changes_count), &self.evs, self.evs.len, null);
         const count: u16 = switch (std.posix.errno(rc)) {
             .SUCCESS => @intCast(rc),
-            .AGAIN => continue,
-            else => |err| return std.posix.unexpectedErrno(err),
+            .ACCES => return error.AccessDenied,
+            .FAULT => unreachable, // TODO use error.Unexpected for these
+            .BADF => unreachable, // Always a race condition.
+            .INTR => continue, // TODO handle cancelation
+            .INVAL => unreachable,
+            .NOENT => return error.EventNotFound,
+            .NOMEM => return error.SystemResources,
+            .SRCH => return error.ProcessNotFound,
+            else => unreachable,
         };
 
         self.evs_index = 0;

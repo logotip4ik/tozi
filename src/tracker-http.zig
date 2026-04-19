@@ -220,17 +220,20 @@ pub const TlsHandshake = struct {
     }
 
     test "initiate handshake" {
-        if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+        if (std.testing.environ.containsUnemptyConstant("GITHUB_ACTIONS")) {
             return error.SkipZigTest;
         }
 
+        const io = std.testing.io;
         const alloc = std.testing.allocator;
 
-        var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");
+        var torrent = try getTestTorrent(alloc, io, "./src/test_files/copper-https.torrent");
         defer torrent.deinit(alloc);
 
-        var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
+        var t: TrackerHttp = undefined;
+        try t.init(alloc, io, torrent.tiers.items[0].items[0]);
         defer t.deinit(alloc);
+
         const socket = t.socketPosix.?.fd;
 
         try std.testing.expectEqual(State.handshake, t.state);
@@ -617,6 +620,7 @@ test "writes correct http request" {
         .url = "",
         .tls = .none,
         .state = .prepare,
+        .rng = .{ .io = std.testing.io },
     };
     defer t.buffer.deinit();
 
@@ -639,27 +643,32 @@ test "writes correct http request" {
     try std.testing.expectEqualStrings(expectedReqString, t.buffer.written());
 }
 
-fn getTestTorrent(alloc: std.mem.Allocator, path: []const u8) !Torrent {
-    const torrentFile = std.fs.cwd().openFile(path, .{}) catch unreachable;
-    defer torrentFile.close();
+fn getTestTorrent(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Torrent {
+    const torrentFile = std.Io.Dir.cwd().openFile(io, path, .{}) catch unreachable;
+    defer torrentFile.close(io);
 
-    const torrentSlice = try torrentFile.readToEndAlloc(alloc, 10 * 1024);
+    var reader_buf: [10 * 1024]u8 = undefined;
+    var reader = torrentFile.reader(io, &reader_buf);
+
+    const torrentSlice = try reader.interface.allocRemaining(alloc, .limited(10 * 1024));
     defer alloc.free(torrentSlice);
 
     return try .fromSlice(alloc, torrentSlice);
 }
 
 test "make request" {
-    if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+    if (std.testing.environ.containsUnemptyConstant("GITHUB_ACTIONS")) {
         return error.SkipZigTest;
     }
 
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
-    var torrent = try getTestTorrent(alloc, "./src/test_files/copper.torrent");
+    var torrent = try getTestTorrent(alloc, io, "./src/test_files/copper.torrent");
     defer torrent.deinit(alloc);
 
-    var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
+    var t: TrackerHttp = undefined;
+    try t.init(alloc, io, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
     const socket = t.socketPosix.?.fd;
 
@@ -712,19 +721,22 @@ test "make request" {
 }
 
 test "make https request" {
-    if (std.process.hasEnvVarConstant("GITHUB_ACTIONS")) {
+    if (std.testing.environ.containsUnemptyConstant("GITHUB_ACTIONS")) {
         return error.SkipZigTest;
     }
 
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
-    var torrent = try getTestTorrent(alloc, "./src/test_files/copper-https.torrent");
+    var torrent = try getTestTorrent(alloc, io, "./src/test_files/copper-https.torrent");
     defer torrent.deinit(alloc);
 
     const KQ = @import("./kq.zig");
 
-    var t: TrackerHttp = try .init(alloc, torrent.tiers.items[0].items[0]);
+    var t: TrackerHttp = undefined;
+    try t.init(alloc, io, torrent.tiers.items[0].items[0]);
     defer t.deinit(alloc);
+
     const socket = t.socketPosix.?.fd;
 
     const stats: tracker_utils.Stats = .{
@@ -820,6 +832,7 @@ test "make https request" {
 
 test "chuncked transfer encoding" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     outer: for (12..32) |max| {
         var a: Socket.Allocating = .init(alloc, @intCast(max));
@@ -844,6 +857,7 @@ test "chuncked transfer encoding" {
             .tls = .none,
             .url = undefined,
             .uri = undefined,
+            .rng = .{ .io = io },
         };
         defer t.buffer.deinit();
         defer t.chunks.deinit(alloc);

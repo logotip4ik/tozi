@@ -145,21 +145,21 @@ test "parse" {
     try std.testing.expectEqual(1, pex.dropped.items.len);
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 1, 1, 1, 1 }, 80);
+        const expected = std.Io.net.Ip4Address.parse("1.1.1.1", 80) catch unreachable;
 
-        try std.testing.expectEqualDeep(expected, pex.added.items[0].addr.in);
+        try std.testing.expectEqualDeep(expected, pex.added.items[0].addr.ip4);
     }
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 2, 2, 2, 2 }, 443);
+        const expected = std.Io.net.Ip4Address.parse("2.2.2.2", 443) catch unreachable;
 
-        try std.testing.expectEqualDeep(expected, pex.added.items[1].addr.in);
+        try std.testing.expectEqualDeep(expected, pex.added.items[1].addr.ip4);
     }
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 3, 3, 3, 3 }, 22);
+        const expected = std.Io.net.Ip4Address.parse("3.3.3.3", 22) catch unreachable;
 
-        try std.testing.expectEqualDeep(expected, pex.dropped.items[0].in);
+        try std.testing.expectEqualDeep(expected, pex.dropped.items[0].ip4);
     }
 }
 
@@ -174,25 +174,25 @@ test "parse with flags" {
     try std.testing.expectEqual(1, pex.dropped.items.len);
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 192, 168, 1, 5 }, 6881);
+        const expected = std.Io.net.Ip4Address.parse("192.168.1.5", 6881) catch unreachable;
         const entry = pex.added.items[0];
 
-        try std.testing.expectEqualDeep(expected, entry.addr.in);
+        try std.testing.expectEqualDeep(expected, entry.addr.ip4);
         try std.testing.expectEqualDeep(PexFlagByte{ .encryption = true }, entry.flags);
     }
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 10, 0, 0, 1 }, 8080);
+        const expected = std.Io.net.Ip4Address.parse("10.0.0.1", 8080) catch unreachable;
         const entry = pex.added.items[1];
 
-        try std.testing.expectEqualDeep(expected, entry.addr.in);
+        try std.testing.expectEqualDeep(expected, entry.addr.ip4);
         try std.testing.expectEqualDeep(PexFlagByte{ .seed = true }, entry.flags);
     }
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 4, 4, 4, 4 }, 53);
+        const expected = std.Io.net.Ip4Address.parse("4.4.4.4", 53);
 
-        try std.testing.expectEqualDeep(expected, pex.dropped.items[0].in);
+        try std.testing.expectEqualDeep(expected, pex.dropped.items[0].ip4);
     }
 }
 
@@ -203,11 +203,11 @@ test "exportMessage" {
     defer pex.deinit(alloc);
 
     try pex.added.append(alloc, .{
-        .addr = .initIp4(.{ 127, 0, 0, 1 }, 6881),
+        .addr = try .parseIp4("127.0.0.1", 6881),
         .flags = .{ .seed = true, .reachable = true },
     });
 
-    const addr_dropped = std.net.Address.initIp4(.{ 8, 8, 8, 8 }, 53);
+    const addr_dropped = std.Io.net.IpAddress.parse("8.8.8.8", 53) catch unreachable;
     try pex.dropped.append(alloc, addr_dropped);
 
     // 3. Run export

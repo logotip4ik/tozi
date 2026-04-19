@@ -125,7 +125,10 @@ test "parse magent link" {
     }, magnet.trackers.items);
 
     try std.testing.expectEqual(1, magnet.peers.items.len);
-    try std.testing.expectEqualDeep(std.net.Ip4Address.init([_]u8{ 127, 0, 0, 1 }, 8080), magnet.peers.items[0].in);
+    try std.testing.expectEqualDeep(
+        std.Io.net.Ip4Address.parse("127.0.0.1", 8080) catch unreachable,
+        magnet.peers.items[0].ip4,
+    );
 }
 
 pub fn writeInfoTableRequests(

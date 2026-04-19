@@ -252,11 +252,13 @@ fn generateTransactionId(seed: u64) u32 {
 
 test "prepareConnect" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     var socket: Socket.Allocating = .init(alloc, 16);
     defer socket.deinit();
 
-    var t: TrackerUdp = try .init(alloc, .{
+    var t: TrackerUdp = undefined;
+    try t.init(alloc, io, .{
         .seed = 1,
         .socket = &socket.interface,
     });
@@ -283,11 +285,13 @@ test "prepareConnect" {
 
 test "prepareAnnounce" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     var socket: Socket.Allocating = .init(alloc, 1024);
     defer socket.deinit();
 
-    var t: TrackerUdp = try .init(alloc, .{
+    var t: TrackerUdp = undefined;
+    try t.init(alloc, io, .{
         .seed = 1,
         .socket = &socket.interface,
     });
@@ -343,11 +347,13 @@ test "prepareAnnounce" {
 
 test "readConnect response" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     var socket: Socket.Allocating = .init(alloc, 16);
     defer socket.deinit();
 
-    var t: TrackerUdp = try .init(alloc, .{
+    var t: TrackerUdp = undefined;
+    try t.init(alloc, io, .{
         .seed = 1,
         .socket = &socket.interface,
     });
@@ -375,11 +381,13 @@ test "readConnect response" {
 
 test "readAnnounce response" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     var socket: Socket.Allocating = .init(alloc, 1024);
     defer socket.deinit();
 
-    var t: TrackerUdp = try .init(alloc, .{
+    var t: TrackerUdp = undefined;
+    try t.init(alloc, io, .{
         .seed = 1,
         .socket = &socket.interface,
     });
@@ -412,13 +420,12 @@ test "readAnnounce response" {
     try std.testing.expectEqual(5, announce.complete.?);
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 192, 168, 1, 1 }, 6881);
-
-        try std.testing.expectEqualDeep(expected, announce.peers.items[0].in);
+        const expected = std.Io.net.Ip4Address.parse("192.168.1.1", 6881) catch unreachable;
+        try std.testing.expectEqualDeep(expected, announce.peers.items[0].ip4);
     }
 
     {
-        const expected = std.net.Ip4Address.init([_]u8{ 192, 168, 1, 2 }, 6882);
-        try std.testing.expectEqualDeep(expected, announce.peers.items[1].in);
+        const expected = std.Io.net.Ip4Address.parse("192.168.1.2", 6882) catch unreachable;
+        try std.testing.expectEqualDeep(expected, announce.peers.items[1].ip4);
     }
 }
