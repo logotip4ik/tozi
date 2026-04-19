@@ -5,9 +5,7 @@ const Tls = @import("tls");
 const utils = @import("utils.zig");
 const Socket = @import("socket.zig");
 const Bencode = @import("bencode.zig");
-const Stats = @import("tracker-utils.zig").Stats;
-const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
-const connectToAddress = @import("tracker-utils.zig").connectToAddress;
+const tracker_utils = @import("./tracker-utils.zig");
 
 const TrackerHttp = @This();
 
@@ -22,6 +20,8 @@ state: State,
 
 socket: *Socket,
 socketPosix: ?Socket.Posix,
+
+rng: std.Random.IoSource,
 
 buffer: std.Io.Writer.Allocating,
 
@@ -47,7 +47,12 @@ parsedHead: ?struct {
     },
 } = null,
 
-pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
+pub fn init(
+    self: *TrackerHttp,
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+) !void {
     const isHttp = utils.isHttp(url);
     const isHttps = utils.isHttps(url);
     utils.assert(isHttp or isHttps);
@@ -56,27 +61,36 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
     errdefer alloc.free(urlDupe);
 
     const uri: std.Uri = try .parse(urlDupe);
-
-    var hostBuffer: [std.Uri.host_name_max]u8 = undefined;
-    const host = try uri.getHost(&hostBuffer);
     const port: u16 = if (uri.port) |x| x else if (isHttps) 443 else 80;
 
-    const list = try std.net.getAddressList(alloc, host, port);
-    defer list.deinit();
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = try uri.getHost(&host_buffer);
 
-    if (list.addrs.len == 0) return error.UnknownHostName;
+    var elem_buf: [16]std.Io.net.HostName.LookupResult = undefined;
+    var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&elem_buf);
 
-    const socket = blk: {
-        for (list.addrs) |addr| {
-            break :blk connectToAddress(addr, .tcp) catch |err| switch (err) {
-                error.ConnectionRefused => continue,
-                else => return err,
-            };
+    var lookup = io.async(std.Io.net.HostName.lookup, .{
+        host,
+        io,
+        &queue,
+        .{ .port = port },
+    });
+    defer lookup.cancel(io) catch {};
+
+    const socket: std.posix.fd_t = while (queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                break try tracker_utils.connectToAddress(&addr, .tcp);
+            },
+            .canonical_name => {},
         }
-        return std.posix.ConnectError.ConnectionRefused;
+    } else |err| switch (err) {
+        error.Canceled => unreachable,
+        else => return err,
     };
+    errdefer std.Io.Threaded.closeFd(socket);
 
-    var self = TrackerHttp{
+    self.* = TrackerHttp{
         .state = if (isHttps) .handshake else .prepare,
         .buffer = .init(alloc),
         .socket = undefined,
@@ -84,14 +98,19 @@ pub fn init(alloc: std.mem.Allocator, url: []const u8) !TrackerHttp {
         .url = urlDupe,
         .uri = uri,
         .tls = .none,
+        .rng = .{ .io = io },
     };
 
     self.socket = &self.socketPosix.?.interface;
     if (isHttps) {
-        self.tls = .{ .handshake = try .init(alloc, host, self.socket) };
+        self.tls = .{ .handshake = try .init(
+            alloc,
+            io,
+            host.bytes,
+            self.socket,
+            self.rng.interface(),
+        ) };
     }
-
-    return self;
 }
 
 pub fn deinit(self: *TrackerHttp, alloc: std.mem.Allocator) void {
@@ -105,7 +124,7 @@ pub fn deinit(self: *TrackerHttp, alloc: std.mem.Allocator) void {
         else => {},
     }
 
-    if (self.socketPosix) |x| std.posix.close(x.fd);
+    if (self.socketPosix) |x| std.Io.Threaded.closeFd(x.fd);
 }
 
 pub const TlsHandshake = struct {
@@ -131,18 +150,26 @@ pub const TlsHandshake = struct {
         done: Tls.Cipher,
     },
 
-    pub fn init(alloc: std.mem.Allocator, host: []const u8, socket: *Socket) !TlsHandshake {
-        var caBundle = try Tls.config.cert.fromSystem(alloc);
-        errdefer caBundle.deinit(alloc);
+    pub fn init(
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        socket: *Socket,
+        rng: std.Random,
+    ) !TlsHandshake {
+        var ca_bundle = try Tls.config.cert.fromSystem(alloc, io);
+        errdefer ca_bundle.deinit(alloc);
 
         const client = Tls.nonblock.Client.init(.{
             .host = host,
-            .root_ca = caBundle,
+            .root_ca = ca_bundle,
             .insecure_skip_verify = builtin.is_test or builtin.mode == .Debug,
+            .now = std.Io.Clock.real.now(io),
+            .rng = rng,
         });
 
         return .{
-            .caBundle = caBundle,
+            .caBundle = ca_bundle,
             .client = client,
             .socket = socket,
             .state = .write,
@@ -258,7 +285,7 @@ pub const TlsHandshake = struct {
     }
 };
 
-pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *const Stats) !void {
+pub fn prepareRequest(self: *TrackerHttp, alloc: std.mem.Allocator, stats: *const tracker_utils.Stats) !void {
     utils.assert(self.state == .prepare);
 
     const w = &self.buffer.writer;
@@ -498,7 +525,7 @@ pub fn readRequest(self: *TrackerHttp, alloc: std.mem.Allocator) !?[]u8 {
     }
 }
 
-pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: *AnnounceResponse) !void {
+pub fn parseIntoAnnounce(alloc: std.mem.Allocator, bytes: []const u8, announce: *tracker_utils.AnnounceResponse) !void {
     var reader: std.Io.Reader = .fixed(bytes);
 
     var value: Bencode = try .decode(alloc, &reader, 0);
@@ -636,7 +663,7 @@ test "make request" {
     defer t.deinit(alloc);
     const socket = t.socketPosix.?.fd;
 
-    const stats: Stats = .{
+    const stats: tracker_utils.Stats = .{
         .info_hash = torrent.info_hash,
         .peer_id = .{1} ** 20,
         .num_want = 50,
@@ -700,7 +727,7 @@ test "make https request" {
     defer t.deinit(alloc);
     const socket = t.socketPosix.?.fd;
 
-    const stats: Stats = .{
+    const stats: tracker_utils.Stats = .{
         .info_hash = torrent.info_hash,
         .peer_id = .{1} ** 20,
         .num_want = 50,

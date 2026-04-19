@@ -32,7 +32,7 @@ pub const Stats = struct {
 pub const AnnounceResponse = struct {
     /// Seconds client should wait before next announce
     interval: u32,
-    peers: std.array_list.Aligned(std.net.Address, null) = .empty,
+    peers: std.array_list.Aligned(std.Io.net.IpAddress, null) = .empty,
 
     /// Minimum allowed interval
     interval_min: ?u32 = null,
@@ -48,28 +48,65 @@ pub const AnnounceResponse = struct {
     }
 };
 
-pub fn connectToAddress(addr: std.net.Address, proto: enum { tcp, udp }) !std.posix.socket_t {
-    const CLOEXEC = if (builtin.os.tag == .windows) 0 else std.posix.SOCK.CLOEXEC;
-
-    const sock_type: u32 = switch (proto) {
-        .tcp => std.posix.SOCK.STREAM,
-        .udp => std.posix.SOCK.DGRAM,
+pub fn setNonBlock(fd: std.posix.fd_t) !void {
+    var fl_flags: usize = fl: {
+        while (true) {
+            const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(usize, 0));
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => break :fl @intCast(rc),
+                .INTR => continue,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        }
     };
 
-    const protocol: u32 = switch (proto) {
-        .tcp => std.posix.IPPROTO.TCP,
-        .udp => std.posix.IPPROTO.UDP,
+    fl_flags |= @as(usize, 1 << @bitOffsetOf(std.posix.O, "NONBLOCK"));
+
+    while (true) {
+        switch (std.posix.errno(std.posix.system.fcntl(fd, std.posix.F.SETFL, fl_flags))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+pub fn connectToAddress(addr: *const std.Io.net.IpAddress, comptime proto: enum { tcp, udp }) !std.posix.fd_t {
+    const fd = blk: {
+        const mode = switch (proto) {
+            .tcp => std.posix.SOCK.STREAM,
+            .udp => std.posix.SOCK.DGRAM,
+        };
+        const protocol = switch (proto) {
+            .tcp => std.posix.IPPROTO.TCP,
+            .udp => std.posix.IPPROTO.UDP,
+        };
+
+        const rc = std.posix.system.socket(
+            std.Io.Threaded.posixAddressFamily(addr),
+            mode,
+            protocol,
+        );
+        break :blk switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const fd: std.posix.fd_t = @intCast(rc);
+                try setNonBlock(fd);
+                break :blk fd;
+            },
+            else => |e| return std.posix.unexpectedErrno(e),
+        };
     };
+    errdefer std.Io.Threaded.closeFd(fd);
 
-    const sock_flags = sock_type | std.posix.SOCK.NONBLOCK | CLOEXEC;
+    var posix_addr: std.Io.Threaded.PosixAddress = undefined;
+    const addr_len = std.Io.Threaded.addressToPosix(addr, &posix_addr);
 
-    const sock = try std.posix.socket(addr.any.family, sock_flags, protocol);
-    errdefer std.posix.close(sock);
+    const rc = std.posix.system.connect(fd, &posix_addr.any, addr_len);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS, .AGAIN, .INPROGRESS => {},
+        .CONNREFUSED => return error.ConnectionRefused,
+        else => |e| return std.posix.unexpectedErrno(e),
+    }
 
-    std.posix.connect(sock, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => |e| return e,
-    };
-
-    return sock;
+    return fd;
 }

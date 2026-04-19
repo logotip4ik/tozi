@@ -55,7 +55,7 @@ pub fn onTick(
     const bytes_per_second = bytes_per_tick / 3;
 
     if (builtin.mode == .Debug) {
-        self.out_writer.print("{d}% {d}/{d} (peers: {d}, speed: {Bi:6.2})", .{
+        self.out_writer.print("{d}% {d}/{d} (peers: {d}, speed: {Bi:6.2})\n", .{
             percent,
             pieces.completed_count,
             self.total_pieces,

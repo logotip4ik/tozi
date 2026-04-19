@@ -132,10 +132,14 @@ pub fn TaggedPointer(comptime Union: type) type {
     const ptrMask = ~tagMask;
 
     for (unionFields) |field| {
-        if (@typeInfo(field.type) == .pointer) {
-            if (@typeInfo(field.type).pointer.alignment < requiredAlignment) {
-                @compileError("Field '" ++ field.name ++ "' does not have enough alignment for this TaggedPointer.");
-            }
+        switch (@typeInfo(field.type)) {
+            .pointer => |ptr| {
+                const alignment = ptr.alignment orelse @alignOf(ptr.child);
+                if (alignment < requiredAlignment) {
+                    @compileError("Field '" ++ field.name ++ "' does not have enough alignment for this TaggedPointer.");
+                }
+            },
+            else => @compileError("expected " ++ field.name ++ "to be a pointer"),
         }
     }
 
@@ -218,28 +222,32 @@ pub fn isMagnet(haystack: []const u8) bool {
     return std.mem.startsWith(u8, haystack, prefix) and haystack.len > prefix.len;
 }
 
-pub fn parseCompactAddress(in: [6]u8) std.net.Address {
+pub fn parseCompactAddress(in: [6]u8) std.Io.net.IpAddress {
     const port = std.mem.readInt(u16, in[4..6], .big);
-    return std.net.Address.initIp4(in[0..4].*, port);
+    return std.Io.net.IpAddress{
+        .ip4 = .{ .bytes = in[0..4].*, .port = port },
+    };
 }
 
-pub fn compactAddress(addr: std.net.Address, bytes: []u8) void {
+pub fn compactAddress(addr: std.Io.net.IpAddress, bytes: []u8) void {
     assert(bytes.len >= 6);
+
     // only ipv4
-    assert(addr.any.family == std.posix.AF.INET);
+    switch (addr) {
+        .ip6 => unreachable,
+        .ip4 => |ip| {
+            @memcpy(bytes[0..4], &ip.bytes);
 
-    const ip_bytes: *const [4]u8 = @ptrCast(&addr.in.sa.addr);
-    @memcpy(bytes[0..4], ip_bytes);
-
-    std.mem.writeInt(u16, bytes[4..6][0..2], addr.getPort(), .big);
+            std.mem.writeInt(u16, bytes[4..6][0..2], addr.getPort(), .big);
+        },
+    }
 }
 
-pub fn addressToYourIp(addr: std.net.Address) ?[4]u8 {
-    if (addr.any.family != std.posix.AF.INET) return null;
-
-    const bytes = std.mem.asBytes(&addr.in.sa.addr);
-
-    return bytes[0..4].*;
+pub fn addressToYourIp(addr: std.Io.net.IpAddress) ?[4]u8 {
+    return switch (addr) {
+        .ip6 => null,
+        .ip4 => |ip| ip.bytes,
+    };
 }
 
 pub fn base32ToBytes(out: []u8, in: []const u8) !void {

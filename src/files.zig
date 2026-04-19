@@ -7,7 +7,7 @@ const proto = @import("proto.zig");
 pub const FileRef = struct {
     /// was created right now, or existed in fs before, useful for `collectPieces` function
     new: bool,
-    handle: std.fs.File,
+    handle: std.Io.File,
     size: usize,
     start: usize,
 };
@@ -17,27 +17,31 @@ const Files = @This();
 files: []FileRef,
 totalSize: usize,
 
-pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Files {
+pub fn init(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    files: []Torrent.File,
+) !Files {
     var refs = try alloc.alloc(FileRef, files.len);
     var currentPos: usize = 0;
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     for (files, 0..) |file, i| {
         const path = try std.fs.path.join(alloc, file.path);
         defer alloc.free(path);
 
         if (std.fs.path.dirname(path)) |dir| {
-            try cwd.makePath(dir);
+            try cwd.createDirPath(io, dir);
         }
 
-        const handle, const new = if (cwd.openFile(path, .{ .mode = .read_write })) |h|
+        const handle, const new = if (cwd.openFile(io, path, .{ .mode = .read_write })) |h|
             .{ h, false }
         else |_|
-            .{ try cwd.createFile(path, .{ .read = true }), true };
-        errdefer handle.close();
+            .{ try cwd.createFile(io, path, .{ .read = true }), true };
+        errdefer handle.close(io);
 
-        try handle.setEndPos(file.len);
+        try handle.setLength(io, file.len);
 
         refs[i] = .{
             .new = new,
@@ -55,8 +59,8 @@ pub fn init(alloc: std.mem.Allocator, files: []Torrent.File) !Files {
     };
 }
 
-pub fn deinit(self: *const Files, alloc: std.mem.Allocator) void {
-    for (self.files) |f| f.handle.close();
+pub fn deinit(self: *const Files, alloc: std.mem.Allocator, io: std.Io) void {
+    for (self.files) |f| f.handle.close(io);
     alloc.free(self.files);
 }
 
@@ -92,14 +96,17 @@ pub fn collectPieces(
     return bitset;
 }
 
-pub fn readPieceBuf(
+pub fn readPieceData(
     self: *const Files,
-    buf: []u8,
-    index: u32,
-    begin: u32,
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    piece: proto.Piece,
     torrentPieceLen: u32,
-) !void {
-    var globalOffset = @as(usize, index) * torrentPieceLen + begin;
+) ![]const u8 {
+    const buf = try alloc.alloc(u8, piece.len);
+    errdefer alloc.free(buf);
+
+    var globalOffset = @as(usize, piece.index) * torrentPieceLen + piece.begin;
     var bufOffset: usize = 0;
 
     for (self.files) |file| {
@@ -115,7 +122,7 @@ pub fn readPieceBuf(
         const rem = buf.len - bufOffset;
         const toRead = @min(avail, rem);
 
-        _ = try file.handle.preadAll(buf[bufOffset .. bufOffset + toRead], readStart);
+        _ = try file.handle.readPositionalAll(io, buf[bufOffset .. bufOffset + toRead], readStart);
 
         bufOffset += toRead;
         globalOffset += toRead;
@@ -124,23 +131,17 @@ pub fn readPieceBuf(
     }
 
     if (bufOffset < buf.len) return error.UnexpectedEof;
-}
-
-pub fn readPieceData(
-    self: *const Files,
-    alloc: std.mem.Allocator,
-    piece: proto.Piece,
-    torrentPieceLen: u32,
-) ![]const u8 {
-    const buf = try alloc.alloc(u8, piece.len);
-    errdefer alloc.free(buf);
-
-    try self.readPieceBuf(buf, piece.index, piece.begin, torrentPieceLen);
 
     return buf;
 }
 
-pub fn writePieceData(self: *const Files, index: u32, torrentPieceLen: u32, data: []const u8) !void {
+pub fn writePieceData(
+    self: *const Files,
+    io: std.Io,
+    index: u32,
+    torrentPieceLen: u32,
+    data: []const u8,
+) !void {
     var globalOffset = @as(usize, index) * torrentPieceLen;
     var dataOffset: usize = 0;
 
@@ -159,7 +160,7 @@ pub fn writePieceData(self: *const Files, index: u32, torrentPieceLen: u32, data
         const rem = data.len - dataOffset;
         const toWrite = @min(spaceInFile, rem);
 
-        try file.handle.pwriteAll(data[dataOffset..][0..toWrite], writeStart);
+        try file.handle.writePositionalAll(io, data[dataOffset..][0..toWrite], writeStart);
 
         dataOffset += toWrite;
         globalOffset += toWrite;
@@ -266,7 +267,7 @@ const SReader = struct {
         const ptr = try std.posix.mmap(
             null,
             file.size,
-            std.posix.PROT.READ,
+            .{ .READ = true },
             .{ .TYPE = .PRIVATE },
             file.handle.handle,
             0,

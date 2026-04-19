@@ -210,7 +210,11 @@ test "parseTorrent - info hash" {
     );
 }
 
-pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
+pub fn fromMagnet(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    magnet: *const Magnet,
+) !Torrent {
     var r: std.Io.Reader = .fixed(magnet.buffer.?);
 
     var v = try Bencode.decode(alloc, &r, 0);
@@ -232,7 +236,9 @@ pub fn fromMagnet(alloc: std.mem.Allocator, magnet: *const Magnet) !Torrent {
         urls_cloned.appendAssumeCapacity(try alloc.dupe(u8, item));
     }
 
-    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var rand: std.Random.DefaultPrng = .init(
+        @intCast(@max(0, std.Io.Clock.real.now(io).toMilliseconds())),
+    );
     var random = rand.random();
     random.shuffle([]const u8, urls_cloned.items);
 

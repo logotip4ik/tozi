@@ -33,13 +33,14 @@ const tg = utils.TaggedPointer(union(enum) {
 
 pub const DownloadTorrentContext = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     loop: *KQ,
     files: *Files,
     pieces: *PieceManager,
     ticker: ?*Ticker = null,
 };
 
-const PeerAllocator = std.heap.MemoryPoolExtra(Peer, .{ .alignment = null, .growable = false });
+const PeerAllocator = std.heap.memory_pool.Extra(Peer, .{ .alignment = null, .growable = false });
 const PeerPtrs = std.array_list.Aligned(*Peer, null);
 
 /// TODO: we also need to handle case when requested chunk of piece never arrives. `in_flight`
@@ -51,22 +52,30 @@ pub fn downloadTorrent(
     torrent: *const Torrent,
 ) !void {
     const alloc = ctx.alloc;
+    const io = ctx.io;
     const files = ctx.files;
     const pieces = ctx.pieces;
     const kq = ctx.loop;
 
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = alloc });
-    defer pool.deinit();
+    var write_group: std.Io.Group = .init;
+    defer write_group.await(io) catch unreachable;
 
-    const thread_pipes = try std.posix.pipe();
-    defer for (thread_pipes) |fd| std.posix.close(fd);
+    const thread_pipes = blk: {
+        var pipefd: [2]std.posix.fd_t = undefined;
+        const rc = std.posix.system.pipe(&pipefd);
+
+        break :blk switch (std.posix.errno(rc)) {
+            .SUCCESS => pipefd,
+            else => |err| return std.posix.unexpectedErrno(err),
+        };
+    };
+    defer for (thread_pipes) |fd| std.Io.Threaded.closeFd(fd);
 
     const read_pipe, const write_pipe = thread_pipes;
     try kq.subscribe(read_pipe, .read, tg.pack(.{ .pieces = pieces }));
 
-    var peer_allocator: PeerAllocator = try .initPreheated(alloc, PEERS_MAX);
-    defer peer_allocator.deinit();
+    var peer_allocator: PeerAllocator = try .initCapacity(alloc, PEERS_MAX);
+    defer peer_allocator.deinit(alloc);
 
     var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
     defer {
@@ -74,7 +83,7 @@ pub fn downloadTorrent(
         peers.deinit(alloc);
     }
 
-    var tracker: Tracker = try .init(alloc, torrent);
+    var tracker: Tracker = try .init(alloc, io, torrent);
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
@@ -107,7 +116,7 @@ pub fn downloadTorrent(
                     .event = if (tracker.addrs.items.len == 0) .started else .none,
                 });
 
-                try tracker.startClient(alloc);
+                try tracker.startClient(alloc, io);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                 try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                 try kq.disable(tracker.client.socket(), .read);
@@ -122,7 +131,6 @@ pub fn downloadTorrent(
             },
             .tracker_client_timeout => |client| {
                 kq.killSocket(client.socket());
-                client.deinit(alloc);
 
                 tracker.useNextUrl(alloc) catch |err| switch (err) {
                     error.NoAnnounceUrlAvailable => {
@@ -228,7 +236,7 @@ pub fn downloadTorrent(
                             .event = .completed,
                         });
 
-                        try tracker.startClient(alloc);
+                        try tracker.startClient(alloc, io);
                         try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                         try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                         try kq.disable(tracker.client.socket(), .read);
@@ -299,7 +307,7 @@ pub fn downloadTorrent(
         const peer = taggedPointer.peer;
         if (event.err) |err| {
             peer.state = .dead;
-            std.log.err("peer: {d} received {t}", .{ peer.socket.fd, err });
+            std.log.warn("peer: {d} received {t}", .{ peer.socket.fd, err });
         }
 
         if (event.kind == .write and !peer.state.isDead()) sw: switch (peer.state) {
@@ -707,7 +715,8 @@ pub fn downloadTorrent(
                         const pieceLen = torrent.getPieceSize(piece.index);
                         const fullPiece = try pieces.writePiece(alloc, piece, pieceLen, chunkBytes) orelse continue;
 
-                        try pool.spawn(hashAndWrite, .{
+                        write_group.async(io, hashAndWrite, .{
+                            io,
                             write_pipe,
                             peer,
                             peer.id,
@@ -744,7 +753,7 @@ pub fn downloadTorrent(
                         }
 
                         std.log.info("peer: {d} sending {any}", .{ peer.socket.fd, request });
-                        const data = try files.readPieceData(alloc, request, torrent.piece_len);
+                        const data = try files.readPieceData(alloc, io, request, torrent.piece_len);
                         defer alloc.free(data);
 
                         peer.bytes_sent +|= data.len;
@@ -807,7 +816,7 @@ fn initializeNewPeers(
 
     // don't waste returned addr, because it's already moved to `oldAddrs`
     while (tracker.nextNewPeer()) |addr| {
-        const peer = peer_allocator.create() catch unreachable;
+        const peer = peer_allocator.create(alloc) catch unreachable;
         errdefer peer_allocator.destroy(peer);
 
         peer.initPtr(alloc, addr) catch |err| {
@@ -833,6 +842,7 @@ fn initializeNewPeers(
 }
 
 fn hashAndWrite(
+    io: std.Io,
     writeFd: std.posix.socket_t,
     peer_ptr: *const Peer,
     peer_id: u32,
@@ -853,7 +863,7 @@ fn hashAndWrite(
     std.crypto.hash.Sha1.hash(piece.written(), &computedHash, .{});
 
     if (std.mem.eql(u8, computedHash[0..20], expectedHash[0..20])) {
-        files.writePieceData(piece.index, torrent.piece_len, piece.written()) catch |err| {
+        files.writePieceData(io, piece.index, torrent.piece_len, piece.written()) catch |err| {
             @branchHint(.unlikely);
 
             std.log.warn("piece: {d} failed writing with {t}", .{ piece.index, err });
@@ -870,12 +880,24 @@ fn hashAndWrite(
         piece.fetched = 0;
     }
 
-    const wrote = std.posix.write(writeFd, &pipeBytes) catch @panic("failed writing to thread pipe");
+    const wrote: u8 = blk: {
+        const rc = std.posix.system.write(writeFd, &pipeBytes, pipeBytes.len);
+        break :blk switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            else => |e| {
+                const err = std.posix.unexpectedErrno(e);
+                std.log.err("failed writing to thread pipe with {t}", .{err});
+                @panic("failed writing to thread pipe");
+            },
+        };
+    };
+
     utils.assert(wrote == pipeBytes.len);
 }
 
 const DownloadMagnetContext = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     loop: *KQ,
 };
 
@@ -885,14 +907,15 @@ pub fn downloadMagnet(
     magnet: *Magnet,
 ) !void {
     const alloc = ctx.alloc;
+    const io = ctx.io;
     const kq = ctx.loop;
 
-    var tracker: Tracker = try .fromMagnet(alloc, magnet);
+    var tracker: Tracker = try .fromMagnet(alloc, io, magnet);
     defer tracker.deinit(alloc);
     const tracker_tagged_pointer = tg.pack(.{ .tracker = &tracker });
 
-    var peer_allocator: PeerAllocator = try .initPreheated(alloc, PEERS_MAX);
-    defer peer_allocator.deinit();
+    var peer_allocator: PeerAllocator = try .initCapacity(alloc, PEERS_MAX);
+    defer peer_allocator.deinit(alloc);
 
     var peers: PeerPtrs = try .initCapacity(alloc, PEERS_MAX);
     defer {
@@ -909,7 +932,7 @@ pub fn downloadMagnet(
         for (magnet.peers.items, 0..) |addr, i| {
             if (i == PEERS_MAX) break;
 
-            const peer = peer_allocator.create() catch unreachable;
+            const peer = peer_allocator.create(alloc) catch unreachable;
             errdefer peer_allocator.destroy(peer);
 
             peer.initPtr(alloc, addr) catch |err| {
@@ -942,7 +965,7 @@ pub fn downloadMagnet(
                     .event = .started,
                 });
 
-                try tracker.startClient(alloc);
+                try tracker.startClient(alloc, io);
                 try kq.subscribe(tracker.client.socket(), .write, tracker_tagged_pointer);
                 try kq.subscribe(tracker.client.socket(), .read, tracker_tagged_pointer);
                 try kq.disable(tracker.client.socket(), .read);

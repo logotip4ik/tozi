@@ -34,7 +34,7 @@ ip_vote: IpVote = .empty,
 const IpVote = std.hash_map.AutoHashMapUnmanaged([4]u8, u16);
 
 const AddrWithPriority = struct {
-    addr: std.net.Address,
+    addr: std.Io.net.IpAddress,
     priority: u32,
 
     pub fn lessThen(_: void, a: AddrWithPriority, b: AddrWithPriority) bool {
@@ -46,8 +46,8 @@ const Source = packed struct { tier: u32, i: u32 };
 
 pub const Client = union(enum) {
     none,
-    http: TrackerHttp,
-    udp: TrackerUdp,
+    http: *TrackerHttp,
+    udp: *TrackerUdp,
 
     pub fn socket(self: *const Client) std.posix.socket_t {
         return switch (self.*) {
@@ -59,7 +59,10 @@ pub const Client = union(enum) {
     pub fn deinit(self: *Client, alloc: std.mem.Allocator) void {
         switch (self.*) {
             .none => {},
-            inline else => |*t| t.deinit(alloc),
+            inline else => |t| {
+                t.deinit(alloc);
+                alloc.destroy(t);
+            },
         }
     }
 };
@@ -69,6 +72,7 @@ pub const NUM_WANT_DEFAULT = 20;
 
 pub fn init(
     alloc: std.mem.Allocator,
+    io: std.Io,
     torrent: *const Torrent,
 ) !Tracker {
     var cloned: Torrent.Tiers = try .initCapacity(alloc, torrent.tiers.items.len);
@@ -77,7 +81,9 @@ pub fn init(
         cloned.deinit(alloc);
     }
 
-    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var rand: std.Random.DefaultPrng = .init(
+        @intCast(@max(0, std.Io.Clock.real.now(io).toMilliseconds())),
+    );
     var random = rand.random();
 
     for (torrent.tiers.items) |urls| {
@@ -95,6 +101,7 @@ pub fn init(
 
 pub fn fromMagnet(
     alloc: std.mem.Allocator,
+    io: std.Io,
     magnet: *const Magnet,
 ) !Tracker {
     var tiers: Torrent.Tiers = try .initCapacity(alloc, 1);
@@ -103,7 +110,9 @@ pub fn fromMagnet(
     var urls_cloned = try magnet.trackers.clone(alloc);
     errdefer urls_cloned.deinit(alloc);
 
-    var rand: std.Random.DefaultPrng = .init(@intCast(std.time.microTimestamp()));
+    var rand: std.Random.DefaultPrng = .init(
+        @intCast(@max(0, std.Io.Timestamp.now(io, .real).toMilliseconds())),
+    );
     var random = rand.random();
     random.shuffle([]const u8, urls_cloned.items);
 
@@ -122,31 +131,38 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     self.tiers.deinit(alloc);
 
     self.client.deinit(alloc);
+    self.client = .none;
 }
 
+const blocked_addresses = if (builtin.mode != .Debug) [_]std.Io.net.IpAddress{
+    std.Io.net.IpAddress.parse("0.0.0.0", 0) catch unreachable,
+    std.Io.net.IpAddress.parse("127.0.0.1", 0) catch unreachable,
+    std.Io.net.IpAddress.parse("255.255.255.255", 0) catch unreachable,
+} else [_]std.Io.net.IpAddress{
+    std.Io.net.IpAddress.parse("0.0.0.0", 0) catch unreachable,
+    std.Io.net.IpAddress.parse("255.255.255.255", 0) catch unreachable,
+};
+
 /// NOTE: ensure to call `sortNewAddrs` after batch call
-pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.net.Address) !void {
-    if (peer.any.family != std.posix.AF.INET) {
-        return;
+pub fn addNewAddr(self: *Tracker, alloc: std.mem.Allocator, peer: std.Io.net.IpAddress) !void {
+    switch (peer) {
+        .ip6 => return,
+        .ip4 => |ip| {
+            const a: u32 = @bitCast(ip.bytes);
+
+            for (blocked_addresses) |addr| {
+                const b: u32 = @bitCast(addr.ip4.bytes);
+
+                if (a == b) return;
+            }
+        },
     }
 
-    const ip = peer.in.sa.addr;
-
-    // 0.0.0.0 is 0
-    // 255.255.255.255 is 0xFFFFFFFF (4294967295)
-    if (ip == 0 or ip == 0xFFFFFFFF) {
-        return;
-    }
-
-    // Block loopback (127.0.0.1)
-    if (builtin.mode != .Debug and ip == 0x0100007f) return;
-
-    for (self.addrs.items) |item| if (item.addr.eql(peer)) return;
-
+    for (self.addrs.items) |item| if (item.addr.eql(&peer)) return;
     try self.addrs.append(alloc, .{ .addr = peer, .priority = 0 });
 }
 
-pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.net.Address) !void {
+pub fn addNewAddrs(self: *Tracker, alloc: std.mem.Allocator, peers: []const std.Io.net.IpAddress) !void {
     for (peers) |peer| try self.addNewAddr(alloc, peer);
 
     std.log.debug("tracker: added {d} new addrs", .{
@@ -286,7 +302,7 @@ fn nextHttpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerH
                 tier.items[0] = workingUrl;
             }
 
-            client.deinit(alloc);
+            self.client.deinit(alloc);
             self.client = .none;
             self.used.tier = 0;
             self.used.i = 0;
@@ -346,7 +362,7 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
                 tier.items[0] = workingUrl;
             }
 
-            client.deinit(alloc);
+            self.client.deinit(alloc);
             self.client = .none;
             self.used.tier = 0;
             self.used.i = 0;
@@ -360,8 +376,8 @@ fn nextUdpOperation(self: *Tracker, alloc: std.mem.Allocator, client: *TrackerUd
 /// null - means no **new** operation is needed
 pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
     const op = switch (self.client) {
-        .http => |*t| try self.nextHttpOperation(alloc, t),
-        .udp => |*t| try self.nextUdpOperation(alloc, t),
+        .http => |t| try self.nextHttpOperation(alloc, t),
+        .udp => |t| try self.nextUdpOperation(alloc, t),
         .none => unreachable,
     };
 
@@ -373,16 +389,19 @@ pub fn nextOperation(self: *Tracker, alloc: std.mem.Allocator) !?Operation {
     return op;
 }
 
-pub fn startClient(self: *Tracker, alloc: std.mem.Allocator) !void {
+pub fn startClient(self: *Tracker, alloc: std.mem.Allocator, io: std.Io) !void {
     utils.assert(self.queued != null);
 
     while (true) {
         const url = self.tiers.items[self.used.tier].items[self.used.i];
 
         if (utils.isHttp(url) or utils.isHttps(url)) {
-            const client = TrackerHttp.init(alloc, url) catch |err| {
+            const client = try alloc.create(TrackerHttp);
+
+            client.init(alloc, io, url) catch |err| {
                 std.log.debug("failed creating http client with {t} for {s}", .{ err, url });
                 try self.useNextUrl(alloc);
+                alloc.destroy(client);
                 continue;
             };
 
@@ -392,9 +411,12 @@ pub fn startClient(self: *Tracker, alloc: std.mem.Allocator) !void {
         }
 
         if (utils.isUdp(url)) {
-            const client = TrackerUdp.init(alloc, .{ .url = url }) catch |err| {
+            const client = try alloc.create(TrackerUdp);
+
+            client.init(alloc, io, .{ .url = url }) catch |err| {
                 std.log.debug("failed creating udp client with {t} for {s}", .{ err, url });
                 try self.useNextUrl(alloc);
+                alloc.destroy(client);
                 continue;
             };
 
@@ -417,7 +439,7 @@ pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {
     self.operation = .{ .timer = 0 };
 
     self.used = blk: {
-        for (self.tiers.items[self.used.tier..], 0..) |urls, tier| {
+        for (self.tiers.items[self.used.tier..], self.used.tier..) |urls, tier| {
             if (self.used.tier == tier) {
                 const maxIInTier = urls.items.len;
 
@@ -438,7 +460,7 @@ pub fn useNextUrl(self: *Tracker, alloc: std.mem.Allocator) !void {
     };
 }
 
-pub fn nextNewPeer(self: *Tracker) ?std.net.Address {
+pub fn nextNewPeer(self: *Tracker) ?std.Io.net.IpAddress {
     if (self.addr_current >= self.addrs.items.len) {
         return null;
     }
@@ -470,12 +492,14 @@ pub fn timeout(self: *const Tracker) u32 {
     };
 }
 
-pub fn generatePeerId() [20]u8 {
+pub fn generatePeerId(io: std.Io) [20]u8 {
     var id: [20]u8 = undefined;
 
     @memcpy(id[0..8], "-TZ0001-");
 
-    var random: std.Random.DefaultPrng = .init(@intCast(std.time.milliTimestamp()));
+    var random: std.Random.DefaultPrng = .init(
+        @intCast(@max(0, std.Io.Timestamp.now(io, .real).toMilliseconds())),
+    );
     for (8..20) |i| {
         const char = random.random().intRangeAtMost(u8, '0', 'Z');
         id[i] = char;

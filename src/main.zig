@@ -56,18 +56,23 @@ comptime {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var heap: Heap = .init();
     defer heap.deinit();
-
     const alloc = heap.alloc();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const args = try init.args.toSlice(arena.allocator());
 
-    const stdout = std.fs.File.stdout();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
+    const stdout = std.Io.File.stdout();
     var stdout_buf: [256]u8 = undefined;
-    var out = stdout.writer(&stdout_buf);
+    var out = stdout.writer(io, &stdout_buf);
     defer out.interface.flush() catch {};
 
     if (args.len < 2) {
@@ -99,7 +104,7 @@ pub fn main() !void {
 
     const torrent_path = args[2];
 
-    const peer_id = tozi.Tracker.generatePeerId();
+    const peer_id = tozi.Tracker.generatePeerId(io);
 
     var loop: tozi.KQ = try .init();
     defer loop.deinit();
@@ -108,18 +113,22 @@ pub fn main() !void {
         var magnet: tozi.Magnet = try .parse(alloc, torrent_path);
         defer magnet.deinit(alloc);
 
-        try tozi.downloadMagnet(.{ .alloc = alloc, .loop = &loop }, peer_id, &magnet);
+        try tozi.downloadMagnet(.{
+            .alloc = alloc,
+            .io = io,
+            .loop = &loop,
+        }, peer_id, &magnet);
 
-        break :blk try .fromMagnet(alloc, &magnet);
+        break :blk try .fromMagnet(alloc, io, &magnet);
     } else blk: {
-        const file = std.fs.cwd().openFile(torrent_path, .{}) catch {
+        const file = std.Io.Dir.cwd().openFile(io, torrent_path, .{}) catch {
             std.log.err("failed openning {s} file", .{torrent_path});
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
         var buf: [32 * 1024]u8 = undefined;
-        var reader = file.reader(&buf);
+        var reader = file.reader(io, &buf);
         const contents = try reader.interface.allocRemaining(alloc, .limited(std.math.maxInt(u32)));
         defer alloc.free(contents);
 
@@ -133,23 +142,28 @@ pub fn main() !void {
         return;
     }
 
-    var files: tozi.Files = try .init(alloc, torrent.files.items);
-    defer files.deinit(alloc);
+    var files: tozi.Files = try .init(alloc, io, torrent.files.items);
+    defer files.deinit(alloc, io);
 
     var pieces: tozi.PieceManager = if (command == .verify or command == .@"continue") blk: {
-        var start = std.time.Timer.start() catch unreachable;
+        var start = std.Io.Timestamp.now(io, .real);
 
         var bitset = try files.collectPieces(alloc, torrent.pieces, torrent.piece_len);
         defer bitset.deinit(alloc);
 
-        const duration = start.read();
-        const durationInS = @as(f64, @floatFromInt(start.read())) / std.time.ns_per_s;
+        const duration = start.untilNow(io, .real);
+        const durationInMs: f64 = @floatFromInt(@max(0, duration.toMilliseconds()));
         const mb = @as(f64, @floatFromInt(files.totalSize)) / (1024.0 * 1024.0);
 
-        std.log.info("verified {d:.2} MB in {D} ({d:.2} MB/s)", .{
+        const speed = if (durationInMs > 0)
+            (mb * 1000.0) / durationInMs
+        else
+            std.math.inf(f64);
+
+        std.log.info("verified {d:.2} MB in {f} ({d:.2} MB/s)", .{
             mb,
             duration,
-            mb / durationInS,
+            speed,
         });
 
         if (bitset.count() == bitset.bit_length) {
@@ -164,7 +178,7 @@ pub fn main() !void {
         return;
     }
 
-    var start = std.time.Timer.start() catch unreachable;
+    var start = std.Io.Timestamp.now(io, .real);
 
     var ticker = tozi.Ticker{
         .tick = 3,
@@ -174,13 +188,14 @@ pub fn main() !void {
 
     try tozi.downloadTorrent(.{
         .alloc = alloc,
+        .io = io,
         .files = &files,
         .pieces = &pieces,
         .ticker = &ticker,
         .loop = &loop,
     }, peer_id, &torrent);
 
-    std.log.info("finished in: {D}", .{start.read()});
+    std.log.info("finished in: {f}", .{start.untilNow(io, .real)});
 }
 
 fn printHelp(out: *std.Io.Writer) !void {

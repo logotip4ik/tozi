@@ -27,14 +27,14 @@ pub fn init() !KQ {
         else => @compileError("unsupported target"),
     };
 
-    const kqueue = try std.posix.kqueue();
-    errdefer std.posix.close(kqueue);
+    const kqueue = std.posix.system.kqueue();
+    errdefer std.posix.system.close(kqueue);
 
     return .{ .fd = kqueue };
 }
 
 pub fn deinit(self: *KQ) void {
-    std.posix.close(self.fd);
+    std.Io.Threaded.closeFd(self.fd);
 }
 
 /// adds one time timer, that will fire event after `wait` in **milliseconds**
@@ -196,7 +196,8 @@ pub inline fn disable(self: *KQ, socket: std.posix.fd_t, comptime kind: Kind) !v
 const NextError = error{
     FFlags,
     ConnectionRefused,
-} || std.posix.KEventError;
+    Unexpected,
+};
 
 const CustomEvent = struct {
     ident: usize,
@@ -217,10 +218,15 @@ const EV_EOF = switch (builtin.target.os.tag) {
 
 pub fn next(self: *KQ) NextError!?CustomEvent {
     while (self.evs_index >= self.evs_count) {
-        const count = try std.posix.kevent(self.fd, self.changes[0..self.changes_count], &self.evs, null);
+        const rc = std.posix.system.kevent(self.fd, &self.changes, @intCast(self.changes_count), &self.evs, self.evs.len, null);
+        const count: u16 = switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .AGAIN => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        };
 
         self.evs_index = 0;
-        self.evs_count = @intCast(count);
+        self.evs_count = count;
         self.changes_count = 0;
     }
 
@@ -261,7 +267,29 @@ pub fn next(self: *KQ) NextError!?CustomEvent {
 fn emptyChangeList(self: *KQ) !void {
     utils.assert(self.changes_count == self.changes.len);
 
-    _ = try std.posix.kevent(self.fd, &self.changes, &.{}, null);
+    while (true) {
+        const rc = std.posix.system.kevent(
+            self.fd,
+            &self.changes,
+            std.math.cast(c_int, self.changes.len) orelse return error.Overflow,
+            &.{},
+            0,
+            null,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break,
+            .ACCES => return error.AccessDenied,
+            .FAULT => unreachable, // TODO use error.Unexpected for these
+            .BADF => unreachable, // Always a race condition.
+            .INTR => continue, // TODO handle cancelation
+            .INVAL => unreachable,
+            .NOENT => return error.EventNotFound,
+            .NOMEM => return error.SystemResources,
+            .SRCH => return error.ProcessNotFound,
+            else => unreachable,
+        }
+    }
+
     self.changes_count = 0;
 }
 

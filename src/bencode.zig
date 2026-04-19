@@ -276,12 +276,12 @@ fn dumpWithOptions(self: Value, writer: *std.Io.Writer, indent: u8) void {
 
 pub fn dump(self: Value) void {
     var buf: [512]u8 = undefined;
-    const out = std.Progress.lockStderrWriter(&buf);
-    defer out.flush() catch {};
+    const out = std.debug.lockStderr(&buf);
+    defer out.file_writer.interface.flush() catch {};
 
-    out.print("======= VALUE DUMP =======\n", .{}) catch unreachable;
+    out.file_writer.interface.print("======= VALUE DUMP =======\n", .{}) catch unreachable;
 
-    self.dumpWithOptions(out, 0);
+    self.dumpWithOptions(&out.file_writer.interface, 0);
 }
 
 test "parseValue string" {

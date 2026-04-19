@@ -41,8 +41,10 @@ pub const Posix = struct {
     fn read(s: *Socket, buf: []u8) ReadError!?usize {
         const p: *const Posix = @fieldParentPtr("interface", s);
 
-        const n = std.posix.read(p.fd, buf) catch |err| switch (err) {
-            error.WouldBlock => return null,
+        const rc = std.posix.system.read(p.fd, buf.ptr, buf.len);
+        const n: usize = switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .AGAIN => return null,
             else => return ReadError.ReadFailed,
         };
 
@@ -56,8 +58,10 @@ pub const Posix = struct {
     fn write(s: *Socket, buf: []const u8) WriteError!?usize {
         const p: *const Posix = @fieldParentPtr("interface", s);
 
-        const n = std.posix.write(p.fd, buf) catch |err| switch (err) {
-            error.WouldBlock => return null,
+        const rc = std.posix.system.write(p.fd, buf.ptr, buf.len);
+        const n: usize = switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .AGAIN => return null,
             else => return WriteError.WriteFailed,
         };
 

@@ -5,11 +5,11 @@ const utils = @import("utils.zig");
 
 added: std.array_list.Aligned(AddedEntry, null) = .empty,
 
-dropped: std.array_list.Aligned(std.net.Address, null) = .empty,
+dropped: std.array_list.Aligned(std.Io.net.IpAddress, null) = .empty,
 
 const Pex = @This();
 
-const AddedEntry = struct { addr: std.net.Address, flags: PexFlagByte };
+const AddedEntry = struct { addr: std.Io.net.IpAddress, flags: PexFlagByte };
 
 pub const TIMEOUT_DEFAULT = 60 * std.time.ms_per_s;
 

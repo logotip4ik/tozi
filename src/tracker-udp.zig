@@ -3,9 +3,7 @@ const builtin = @import("builtin");
 
 const utils = @import("utils.zig");
 const Socket = @import("socket.zig");
-const Stats = @import("tracker-utils.zig").Stats;
-const connectToAddress = @import("tracker-utils.zig").connectToAddress;
-const AnnounceResponse = @import("tracker-utils.zig").AnnounceResponse;
+const tracker_utils = @import("tracker-utils.zig");
 
 state: State,
 
@@ -45,68 +43,65 @@ const Event = enum(u32) {
 const MAGIC = 0x41727101980;
 
 pub fn init(
+    self: *TrackerUdp,
     alloc: std.mem.Allocator,
+    io: std.Io,
     opts: struct {
         seed: ?u64 = null,
-        fd: ?std.posix.socket_t = null,
         socket: ?*Socket = null,
         url: ?[]const u8 = null,
     },
-) !TrackerUdp {
-    var self = TrackerUdp{
+) !void {
+    const lastUseTime: u64 = @intCast(@max(0, std.Io.Clock.real.now(io).toMilliseconds()));
+    const transactionId = generateTransactionId(opts.seed orelse lastUseTime);
+
+    if (opts.socket) |socket| {
+        self.* = TrackerUdp{
+            .state = .prepare_connect,
+            .lastUseTime = lastUseTime,
+            .connectionId = undefined,
+            .transactionId = transactionId,
+            .socket = socket,
+            .buffer = try .initCapacity(alloc, 32),
+        };
+        return;
+    }
+
+    const url = opts.url orelse unreachable;
+    utils.assert(utils.isUdp(url));
+
+    const uri: std.Uri = try .parse(url);
+    const port: u16 = uri.port orelse return error.MissingPort;
+
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = try uri.getHost(&host_buffer);
+
+    const socket = blk: {
+        const stream = try host.connect(io, port, .{ .mode = .dgram, .protocol = .udp });
+        const socket: std.posix.fd_t = @intCast(stream.socket.handle);
+        try tracker_utils.setNonBlock(socket);
+        break :blk socket;
+    };
+    errdefer std.Io.Threaded.closeFd(socket);
+
+    self.* = TrackerUdp{
         .state = .prepare_connect,
-        .lastUseTime = @intCast(std.time.microTimestamp()),
+        .lastUseTime = lastUseTime,
         .connectionId = undefined,
-        .transactionId = undefined,
+        .transactionId = transactionId,
+        .socketPosix = .init(socket),
         .socket = undefined,
         .buffer = try .initCapacity(alloc, 32),
     };
     errdefer self.buffer.deinit();
 
-    self.transactionId = generateTransactionId(opts.seed orelse self.lastUseTime);
-
-    if (opts.fd) |fd| {
-        self.socketPosix = .init(fd);
-        self.socket = &self.socketPosix.?.interface;
-    } else if (opts.socket) |socket| {
-        self.socket = socket;
-    } else if (opts.url) |url| {
-        utils.assert(utils.isUdp(url));
-
-        const uri: std.Uri = try .parse(url);
-
-        var hostBuffer: [std.Uri.host_name_max]u8 = undefined;
-        const host = try uri.getHost(&hostBuffer);
-        const port: u16 = uri.port orelse return error.MissingPort;
-
-        const list = try std.net.getAddressList(alloc, host, port);
-        defer list.deinit();
-
-        if (list.addrs.len == 0) return error.UnknownHostName;
-
-        const socket = blk: {
-            for (list.addrs) |addr| {
-                break :blk connectToAddress(addr, .udp) catch |err| switch (err) {
-                    error.ConnectionRefused => continue,
-                    else => return err,
-                };
-            }
-            return std.posix.ConnectError.ConnectionRefused;
-        };
-
-        self.socketPosix = .init(socket);
-        self.socket = &self.socketPosix.?.interface;
-    } else {
-        unreachable;
-    }
-
-    return self;
+    self.socket = &self.socketPosix.?.interface;
 }
 
 pub fn deinit(self: *TrackerUdp, _: std.mem.Allocator) void {
     self.buffer.deinit();
 
-    if (self.socketPosix) |x| std.posix.close(x.fd);
+    if (self.socketPosix) |x| std.Io.Threaded.closeFd(x.fd);
 }
 
 pub fn prepareConnect(self: *TrackerUdp) !void {
@@ -164,7 +159,7 @@ pub fn readConnect(self: *TrackerUdp) !?void {
     }
 }
 
-pub fn prepareAnnounce(self: *TrackerUdp, stats: *const Stats) !void {
+pub fn prepareAnnounce(self: *TrackerUdp, stats: *const tracker_utils.Stats) !void {
     utils.assert(self.state == .prepare_announce);
 
     const w = &self.buffer.writer;
@@ -205,7 +200,7 @@ pub fn sendAnnounce(self: *TrackerUdp) !?void {
     self.state = .read_announce;
 }
 
-pub fn readAnnounce(self: *TrackerUdp, alloc: std.mem.Allocator, announce: *AnnounceResponse) !?void {
+pub fn readAnnounce(self: *TrackerUdp, alloc: std.mem.Allocator, announce: *tracker_utils.AnnounceResponse) !?void {
     utils.assert(self.state == .read_announce);
 
     const max_message_len = 4 * 1024;
@@ -306,7 +301,7 @@ test "prepareAnnounce" {
     var peerId: [20]u8 = undefined;
     @memcpy(&peerId, &([_]u8{2} ** 20));
 
-    const stats: Stats = .{
+    const stats: tracker_utils.Stats = .{
         .info_hash = infoHash,
         .peer_id = peerId,
         .port = 6881,
@@ -406,7 +401,7 @@ test "readAnnounce response" {
 
     try socket.addInBytes(&response);
 
-    var announce: AnnounceResponse = .{ .interval = 0 };
+    var announce: tracker_utils.AnnounceResponse = .{ .interval = 0 };
     defer announce.deinit(alloc);
 
     _ = try t.readAnnounce(alloc, &announce);

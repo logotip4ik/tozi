@@ -7,6 +7,7 @@ const PieceManager = @import("piece-manager.zig");
 const Handshake = @import("handshake.zig");
 const Socket = @import("socket.zig");
 const Pex = @import("pex.zig");
+const tracker_utils = @import("tracker-utils.zig");
 
 const Peer = @This();
 
@@ -17,7 +18,7 @@ const DEFAULT_ALLOWED_FAST = 10;
 
 id: u32,
 
-address: std.net.Address,
+address: std.Io.net.IpAddress,
 
 socket: Socket.Posix,
 
@@ -46,7 +47,7 @@ extended_map: Handshake.Extended.Map = .{},
 
 allowed_fast: std.array_list.Aligned(u32, null),
 
-pex_sent_addresses: std.array_list.Aligned(std.net.Address, null) = .empty,
+pex_sent_addresses: std.array_list.Aligned(std.Io.net.IpAddress, null) = .empty,
 
 pub const State = union(enum) {
     readHandshake,
@@ -70,19 +71,13 @@ pub const State = union(enum) {
     }
 };
 
-pub fn initPtr(self: *Peer, alloc: std.mem.Allocator, addr: std.net.Address) !void {
-    const fd = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-        std.posix.IPPROTO.TCP,
-    );
-    errdefer std.posix.close(fd);
-
+pub fn initPtr(
+    self: *Peer,
+    alloc: std.mem.Allocator,
+    addr: std.Io.net.IpAddress,
+) !void {
+    const fd = try tracker_utils.connectToAddress(&addr, .tcp);
     std.log.debug("peer: {d} connecting to {f}", .{ fd, addr });
-    std.posix.connect(@intCast(fd), &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => return err,
-    };
 
     self.* = .{
         .id = next_id,
@@ -107,7 +102,7 @@ pub fn deinit(self: *Peer, alloc: std.mem.Allocator) void {
     if (self.bitfield) |*x| x.deinit(alloc);
     if (self.working_on) |*x| x.deinit(alloc);
 
-    std.posix.close(self.socket.fd);
+    std.Io.Threaded.closeFd(self.socket.fd);
     self.* = undefined;
 }
 
@@ -389,7 +384,7 @@ pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !
         if (!other_peer.state.isConnected() or other_peer == self) continue;
 
         for (self.pex_sent_addresses.items) |sent| {
-            if (sent.eql(other_peer.address)) continue :outer;
+            if (sent.eql(&other_peer.address)) continue :outer;
         }
 
         const seed = if (other_peer.bitfield) |bitfield|
@@ -413,7 +408,7 @@ pub fn computePex(self: *Peer, alloc: std.mem.Allocator, other_peers: []*Peer) !
 
         const sent = self.pex_sent_addresses.items[i];
         for (other_peers) |other_peer| {
-            if (other_peer.state.isConnected() and other_peer.address.eql(sent)) continue :outer;
+            if (other_peer.state.isConnected() and other_peer.address.eql(&sent)) continue :outer;
         }
 
         try pex.dropped.append(alloc, sent);

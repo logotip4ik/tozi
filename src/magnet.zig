@@ -12,7 +12,7 @@ display_name: []const u8 = "",
 
 trackers: std.array_list.Aligned([]const u8, null) = .empty,
 
-peers: std.array_list.Aligned(std.net.Address, null) = .empty,
+peers: std.array_list.Aligned(std.Io.net.IpAddress, null) = .empty,
 
 buffer: ?[]u8 = null,
 
@@ -96,7 +96,7 @@ pub fn parse(alloc: std.mem.Allocator, link: []const u8) !Magnet {
             }
 
             const port = std.fmt.parseInt(u16, port_str, 10) catch return error.CorruptMagnetLink;
-            const address = std.net.Address.parseIp(host, port) catch return error.CorruptMagnetLink;
+            const address = std.Io.net.IpAddress.parse(host, port) catch return error.CorruptMagnetLink;
 
             try magnet.peers.append(alloc, address);
         }
