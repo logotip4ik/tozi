@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 pub const Torrent = @import("torrent.zig");
 pub const PieceManager = @import("piece-manager.zig");
@@ -20,7 +21,7 @@ const ENABLE_FAST = true;
 const ENABLE_EXTENSION = true;
 const ENABLE_PEX = true;
 const PEERS_MAX = 30;
-const CLIENT_NAME = "Tozi 1.0";
+const CLIENT_NAME = std.fmt.comptimePrint("Tozi {f}", .{build_options.version});
 const WORKER_MESSAGE_SIZE = 20;
 
 const tg = utils.TaggedPointer(union(enum) {

@@ -239,5 +239,5 @@ fn printHelp(out: *std.Io.Writer) !void {
 }
 
 fn printVersion(out: *std.Io.Writer) !void {
-    try out.print("{f} {t}\n", .{ build_options.version, builtin.mode });
+    try out.print("tozi {f} {t}\nzig {f} \n", .{ build_options.version, builtin.mode, builtin.zig_version });
 }
