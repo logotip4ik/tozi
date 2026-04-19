@@ -5,6 +5,14 @@
   <sub align="center">pronounced as TOZ-ee</sub>
 </p>
 
+## Installation
+
+```
+copper install tozi
+```
+
+or download executable from [latest release page](https://github.com/logotip4ik/tozi/releases/latest).
+
 ## Usage
 
 ```
